@@ -11,7 +11,8 @@ The macOS AArch64 RCC release statically links selected components built from
 `LLVM-22.1.8-macOS-ARM64.tar.xz` release:
 
 - Clang 22.1.8 C/C++ compiler driver and Clang resource headers;
-- LLD 22.1.8, exposed by RCC as the Mach-O linker `ld64.lld`;
+- LLD 22.1.8, exposed by RCC as the Mach-O linker `ld64.lld` and the ELF linker
+  `ld.lld`;
 - LLVM `llvm-ar` and `llvm-ranlib` 22.1.8;
 - libc++ 22.1.8 headers;
 - compiler-rt 22.1.8 runtime artifacts carried in the Clang resource directory.
@@ -40,6 +41,26 @@ library so compile-and-link frontend work remains inside the statically integrat
 patch SHA-256 and purpose are recorded in the source lock file. Resource files are otherwise copied
 without source modification. Upstream symbolic-link aliases are dereferenced into ordinary files
 because RCC packs reject symbolic links and bind each payload file to a digest.
+
+## musl 1.2.5
+
+The macOS AArch64 RCC release also carries a hermetic `linux-x86_64-musl-static`
+sysroot built from the official `musl-1.2.5.tar.gz` release, plus `compiler-rt`
+builtins and CRT objects (`clang_rt.crtbegin` / `clang_rt.crtend`) for
+`x86_64-unknown-linux-musl` built from the same pinned LLVM 22.1.8 source archive.
+
+Upstream project: <https://musl.libc.org/>
+
+Release tag: `v1.2.5`
+
+Source archive SHA-256: `a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4`
+
+License: MIT.
+
+The musl copyright notice is copied into the generated payload at
+`licenses/MUSL-COPYRIGHT`. Source URL, digest and default static-build identity
+are recorded in `toolchains/musl-1.2.5.lock.json` and included in the resource
+payload.
 
 ## Apple SDK and operating-system components
 

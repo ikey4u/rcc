@@ -74,6 +74,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-rcc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rcc-core",
+ "serde_json",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

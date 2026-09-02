@@ -1,0 +1,12 @@
+[package]
+name = "openssl-linux-example"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Minimal openssl-vendored crate used to exercise cargo-rcc linux x86_64 builds"
+
+[workspace]
+
+[dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

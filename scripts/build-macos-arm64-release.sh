@@ -1,7 +1,15 @@
 #!/bin/sh
 set -eu
 
+musl_archive=${RCC_MUSL_SOURCE_ARCHIVE:-}
+
 case "$#" in
+    4)
+        bootstrap_archive=$1
+        source_archive=$2
+        musl_archive=$3
+        output=$4
+        ;;
     3)
         bootstrap_archive=$1
         source_archive=$2
@@ -13,23 +21,32 @@ case "$#" in
         output=$2
         if [ -z "$source_archive" ]; then
             echo "the LLVM source archive is required for static integration" >&2
-            echo "usage: $0 <LLVM binary archive> <LLVM source archive> <new-output-dir>" >&2
+            echo "usage: $0 <LLVM binary archive> <LLVM source archive> <musl archive> <new-output-dir>" >&2
             echo "legacy two-argument form: set RCC_LLVM_SOURCE_ARCHIVE" >&2
+            echo "musl archive may also be passed via RCC_MUSL_SOURCE_ARCHIVE" >&2
             exit 64
         fi
         ;;
     *)
-        echo "usage: $0 <LLVM binary archive> <LLVM source archive> <new-output-dir>" >&2
+        echo "usage: $0 <LLVM binary archive> <LLVM source archive> <musl archive> <new-output-dir>" >&2
+        echo "legacy three-argument form: set RCC_MUSL_SOURCE_ARCHIVE" >&2
         exit 64
         ;;
 esac
+
+if [ -z "$musl_archive" ]; then
+    echo "the musl 1.2.5 source archive is required for linux-x86_64-musl-static" >&2
+    echo "download: https://musl.libc.org/releases/musl-1.2.5.tar.gz" >&2
+    echo "pass it as the third argument or set RCC_MUSL_SOURCE_ARCHIVE" >&2
+    exit 64
+fi
 
 bootstrap_expected_sha256=f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f
 source_expected_sha256=922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888
 bootstrap_root=LLVM-22.1.8-macOS-ARM64
 source_root=llvm-project-22.1.8.src
 
-for archive in "$bootstrap_archive" "$source_archive"; do
+for archive in "$bootstrap_archive" "$source_archive" "$musl_archive"; do
     if [ ! -f "$archive" ]; then
         echo "archive is not a regular file: $archive" >&2
         exit 66
@@ -67,15 +84,20 @@ fi
 mkdir -p "$output"
 output=$(CDPATH= cd -- "$output" && pwd)
 
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/rcc-static-llvm.XXXXXX")
-cleanup() {
-    rm -R "$temporary"
-}
-trap cleanup EXIT HUP INT TERM
+# Keep the patched LLVM tree and ninja build under inner/ so a later-stage
+# failure does not throw away a finished engine compile.
+temporary=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine}
+mkdir -p "$temporary"
+temporary=$(CDPATH= cd -- "$temporary" && pwd)
 
-echo "extracting pinned LLVM bootstrap and source archives"
-tar -xf "$bootstrap_archive" -C "$temporary"
-tar -xf "$source_archive" -C "$temporary"
+if [ ! -x "$temporary/$bootstrap_root/bin/clang++" ]; then
+    echo "extracting pinned LLVM bootstrap archive"
+    tar -xf "$bootstrap_archive" -C "$temporary"
+fi
+if [ ! -d "$temporary/$source_root/llvm" ]; then
+    echo "extracting pinned LLVM source archive"
+    tar -xf "$source_archive" -C "$temporary"
+fi
 
 bootstrap_prefix=$temporary/$bootstrap_root
 source_directory=$temporary/$source_root
@@ -92,13 +114,19 @@ if ! command -v patch >/dev/null 2>&1; then
     echo "patch is required to apply the pinned RCC Clang integration patch" >&2
     exit 69
 fi
-echo "applying pinned RCC Clang static-integration patch"
-patch -d "$source_directory" -p1 < "$engine_patch"
+if grep -q "RCC statically integrates the Clang frontend" \
+    "$source_directory/clang/lib/Driver/Driver.cpp"
+then
+    echo "pinned RCC Clang static-integration patch already applied"
+else
+    echo "applying pinned RCC Clang static-integration patch"
+    patch -d "$source_directory" -p1 < "$engine_patch"
+fi
 
 cmake_command=${RCC_LLVM_CMAKE:-cmake}
 ninja_command=${RCC_LLVM_NINJA:-ninja}
 build_jobs=${RCC_LLVM_BUILD_JOBS:-8}
-targets_to_build=${RCC_LLVM_TARGETS_TO_BUILD:-AArch64}
+targets_to_build=${RCC_LLVM_TARGETS_TO_BUILD:-AArch64;X86}
 build_type=${RCC_LLVM_BUILD_TYPE:-MinSizeRel}
 llvm_lto=${RCC_LLVM_LTO:-OFF}
 deployment_target=${RCC_MACOS_DEPLOYMENT_TARGET:-11.0}
@@ -224,7 +252,9 @@ fi
 "$@"
 
 echo "building static Clang, LLD and llvm-ar libraries"
-"$ninja_command" -C "$llvm_build_directory" -j "$build_jobs" clang lld llvm-ar llvm-config
+"$ninja_command" -C "$llvm_build_directory" -j "$build_jobs" \
+    clang lld llvm-ar llvm-config \
+    lib/libLLVMMCA.a lib/libLLVMX86TargetMCA.a lib/libLLVMDTLTO.a
 
 cargo build \
     --manifest-path "$repository/Cargo.toml" \
@@ -235,6 +265,11 @@ cargo build \
 stage=$output/stage
 pack=$output/llvm-22.1.8-macos-arm64.rccpack
 "$script_directory/stage-llvm-macos-arm64.sh" "$bootstrap_archive" "$stage"
+"$script_directory/stage-linux-x86_64-musl.sh" \
+    "$musl_archive" \
+    "$bootstrap_prefix" \
+    "$source_directory" \
+    "$stage"
 
 "$repository/target/release/rcc-pack" create \
     "$stage" \
@@ -243,7 +278,8 @@ pack=$output/llvm-22.1.8-macos-arm64.rccpack
     --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
     --host aarch64-apple-darwin \
     --profile macos-aarch64 \
-    --profile host-macos-aarch64
+    --profile host-macos-aarch64 \
+    --profile linux-x86_64-musl-static
 "$repository/target/release/rcc-pack" verify "$pack"
 
 RCC_LLVM_BUILD_DIR="$llvm_build_directory" \

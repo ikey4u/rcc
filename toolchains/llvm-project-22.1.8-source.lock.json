@@ -11,7 +11,7 @@
   "default_static_build": {
     "host": "aarch64-apple-darwin",
     "projects": ["clang", "lld"],
-    "targets_to_build": ["AArch64"],
+    "targets_to_build": ["AArch64", "X86"],
     "build_type": "MinSizeRel",
     "macos_deployment_target": "11.0",
     "lto": "OFF",

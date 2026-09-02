@@ -548,6 +548,13 @@ fn trusted_arguments(
                 .context("macOS profile has no minimum OS")?
         ));
     }
+    if profile.os == "linux" {
+        arguments.push("--rtlib=compiler-rt".into());
+        arguments.push("-unwindlib=none".into());
+        if profile.crt_mode == "static" {
+            arguments.push("-static".into());
+        }
+    }
     Ok(arguments)
 }
 
@@ -632,6 +639,70 @@ mod tests {
         tampered.injected_args.get_mut(&ToolKind::Cc).unwrap()[0] =
             format!("--target={ROOT_BINDING_TOKEN}/attacker");
         assert!(validate_view_binding(&tampered).is_err());
+    }
+
+    #[test]
+    fn binds_linux_musl_sysroot_from_the_resource_pack() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let profile = registry::resolve_target_profile("linux-x86_64-musl-static").unwrap();
+        for directory in [
+            "lib/clang/22",
+            "lib/c++/v1",
+            "sysroots/linux-x86_64-musl-static/usr/include",
+            "sysroots/linux-x86_64-musl-static/usr/lib",
+        ] {
+            fs::create_dir_all(source.join(directory)).unwrap();
+        }
+        fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
+        fs::write(source.join("lib/c++/v1/vector"), b"header").unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-musl-static/usr/include/stdio.h"),
+            b"stdio",
+        )
+        .unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-musl-static/usr/lib/libc.a"),
+            b"libc",
+        )
+        .unwrap();
+        let pack = create_pack(
+            &source,
+            &temporary.path().join("fixture.rccpack"),
+            &PackOptions::new(
+                "fixture",
+                "r1",
+                "aarch64-apple-darwin",
+                [profile.profile_id.as_str()],
+            ),
+        )
+        .unwrap();
+        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract = contracts::resolve(profile, contracts::RUSTC_LINUX_MUSL_V0).unwrap();
+        let controller = materializer
+            .persist_controller(&controller_fixture(temporary.path()))
+            .unwrap();
+        let view = build_view_manifest(
+            &materializer,
+            &pack,
+            profile,
+            &contract,
+            &ControllerIdentity::new(
+                &"11".repeat(32),
+                &controller,
+                "llvm-22.1.8-aarch64-x86-minsize",
+            ),
+            None,
+        )
+        .unwrap();
+        assert!(view.sysroot.contains("sysroots/linux-x86_64-musl-static"));
+        let injected = &view.injected_args[&ToolKind::Cc];
+        assert!(injected
+            .iter()
+            .any(|argument| argument == "--rtlib=compiler-rt"));
+        assert!(injected.iter().any(|argument| argument == "-static"));
+        assert_eq!(view.runtime_contract.contract_id, "rustc-linux-musl-v0");
+        validate_view_binding(&view).unwrap();
     }
 
     #[test]

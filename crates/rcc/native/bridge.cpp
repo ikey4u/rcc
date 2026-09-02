@@ -1,7 +1,9 @@
 #include "lld/Common/Driver.h"
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/LLVMDriver.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <vector>
@@ -12,6 +14,7 @@ int llvm_ar_main(int argc, char **argv,
                  const llvm::ToolContext &tool_context);
 
 LLD_HAS_DRIVER(macho)
+LLD_HAS_DRIVER(elf)
 
 namespace {
 
@@ -23,6 +26,14 @@ llvm::ToolContext context_for(const char *argv0) {
   // The absolute multicall alias is both the logical tool name and the real
   // executable path. Clang can therefore re-exec the same RCC image for LLD.
   return {argv0, nullptr, false};
+}
+
+llvm::StringRef launcher_basename(const char *argv0) {
+  return llvm::sys::path::filename(llvm::StringRef(argv0));
+}
+
+bool is_elf_linker_alias(llvm::StringRef basename) {
+  return basename == "ld.lld" || basename == "ld";
 }
 
 } // namespace
@@ -38,11 +49,13 @@ extern "C" int rcc_lld_main(int argc,
   if (!valid_arguments(argc, argv, argv == nullptr ? nullptr : argv[0]))
     return 64;
 
-  const lld::DriverDef drivers[] = {{lld::Darwin, &lld::macho::link}};
+  const bool elf = is_elf_linker_alias(launcher_basename(argv[0]));
+  const lld::DriverDef drivers[] = {{lld::Darwin, &lld::macho::link},
+                                    {lld::Gnu, &lld::elf::link}};
   std::vector<const char *> arguments(argv, argv + argc);
-  // The profile-facing alias is named `linker`; give LLD its canonical
-  // flavor name so dispatch never depends on filename heuristics.
-  arguments[0] = "ld64.lld";
+  // Give LLD its canonical flavor name so dispatch never depends on the
+  // profile-facing `linker` alias.
+  arguments[0] = elf ? "ld.lld" : "ld64.lld";
   const auto result = lld::lldMain(
       llvm::ArrayRef<const char *>(arguments), llvm::outs(), llvm::errs(),
       drivers);

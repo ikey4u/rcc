@@ -105,7 +105,6 @@ const JOINED_OPTIONS: &[&str] = &[
 const EXACT_OPTIONS: &[&str] = &[
     "-Xpreprocessor",
     "-m32",
-    "-m64",
     "-mx32",
     "-fno-integrated-as",
     "-no-integrated-as",
@@ -220,6 +219,7 @@ pub fn prepare_invocation_with_forbidden(
         });
     }
 
+    let expanded = strip_user_flags_that_restate_injected(&expanded, injected_arguments);
     validate_user_arguments(&expanded)?;
     validate_manifest_forbidden_arguments(&expanded, manifest_forbidden_arguments)?;
     let mut arguments = Vec::with_capacity(injected_arguments.len() + expanded.len());
@@ -229,6 +229,52 @@ pub fn prepare_invocation_with_forbidden(
         arguments,
         query: None,
     })
+}
+
+/// cc-rs and OpenSSL restate `--target=` that the profile already injects.
+/// Matching restatements are dropped; a different target remains forbidden.
+fn strip_user_flags_that_restate_injected(
+    user_arguments: &[OsString],
+    injected_arguments: &[String],
+) -> Vec<OsString> {
+    let injected_targets: HashSet<&str> = injected_arguments
+        .iter()
+        .filter_map(|argument| {
+            argument
+                .strip_prefix("--target=")
+                .or_else(|| argument.strip_prefix("-target="))
+        })
+        .collect();
+    if injected_targets.is_empty() {
+        return user_arguments.to_vec();
+    }
+
+    let mut stripped = Vec::with_capacity(user_arguments.len());
+    let mut index = 0usize;
+    while index < user_arguments.len() {
+        let current = &user_arguments[index];
+        let text = current.to_str().unwrap_or("");
+        if let Some(target) = text
+            .strip_prefix("--target=")
+            .or_else(|| text.strip_prefix("-target="))
+        {
+            if injected_targets.contains(target) {
+                index += 1;
+                continue;
+            }
+        }
+        if (text == "--target" || text == "-target") && index + 1 < user_arguments.len() {
+            if let Some(target) = user_arguments[index + 1].to_str() {
+                if injected_targets.contains(target) {
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        stripped.push(current.clone());
+        index += 1;
+    }
+    stripped
 }
 
 pub fn validate_manifest_forbidden_arguments(
@@ -939,11 +985,10 @@ where
 
 pub fn reject_polluting_environment(extra_forbidden: &[String]) -> Result<()> {
     let found = find_polluting_environment(env::vars_os(), extra_forbidden);
-    if !found.is_empty() {
-        bail!(
-            "polluting toolchain environment is not allowed: {}",
-            found.join(", ")
-        );
+    // Strip rather than abort. Host Cargo/rustc/Xcode always inject SDKROOT and
+    // DYLD_* into build scripts; hermeticity means Clang must not honor them.
+    for name in found {
+        env::remove_var(name);
     }
     Ok(())
 }
@@ -1164,6 +1209,7 @@ mod tests {
             "-c",
             "source.c",
             "-O2",
+            "-m64",
             "-Iworkspace/include",
             "-Lworkspace/lib",
             "-Wl,--gc-sections",
@@ -1185,6 +1231,26 @@ mod tests {
             prepared.arguments,
             os(&["--target=trusted", "--sysroot=/trusted", "-c", "source.c"])
         );
+    }
+
+    #[test]
+    fn drops_user_target_flags_that_match_the_injected_triple() {
+        let prepared = prepare_invocation(
+            &os(&["--target=x86_64-unknown-linux-musl", "-c", "source.c"]),
+            &["--target=x86_64-unknown-linux-musl".into()],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&["--target=x86_64-unknown-linux-musl", "-c", "source.c"])
+        );
+        assert!(prepare_invocation(
+            &os(&["--target=aarch64-unknown-linux-musl", "-c", "source.c"]),
+            &["--target=x86_64-unknown-linux-musl".into()],
+            Path::new("."),
+        )
+        .is_err());
     }
 
     #[test]

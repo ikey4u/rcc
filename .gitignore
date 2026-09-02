@@ -1,5 +1,8 @@
 /target/
 dist/
+/inner/
 /.rcc-cache/
 *.rccpack
 .DS_Store
+examples/openssl-linux/target/
+examples/openssl-linux/Cargo.lock

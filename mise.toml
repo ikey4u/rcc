@@ -1,10 +1,12 @@
 # RCC developer and release tasks. List them with `mise tasks`.
 #
-# A distributable macOS release needs the two pinned LLVM archives and a new
-# output directory:
+# Pinned LLVM/musl archives and the LLVM engine work tree live in inner/
+# (gitignored; reused by later release builds):
+#   mise run fetch:archives
 #   mise run build:release -- \
-#     /path/to/LLVM-22.1.8-macOS-ARM64.tar.xz \
-#     /path/to/llvm-project-22.1.8.src.tar.xz \
+#     inner/LLVM-22.1.8-macOS-ARM64.tar.xz \
+#     inner/llvm-project-22.1.8.src.tar.xz \
+#     inner/musl-1.2.5.tar.gz \
 #     /absolute/path/to/new-output-directory
 
 min_version = "2024.11.1"
@@ -13,6 +15,10 @@ min_version = "2024.11.1"
 # Cargo.toml enforces 1.85 as the MSRV; use the current stable toolchain for
 # normal development, including rustfmt and clippy.
 rust = { version = "stable", components = "rustfmt,clippy" }
+
+[tasks."fetch:archives"]
+description = "Download pinned LLVM bootstrap, LLVM source, and musl archives into inner/"
+run = "./scripts/fetch-pinned-archives.sh"
 
 [tasks.fetch]
 description = "Fetch the locked Rust dependency graph"
@@ -27,7 +33,7 @@ description = "Build the release rcc-pack utility"
 run = "cargo build --release --locked -p rcc-pack"
 
 [tasks."build:release"]
-description = "Build the static macOS AArch64 release; pass bootstrap archive, source archive, and a new output directory"
+description = "Build the static macOS AArch64 release with linux-x86_64-musl-static; pass bootstrap, LLVM source, musl, and a new output directory"
 depends = ["fetch"]
 # These are build-host tools only. The resulting rcc binary does not depend on
 # CMake, Ninja, or a system C/C++ compiler at runtime.
@@ -55,8 +61,11 @@ description = "Validate release scripts and pinned LLVM lock files"
 run = '''
 sh -n scripts/build-macos-arm64-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
+sh -n scripts/stage-linux-x86_64-musl.sh
+sh -n scripts/fetch-pinned-archives.sh
 python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
+python3 -m json.tool toolchains/musl-1.2.5.lock.json >/dev/null
 '''
 
 [tasks.check]
@@ -67,6 +76,9 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 sh -n scripts/build-macos-arm64-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
+sh -n scripts/stage-linux-x86_64-musl.sh
+sh -n scripts/fetch-pinned-archives.sh
 python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
+python3 -m json.tool toolchains/musl-1.2.5.lock.json >/dev/null
 '''

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "musl-1.2.5.tar.gz",
+  "role": "linux_x86_64_hermetic_sysroot",
+  "source": "https://musl.libc.org/releases/musl-1.2.5.tar.gz",
+  "sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+  "repository": "https://git.musl-libc.org/cgit/musl",
+  "tag": "v1.2.5",
+  "license": "MIT",
+  "default_static_build": {
+    "host": "aarch64-apple-darwin",
+    "target": "x86_64-unknown-linux-musl",
+    "shared": false,
+    "prefix": "/usr",
+    "compiler_rt": [
+      "libclang_rt.builtins-x86_64.a",
+      "clang_rt.crtbegin-x86_64.o",
+      "clang_rt.crtend-x86_64.o"
+    ]
+  }
+}

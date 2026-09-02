@@ -344,6 +344,23 @@ fn validate_and_sanitize_linker_binding(
                 output.extend_from_slice(&arguments[index..index + 2]);
                 index += 2;
             }
+            "--sysroot" | "-sysroot" => {
+                let value = arguments
+                    .get(index + 1)
+                    .with_context(|| format!("{argument} requires a path"))?;
+                ensure_bound_linker_sysroot(manifest, Path::new(value))?;
+                output.extend_from_slice(&arguments[index..index + 2]);
+                index += 2;
+            }
+            value if value.starts_with("--sysroot=") || value.starts_with("-sysroot=") => {
+                let path = value
+                    .split_once('=')
+                    .map(|(_, path)| path)
+                    .context("linker --sysroot= requires a path")?;
+                ensure_bound_linker_sysroot(manifest, Path::new(path))?;
+                output.push(arguments[index].clone());
+                index += 1;
+            }
             "-platform_version" => {
                 let values = arguments
                     .get(index + 1..index + 4)
@@ -374,6 +391,25 @@ fn validate_and_sanitize_linker_binding(
                 output.extend_from_slice(&arguments[index..index + 4]);
                 index += 4;
             }
+            "-m" => {
+                let value = arguments
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .context("-m requires a UTF-8 linker emulation")?;
+                let expected = match (manifest.profile.os.as_str(), manifest.profile.arch.as_str())
+                {
+                    ("linux", "x86_64") => "elf_x86_64",
+                    ("linux", "aarch64") => "aarch64elf",
+                    (os, arch) => bail!(
+                        "no bound ELF emulation for {os}/{arch}; linker -m {value} is not allowed"
+                    ),
+                };
+                if value != expected {
+                    bail!("linker emulation {value} does not match profile {expected}");
+                }
+                output.extend_from_slice(&arguments[index..index + 2]);
+                index += 2;
+            }
             _ => {
                 validate_direct_linker_arguments(&arguments[index..index + 1])?;
                 output.push(arguments[index].clone());
@@ -382,6 +418,21 @@ fn validate_and_sanitize_linker_binding(
         }
     }
     Ok(output)
+}
+
+fn ensure_bound_linker_sysroot(manifest: &ViewManifest, value: &Path) -> Result<()> {
+    let actual = fs::canonicalize(value)
+        .with_context(|| format!("failed to resolve linker sysroot {}", value.display()))?;
+    let expected = fs::canonicalize(&manifest.sysroot)
+        .with_context(|| format!("failed to resolve bound sysroot {}", manifest.sysroot))?;
+    if actual != expected {
+        bail!(
+            "linker sysroot {} does not match bound sysroot {}",
+            actual.display(),
+            expected.display()
+        );
+    }
+    Ok(())
 }
 
 fn valid_numeric_version(value: &str) -> bool {

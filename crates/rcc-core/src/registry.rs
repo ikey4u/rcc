@@ -254,6 +254,19 @@ fn unix_tools() -> &'static [ToolKind] {
     ]
 }
 
+fn linux_musl_tools() -> &'static [ToolKind] {
+    // The static engine currently exposes Clang, LLD, and llvm-ar/ranlib.
+    // objcopy/strip remain registered for GNU/glibc profiles that are not yet
+    // in the payload.
+    &[
+        ToolKind::Cc,
+        ToolKind::Cxx,
+        ToolKind::Linker,
+        ToolKind::Ar,
+        ToolKind::Ranlib,
+    ]
+}
+
 fn macos_tools() -> &'static [ToolKind] {
     &[
         ToolKind::Cc,
@@ -375,12 +388,12 @@ fn linux_musl(id: &str, kind: ProfileKind, arch: &str, minimum_os: &str) -> Prof
         "libunwind",
         Some("pthread"),
         "itanium",
-        "libstdcxx",
-        "libstdcxx",
+        "rcc-libcxx",
+        "libcxx",
         "static",
         Some(&format!("sysroot-linux-{arch}-musl125")),
         None,
-        unix_tools(),
+        linux_musl_tools(),
         &["lib/clang/22/include", "sysroot/usr/include"],
         &["sysroot/usr/lib"],
         &[],
@@ -605,6 +618,10 @@ mod tests {
             find_profile("windows-x86_64-gnu").unwrap().target_triple,
             "x86_64-pc-windows-gnu"
         );
+        let musl = resolve_target_profile("linux-x86_64-musl-static").unwrap();
+        assert!(!musl.tool_kinds.contains(&ToolKind::Objcopy));
+        assert_eq!(musl.cxx_headers, "rcc-libcxx");
+        assert_eq!(musl.linker_flavor, LinkerFlavor::Elf);
     }
 
     #[test]

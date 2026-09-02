@@ -1,0 +1,13 @@
+[package]
+name = "cargo-rcc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Cargo subcommand that builds Rust crates with RCC as the C/C++ toolchain and linker"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rcc-core = { path = "../rcc-core" }
+serde_json.workspace = true

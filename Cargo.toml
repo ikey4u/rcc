@@ -3,6 +3,7 @@ members = [
     "crates/rcc-core",
     "crates/rcc",
     "crates/rcc-pack",
+    "crates/cargo-rcc",
 ]
 resolver = "2"
 

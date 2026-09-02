@@ -2,7 +2,7 @@
 
 RCC 是一个可重定位的原生 C/C++ 工具链提供器。它把经过裁剪的 Clang driver、LLD 与 llvm-ar 作为静态库链接进单个 multicall `rcc`，并把 Clang resource、headers 与 runtime 作为纯资源 pack 内嵌。首次使用只物化资源与 profile 视图；`cc`、`cxx`、flavor-aware linker（当前为 `ld64.lld`）、`ar`、`ranlib` 路径都是同一份 RCC controller 的 cache hardlink alias，不再解包三套上游 executable，也没有独立 `rcc-launcher`。
 
-RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。当前版本仅注册了 `native-rcc-owned` 运行时契约；尚未交付经验证的 Rust consumer contract，因此不要把现有 release 当作通用 Rust 跨平台构建器。
+RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。Cargo 集成由独立的 `cargo-rcc` adapter 完成；当前已注册 `native-rcc-owned` 与面向 musl 的 `rustc-linux-musl-v0` 契约。
 
 详细设计见 [docs/designs/ARCH.md](docs/designs/ARCH.md)。
 
@@ -14,40 +14,44 @@ RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：�
 | --- | --- | --- | --- | --- |
 | `aarch64-apple-darwin` | `macos-aarch64` | 静态集成 Clang、LLD、llvm-ar/ranlib 22.1.8 | 外部 Apple macOS SDK | 已包含 |
 | `aarch64-apple-darwin` | `host-macos-aarch64` | 同上，供 host 构建上下文使用 | 外部 Apple macOS SDK | 已包含 |
+| `aarch64-apple-darwin` | `linux-x86_64-musl-static` | 静态集成 Clang、ELF LLD、llvm-ar；musl 1.2.5 + compiler-rt builtins/CRT | pack 内 hermetic musl sysroot | 已包含 |
 | 任意 | `macos-x86_64` | — | — | 未包含 |
-| 任意 | Linux profiles（含 glibc 2.17/musl） | — | — | 未包含 |
+| 任意 | 其他 Linux profiles（glibc 2.17、aarch64 musl） | — | — | 未包含 |
 | 任意 | Windows GNU/GNULLVM/MSVC profiles | — | — | 未包含 |
 
-当前 resource-only payload 内含 libc++ headers、Clang resource headers、Darwin compiler-rt 资源和 provenance，不含 Clang、LLD、llvm-ar 或 launcher executable。Apple SDK 不随 RCC 分发：运行时通过 `RCC_APPLE_SDK_ROOT` 指定，或在 macOS 上通过 `xcrun --sdk macosx --show-sdk-path` 自动发现。RCC 不调用系统 clang、gcc 或 ld；Apple SDK、操作系统动态库以及 RCC 本身所需的 macOS 运行环境仍是外部依赖。
+当前 resource-only payload 内含 libc++ headers、Clang resource headers、Darwin compiler-rt、linux x86_64 musl 1.2.5 sysroot、linux x86_64 compiler-rt builtins/CRT 和 provenance，不含 Clang、LLD、llvm-ar 或 launcher executable。Apple SDK 不随 RCC 分发：运行时通过 `RCC_APPLE_SDK_ROOT` 指定，或在 macOS 上通过 `xcrun --sdk macosx --show-sdk-path` 自动发现。RCC 不调用系统 clang、gcc 或 ld；Apple SDK、操作系统动态库以及 RCC 本身所需的 macOS 运行环境仍是外部依赖。
 
 ### 为什么采用静态 multicall
 
 把官方 `clang`、`lld`、`llvm-ar` 三个完整程序压进 payload 虽然容易实现，但会重复携带 executable 壳、入口与部分 LLVM 组件，难以按 RCC 的 target/profile 裁剪，也需要分别做摘要、签名和进程闭包管理。RCC 现在从固定 LLVM 源码构建静态组件，由一个 C ABI bridge 暴露 Clang driver/cc1/cc1as、LLD flavor 与 llvm-ar/ranlib personality；最终链接器可丢弃未引用组件。
 
-这和 Zig 的关键思路一致：用户面对一个 multicall executable，内部复用 LLVM/Clang/LLD 实现，并在需要 driver 子阶段时重新执行同一程序。它并不意味着 LLVM 会天然变成几 MB：Clang AST/Sema/CodeGen、LLVM backend、LLD，以及 headers/runtime 本身仍然很大。体积主要靠 `LLVM_TARGETS_TO_BUILD`、关闭 analyzer/可选依赖、`MinSizeRel` 与 final-link dead stripping 控制。当前正式构建只启用 `AArch64` backend；增加 X86 等 backend 会明确增大 release。
+这和 Zig 的关键思路一致：用户面对一个 multicall executable，内部复用 LLVM/Clang/LLD 实现，并在需要 driver 子阶段时重新执行同一程序。它并不意味着 LLVM 会天然变成几 MB：Clang AST/Sema/CodeGen、LLVM backend、LLD，以及 headers/runtime 本身仍然很大。体积主要靠 `LLVM_TARGETS_TO_BUILD`、关闭 analyzer/可选依赖、`MinSizeRel` 与 final-link dead stripping 控制。当前正式构建启用 `AArch64` 与 `X86` backend，并链接 Mach-O 与 ELF 两种 LLD；只编 macOS AArch64 时可以设 `RCC_LLVM_TARGETS_TO_BUILD=AArch64`，但那样无法交叉编译 linux x86_64。
 
-当前实测的 Apple Silicon release 为 `81,885,568` bytes（约 78 MiB），其中内嵌 resource-only pack 为 `18,489,986` bytes；改造前“外层 controller + 三个压缩 executable”的 release 为 `199,679,920` bytes。静态合并后体积下降约 59%，同时保留的 LLVM 代码只对应 AArch64 + Mach-O LLD。最终 Mach-O 只动态依赖 macOS 自带的 `libSystem`、`libc++` 与 `libiconv`，不依赖系统 clang、ld、LLVM dylib 或安装后的开发 toolchain。
+当前实测的 Apple Silicon AArch64-only release 为 `81,885,568` bytes（约 78 MiB）。启用 X86 + ELF LLD 与 musl sysroot 后体积会增大；以新的 `mise build:release` 产物为准。最终 Mach-O 只动态依赖 macOS 自带的 `libSystem`、`libc++` 与 `libiconv`，不依赖系统 clang、ld、LLVM dylib 或安装后的开发 toolchain。
 
 ## 构建 release
 
-要求 Apple Silicon macOS、Rust 1.85 或更新版本、Xcode Command Line Tools（仅供 release 构建期 host linker）、CMake、Ninja，以及 LLVM 官方的两个归档：
+要求 Apple Silicon macOS、Rust 1.85 或更新版本、Xcode Command Line Tools（仅供 release 构建期 host linker）、CMake、Ninja，以及三个锁定归档：
 
 - `LLVM-22.1.8-macOS-ARM64.tar.xz`：仅作为 bootstrap compiler 和 Clang/resource 文件来源；
-- `llvm-project-22.1.8.src.tar.xz`：构建实际静态集成的、可裁剪 LLVM/Clang/LLD 引擎。
+- `llvm-project-22.1.8.src.tar.xz`：构建实际静态集成的、可裁剪 LLVM/Clang/LLD 引擎；
+- `musl-1.2.5.tar.gz`：linux x86_64 hermetic sysroot，见 `toolchains/musl-1.2.5.lock.json`。
 
-两个归档的固定 SHA-256、上游 commit 和默认静态构建配置分别见 `toolchains/llvm-22.1.8-macos-arm64.lock.json` 与 `toolchains/llvm-project-22.1.8-source.lock.json`。构建脚本使用 Cargo offline 模式，因此 Rust 依赖须已在本机缓存。
+归档的固定 SHA-256、上游 commit 和默认静态构建配置分别见 `toolchains/llvm-22.1.8-macos-arm64.lock.json`、`toolchains/llvm-project-22.1.8-source.lock.json` 与 `toolchains/musl-1.2.5.lock.json`。构建脚本使用 Cargo offline 模式，因此 Rust 依赖须已在本机缓存。锁定归档下载到 gitignored 的 `inner/`，后续 release 构建直接复用：
 
 ```sh
+mise run fetch:archives
 cargo fetch --locked
 ./scripts/build-macos-arm64-release.sh \
-  /path/to/LLVM-22.1.8-macOS-ARM64.tar.xz \
-  /path/to/llvm-project-22.1.8.src.tar.xz \
+  inner/LLVM-22.1.8-macOS-ARM64.tar.xz \
+  inner/llvm-project-22.1.8.src.tar.xz \
+  inner/musl-1.2.5.tar.gz \
   /absolute/path/to/new-output-directory
 ```
 
-默认 LLVM 配置是 `MinSizeRel + LTO=OFF + AArch64`，并关闭 static analyzer、assertions、zlib、zstd、libxml2、libedit、libpfm、curl、tests、examples 和 benchmarks。这里故意不启用 LLVM ThinLTO，也不强制 `LLVM_USE_LINKER=lld`：LLVM 22.1.8 的 bootstrap host-tablegen 链路在该组合下会因 Mach-O archive 回扫语义出现未解析符号；已验证路径使用 Apple linker 构建 release 期 host tools。该 linker 不进入 RCC，也不会成为安装后的运行时依赖。release 构建需要一个 macOS SDK：脚本优先使用 `RCC_MACOS_BUILD_SDKROOT`，其次使用 `SDKROOT`，最后通过 `xcrun` 定位，并显式把它作为 build-time sysroot 传给 bootstrap Clang。构建还会校验并应用仓库内固定补丁 `scripts/patches/clang-integrated-cc1-multijob.patch`，使 compile+link 的 cc1 阶段保持进程内执行，而链接阶段只重执行同一 RCC 的 `ld64.lld` alias。可通过 `RCC_LLVM_BUILD_JOBS`、`RCC_LLVM_CMAKE`、`RCC_LLVM_NINJA`、`RCC_LLVM_TARGETS_TO_BUILD`、`RCC_LLVM_BUILD_TYPE`、`RCC_LLVM_LTO`、`RCC_MACOS_DEPLOYMENT_TARGET` 调整；复杂 CMake 覆盖可通过 `RCC_LLVM_CMAKE_INIT_CACHE` 指向 init-cache 文件。脚本会把 targets/build type/LTO/commit/patch 规范化为 `RCC_ENGINE_BUILD_ID`；非默认 deployment target 和 init-cache 摘要也会进入该 ID。默认值为 `llvm-22.1.8-aarch64-macho-minsizerel-nolto-ca7933e47d3a-patch-41d5e092ac23`。改变 target backend 或 feature 集合会进入 engine build identity，并要求重新验收相应 profile；它不会自动注册新 profile 或链接新的 LLD flavor，这类扩展还需要同步修改 engine bridge/profile registry。
+默认 LLVM 配置是 `MinSizeRel + LTO=OFF + AArch64;X86`，并关闭 static analyzer、assertions、zlib、zstd、libxml2、libedit、libpfm、curl、tests、examples 和 benchmarks。这里故意不启用 LLVM ThinLTO，也不强制 `LLVM_USE_LINKER=lld`：LLVM 22.1.8 的 bootstrap host-tablegen 链路在该组合下会因 Mach-O archive 回扫语义出现未解析符号；已验证路径使用 Apple linker 构建 release 期 host tools。该 linker 不进入 RCC，也不会成为安装后的运行时依赖。release 构建需要一个 macOS SDK：脚本优先使用 `RCC_MACOS_BUILD_SDKROOT`，其次使用 `SDKROOT`，最后通过 `xcrun` 定位，并显式把它作为 build-time sysroot 传给 bootstrap Clang。构建还会校验并应用仓库内固定补丁 `scripts/patches/clang-integrated-cc1-multijob.patch`，使 compile+link 的 cc1 阶段保持进程内执行，而链接阶段只重执行同一 RCC 的 flavor alias（macOS 为 `ld64.lld`，linux 为 `ld.lld`）。可通过 `RCC_LLVM_BUILD_JOBS`、`RCC_LLVM_CMAKE`、`RCC_LLVM_NINJA`、`RCC_LLVM_TARGETS_TO_BUILD`、`RCC_LLVM_BUILD_TYPE`、`RCC_LLVM_LTO`、`RCC_MACOS_DEPLOYMENT_TARGET` 调整；复杂 CMake 覆盖可通过 `RCC_LLVM_CMAKE_INIT_CACHE` 指向 init-cache 文件。脚本会把 targets/build type/LTO/commit/patch 规范化为 `RCC_ENGINE_BUILD_ID`；非默认 deployment target 和 init-cache 摘要也会进入该 ID。默认值为 `llvm-22.1.8-aarch64-x86-macho-minsizerel-nolto-ca7933e47d3a-patch-41d5e092ac23`。改变 target backend 或 feature 集合会进入 engine build identity，并要求重新验收相应 profile；它不会自动注册新 profile 或链接新的 LLD flavor，这类扩展还需要同步修改 engine bridge/profile registry。
 
-旧的二参数调用仍可通过环境变量传入源码归档：`RCC_LLVM_SOURCE_ARCHIVE=/path/to/llvm-project-22.1.8.src.tar.xz ./scripts/build-macos-arm64-release.sh <binary-archive> <output>`。
+旧的三参数调用仍可通过环境变量传入 musl 归档：`RCC_MUSL_SOURCE_ARCHIVE=/path/to/musl-1.2.5.tar.gz ./scripts/build-macos-arm64-release.sh <binary-archive> <source-archive> <output>`。旧的二参数调用额外需要 `RCC_LLVM_SOURCE_ARCHIVE`。
 
 输出目录必须尚不存在。构建产物包括：
 
@@ -99,7 +103,39 @@ cargo fetch --locked
 "$RCC" licenses
 ```
 
-`env` 还支持 `pwsh`、`cargo` 与 host/target 双上下文。Cargo 输出必须显式指定 `--target-runtime-contract`（或共享的 `--runtime-contract`），RCC 不会猜测 rustc 对 CRT、libc、unwind 或链接器组件的所有权。当前只有 `native-rcc-owned`，它面向原生 C/C++ 链路，不代表 Rust 链接兼容性已获验证。
+`env` 还支持 `pwsh`、`cargo` 与 host/target 双上下文。Cargo 输出必须显式指定 `--target-runtime-contract`（或共享的 `--runtime-contract`），RCC 不会猜测 rustc 对 CRT、libc、unwind 或链接器组件的所有权。当前契约：
+
+- `native-rcc-owned`：原生 C/C++ 链路，RCC 拥有 CRT/libc；
+- `rustc-linux-musl-v0`：`cargo-rcc` 用于 `x86_64-unknown-linux-musl`。RCC 拥有 musl CRT/libc/compiler-rt（含 `clang_rt.crtbegin`/`crtend`）；rustc 保留 rust-std unwind。稳定版 rustc 的 `link-self-contained` 只能整体开关，因此 `cargo-rcc` 使用 `-C link-self-contained=no -C panic=abort -C target-feature=+crt-static`，并把 rust-std 的 `libunwind.a` 单独放到隔离的 `-L native=` 搜索路径，避免 rustc 自带的 musl `libc.a` 参与链接。
+
+## cargo-rcc 与 linux x86_64（OpenSSL）
+
+`cargo-rcc` 是独立的 Cargo adapter，对应 cargo-zigbuild 那一层：它不编译 C/Rust，只物化 RCC profile、导出 cc-rs/rustc 环境，再 exec Cargo。日常 `mise build` 可以编出 `cargo-rcc`，但交叉编译必须使用带静态引擎和 musl sysroot 的 **release `rcc`**。`rustup target add x86_64-unknown-linux-musl` 不只是为了 rust-std，也是为了那份 `libunwind.a`。
+
+```sh
+# 1. 构建可分发 rcc（见上文，需要 LLVM 与 musl 归档）
+mise run fetch:archives
+mise run build:release -- \
+  inner/LLVM-22.1.8-macOS-ARM64.tar.xz \
+  inner/llvm-project-22.1.8.src.tar.xz \
+  inner/musl-1.2.5.tar.gz \
+  /absolute/path/to/rcc-release
+
+# 2. 构建 cargo-rcc，并安装 rustc 的 musl std
+cargo build --release -p cargo-rcc
+rustup target add x86_64-unknown-linux-musl
+
+# 3. 用 vendored OpenSSL 源码编出 linux x86_64 musl 静态二进制
+export RCC=/absolute/path/to/rcc-release/rcc
+./target/release/cargo-rcc build \
+  --manifest-path examples/openssl-linux/Cargo.toml \
+  --target x86_64-unknown-linux-musl \
+  --release
+```
+
+`openssl` crate 的 `vendored` feature 会编译 OpenSSL 自己的 C 源码；这就是 cargo-rcc 对 cc-rs 的验收路径。产物是 `x86_64-unknown-linux-musl` static-pie ELF，可在 linux x64 上运行，不依赖 glibc。OpenSSL 的 `Configure` 需要本机 `perl`。当前不支持 `x86_64-unknown-linux-gnu`（glibc 2.17 sysroot 尚未进入 payload）。
+
+等价写法：`cargo rcc --rcc "$RCC" build --manifest-path examples/openssl-linux/Cargo.toml --target x86_64-unknown-linux-musl --release`。
 
 如果显式加载外部 pack，必须确认它是本地信任输入：
 
@@ -112,7 +148,7 @@ cargo fetch --locked
 
 ## 环境契约与 fail-closed 行为
 
-RCC 的 profile-bound multicall alias 负责注入 target triple、resource directory、sysroot/SDK、链接器以及最低系统版本。调用方不应重复设置这些选项。Clang 需要启动链接阶段时使用 view 内的绝对 flavor alias（macOS 为 `ld64.lld`），实际重新执行的是同一 RCC controller，而不是系统 linker 或 payload 中的另一份 LLD executable。
+RCC 的 profile-bound multicall alias 负责注入 target triple、resource directory、sysroot/SDK、链接器以及最低系统版本。调用方不应重复设置这些选项。Clang 需要启动链接阶段时使用 view 内的绝对 flavor alias（macOS 为 `ld64.lld`，linux 为 `ld.lld`），实际重新执行的是同一 RCC controller，而不是系统 linker 或 payload 中的另一份 LLD executable。
 
 为避免静默使用宿主机工具链，multicall alias policy 会拒绝可能污染搜索路径的环境变量，例如 `CPATH`、`CPLUS_INCLUDE_PATH`、`LIBRARY_PATH`、`COMPILER_PATH`、`SDKROOT`、`MACOSX_DEPLOYMENT_TARGET`、`LD_LIBRARY_PATH` 与 `DYLD_*`。`rcc env --format sh`/`pwsh` 会生成清除这些变量的命令；SDK 应通过 `RCC_APPLE_SDK_ROOT` 这一受管入口提供。
 
@@ -129,10 +165,11 @@ RCC 的 profile-bound multicall alias 负责注入 target triple、resource dire
 
 ## 当前限制
 
-- release payload 仅能在 Apple Silicon macOS 上运行并生成 `macos-aarch64` 产物；Linux、Windows 和 macOS x86_64 payload 尚未交付；
-- 当前静态 LLVM 构建只启用 AArch64 backend；它是针对已交付 profile 的裁剪，不是通用 all-target LLVM distribution；
+- release controller 目前只在 Apple Silicon macOS 上运行；已交付的 target 是 `macos-aarch64` 与 `linux-x86_64-musl-static`；
+- glibc、Windows 和 macOS x86_64 payload 尚未交付；
+- 静态 LLVM 构建启用 AArch64 与 X86，仍不是通用 all-target LLVM distribution；
 - Apple SDK 必须由使用者合法安装并在本机提供，RCC 不分发该 SDK；
-- 目前没有已注册、已验证的 Rust consumer runtime contract，也不提供 Cargo orchestration；
+- `cargo-rcc` 目前只编排 `x86_64-unknown-linux-musl`，并要求 host 为 `aarch64-apple-darwin`；
 - `.rccpack` 有逐文件与整体 SHA-256 完整性校验，但当前格式本身没有发行方数字签名；外部 pack 必须显式确认；
-- 构建脚本固定校验上游 LLVM 归档摘要并记录 attestation URL，但尚未在脚本中执行 attestation 签名验证；
+- 构建脚本固定校验上游 LLVM/musl 归档摘要并记录 attestation URL，但尚未在脚本中执行 attestation 签名验证；
 - 尚未提供 release code signing、Apple notarization、Linux/Windows release pipeline 或完整 SBOM 自动生成。

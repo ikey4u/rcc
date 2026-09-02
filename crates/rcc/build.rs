@@ -283,6 +283,7 @@ fn emit_static_links(out_dir: &Path, build: &Path, native_archive: &Path) {
         "clangFormat",
         "clangOptions",
         "lldMachO",
+        "lldELF",
         "lldCommon",
         "LLVMLibDriver",
         "LLVMDlltoolDriver",
@@ -324,6 +325,10 @@ fn emit_static_links(out_dir: &Path, build: &Path, native_archive: &Path) {
         targets.split_whitespace().any(|target| target == "AArch64"),
         "macOS AArch64 engine requires the AArch64 LLVM target"
     );
+    assert!(
+        targets.split_whitespace().any(|target| target == "X86"),
+        "linux x86_64 cross compilation requires the X86 LLVM target"
+    );
     let components = llvm_components(&targets);
     let mut command = Command::new(&llvm_config);
     command.args(["--link-static", "--libs"]).args(&components);
@@ -345,6 +350,7 @@ fn llvm_components(targets: &str) -> Vec<String> {
         "FrontendDriver",
         "WindowsDriver",
         "LTO",
+        "DTLTO",
         "Extensions",
         "Plugins",
         "LibDriver",
