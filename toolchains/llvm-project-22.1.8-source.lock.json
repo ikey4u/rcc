@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "name": "llvm-project-22.1.8.src.tar.xz",
+  "role": "static_engine_source",
+  "source": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/llvm-project-22.1.8.src.tar.xz",
+  "sha256": "922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888",
+  "repository": "https://github.com/llvm/llvm-project",
+  "git_commit": "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1",
+  "tag": "llvmorg-22.1.8",
+  "license": "Apache-2.0 WITH LLVM-exception",
+  "default_static_build": {
+    "host": "aarch64-apple-darwin",
+    "projects": ["clang", "lld"],
+    "targets_to_build": ["AArch64"],
+    "build_type": "MinSizeRel",
+    "macos_deployment_target": "11.0",
+    "lto": "OFF",
+    "shared_libraries": false,
+    "assertions": false,
+    "static_analyzer": false,
+    "zlib": false,
+    "zstd": false,
+    "libxml2": false,
+    "libedit": false,
+    "libpfm": false,
+    "curl": false,
+    "httplib": false,
+    "bindings": false,
+    "build_runtime": false,
+    "install_utils": false,
+    "clang_arcmt": false,
+    "tests": false,
+    "examples": false,
+    "benchmarks": false,
+    "docs": false,
+    "ninja_targets": ["clang", "lld", "llvm-ar", "llvm-config"]
+  },
+  "patches": [
+    {
+      "path": "scripts/patches/clang-integrated-cc1-multijob.patch",
+      "sha256": "41d5e092ac23ac44c90714e95425a3be25775bf0127d5f9539000f306863b759",
+      "purpose": "keep Clang cc1 in-process for static RCC compile-and-link invocations"
+    }
+  ],
+  "static_entry_sources": [
+    "clang/tools/driver/driver.cpp",
+    "clang/tools/driver/cc1_main.cpp",
+    "clang/tools/driver/cc1as_main.cpp",
+    "clang/tools/driver/cc1gen_reproducer_main.cpp",
+    "llvm/tools/llvm-ar/llvm-ar.cpp"
+  ]
+}

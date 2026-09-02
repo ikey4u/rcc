@@ -1,0 +1,21 @@
+diff --git a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
+index 4ab0f80461fe..1e1b3cecb0f7 100644
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -5345,9 +5345,13 @@ void Driver::BuildJobs(Compilation &C) const {
+                        /*TargetDeviceOffloadKind*/ Action::OFK_None);
+   }
+ 
+-  // If we have more than one job, then disable integrated-cc1 for now. Do this
+-  // also when we need to report process execution statistics.
+-  if (C.getJobs().size() > 1 || CCPrintProcessStats)
++  // RCC statically integrates the Clang frontend and deliberately keeps a
++  // compile+link invocation's CC1 job in-process. The remaining linker job
++  // re-executes the same RCC image through its profile-bound LLD hardlink.
++  // ExecuteCC1Tool resets command-line state before every call, so this also
++  // keeps multi-input CLI invocations inside the static engine. Process
++  // statistics still require the out-of-process path used by upstream.
++  if (CCPrintProcessStats)
+     for (auto &J : C.getJobs())
+       J.InProcess = false;
+ 

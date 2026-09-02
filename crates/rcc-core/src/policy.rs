@@ -1,0 +1,1212 @@
+use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
+use std::env;
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+/// Environment variables which can make Clang or one of its child tools search
+/// outside the selected RCC view.
+pub const BUILTIN_FORBIDDEN_ENV: &[&str] = &[
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OBJC_INCLUDE_PATH",
+    "OBJCPLUS_INCLUDE_PATH",
+    "LIBRARY_PATH",
+    "COMPILER_PATH",
+    "GCC_EXEC_PREFIX",
+    "GCC_ROOT",
+    "SDKROOT",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "IPHONEOS_DEPLOYMENT_TARGET",
+    "INCLUDE",
+    "LIB",
+    "LIBPATH",
+    "CCC_OVERRIDE_OPTIONS",
+    "CCC_ADD_ARGS",
+    "QA_OVERRIDE_GCC3_OPTIONS",
+    "RC_DEBUG_OPTIONS",
+    "CL",
+    "_CL_",
+    "LINK",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_RUN_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+];
+
+const OPTIONS_WITH_VALUE: &[&str] = &[
+    "-arch",
+    "-mabi",
+    "-mfloat-abi",
+    "--target",
+    "-target",
+    "--sysroot",
+    "-isysroot",
+    "-resource-dir",
+    "-fuse-ld",
+    "--ld-path",
+    "--gcc-toolchain",
+    "-gcc-toolchain",
+    "--gcc-install-dir",
+    "--config",
+    "--config-system-dir",
+    "--config-user-dir",
+    "-ccc-install-dir",
+    "-ccc-gcc-name",
+    "-specs",
+    "--specs",
+    "-wrapper",
+    "-fplugin",
+    "-fpass-plugin",
+];
+
+const JOINED_OPTIONS: &[&str] = &[
+    "-Wp,",
+    "-arch=",
+    "-mabi=",
+    "-mfloat-abi=",
+    "--target=",
+    "-target=",
+    "--sysroot=",
+    "-isysroot=",
+    "-resource-dir=",
+    "-fuse-ld=",
+    "--ld-path=",
+    "--gcc-toolchain=",
+    "-gcc-toolchain=",
+    "--gcc-install-dir=",
+    "--config=",
+    "--config-system-dir=",
+    "--config-user-dir=",
+    "-ccc-install-dir=",
+    "-ccc-gcc-name=",
+    "-specs=",
+    "--specs=",
+    "-wrapper=",
+    "-fplugin=",
+    "-fpass-plugin=",
+    "--driver-mode=",
+    "-stdlib=",
+    "--stdlib=",
+    "-rtlib=",
+    "--rtlib=",
+    "-unwindlib=",
+    "--unwindlib=",
+    "-mmacosx-version-min=",
+    "-miphoneos-version-min=",
+    "-mios-simulator-version-min=",
+];
+
+const EXACT_OPTIONS: &[&str] = &[
+    "-Xpreprocessor",
+    "-m32",
+    "-m64",
+    "-mx32",
+    "-fno-integrated-as",
+    "-no-integrated-as",
+    "--no-integrated-as",
+    "-fno-integrated-cc1",
+    "-fno-integrated-tools",
+    "-fallback",
+    "/fallback",
+    "-cc1",
+    "-cc1as",
+    "-Xclang",
+    "-static-libgcc",
+    "-shared-libgcc",
+    "-static-libstdc++",
+];
+
+const LINKER_OPTIONS_WITH_VALUE: &[&str] = &[
+    "--sysroot",
+    "-sysroot",
+    "--dynamic-linker",
+    "-dynamic-linker",
+    "--plugin",
+    "-plugin",
+    "--plugin-opt",
+    "-plugin-opt",
+    "--emulation",
+    "-m",
+    "-syslibroot",
+    "-lto_library",
+    "-arch",
+    "-platform_version",
+    "-macos_version_min",
+    "-iphoneos_version_min",
+    "-sdk_version",
+];
+
+const LINKER_JOINED_OPTIONS: &[&str] = &[
+    "--sysroot=",
+    "-sysroot=",
+    "--dynamic-linker=",
+    "-dynamic-linker=",
+    "--plugin=",
+    "-plugin=",
+    "--plugin-opt=",
+    "-plugin-opt=",
+    "--emulation=",
+    "-syslibroot=",
+    "-lto_library=",
+    "-arch=",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseFileLimits {
+    pub maximum_depth: usize,
+    pub maximum_bytes: usize,
+    pub maximum_arguments: usize,
+}
+
+impl Default for ResponseFileLimits {
+    fn default() -> Self {
+        Self {
+            maximum_depth: 16,
+            maximum_bytes: 8 * 1024 * 1024,
+            maximum_arguments: 100_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DriverQuery {
+    DumpMachine,
+    PrintTargetTriple,
+    PrintResourceDir,
+    PrintSysroot,
+    PrintFileName(String),
+    PrintProgramName(String),
+    Version,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedInvocation {
+    /// Fully expanded arguments. No `@file` token is passed to the child, so a
+    /// response file cannot change between validation and execution.
+    pub arguments: Vec<OsString>,
+    pub query: Option<DriverQuery>,
+}
+
+/// Expand UTF-8 response files, apply the hermetic argument policy, and prepend
+/// trusted profile arguments. Profile arguments come from the verified view
+/// manifest and are deliberately not subjected to the user-argument denylist.
+pub fn prepare_invocation(
+    user_arguments: &[OsString],
+    injected_arguments: &[String],
+    working_directory: &Path,
+) -> Result<PreparedInvocation> {
+    prepare_invocation_with_forbidden(user_arguments, injected_arguments, &[], working_directory)
+}
+
+pub fn prepare_invocation_with_forbidden(
+    user_arguments: &[OsString],
+    injected_arguments: &[String],
+    manifest_forbidden_arguments: &[String],
+    working_directory: &Path,
+) -> Result<PreparedInvocation> {
+    let expanded = expand_response_files(user_arguments, working_directory)?;
+    let query = parse_driver_query(&expanded)?;
+
+    if query.is_some() {
+        return Ok(PreparedInvocation {
+            arguments: expanded,
+            query,
+        });
+    }
+
+    validate_user_arguments(&expanded)?;
+    validate_manifest_forbidden_arguments(&expanded, manifest_forbidden_arguments)?;
+    let mut arguments = Vec::with_capacity(injected_arguments.len() + expanded.len());
+    arguments.extend(injected_arguments.iter().map(OsString::from));
+    arguments.extend(expanded);
+    Ok(PreparedInvocation {
+        arguments,
+        query: None,
+    })
+}
+
+pub fn validate_manifest_forbidden_arguments(
+    arguments: &[OsString],
+    forbidden_arguments: &[String],
+) -> Result<()> {
+    let mut index = 0usize;
+    let mut linker_mode = false;
+    while index < arguments.len() {
+        let argument = option_text(&arguments[index])?;
+        if argument.eq_ignore_ascii_case("/link") {
+            linker_mode = true;
+            index += 1;
+            continue;
+        }
+        if argument == "-Xlinker" {
+            let forwarded = arguments
+                .get(index + 1)
+                .context("-Xlinker requires an argument")?;
+            reject_if_manifest_forbidden(option_text(forwarded)?, forbidden_arguments)?;
+            index += 2;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Xlinker=") {
+            reject_if_manifest_forbidden(forwarded, forbidden_arguments)?;
+            index += 1;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Wl,") {
+            for value in forwarded.split(',') {
+                reject_if_manifest_forbidden(value, forbidden_arguments)?;
+            }
+            index += 1;
+            continue;
+        }
+        if linker_mode {
+            reject_if_manifest_forbidden(argument, forbidden_arguments)?;
+        } else if let Some(clang_argument) = strip_ascii_case_prefix(argument, "/clang:") {
+            reject_if_manifest_forbidden(clang_argument, forbidden_arguments)?;
+        } else {
+            reject_if_manifest_forbidden(argument, forbidden_arguments)?;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn reject_if_manifest_forbidden(argument: &str, forbidden_arguments: &[String]) -> Result<()> {
+    for forbidden in forbidden_arguments {
+        let joined_prefix = format!("{forbidden}=");
+        if argument == forbidden || argument.starts_with(&joined_prefix) {
+            bail!("argument forbidden by runtime contract: {argument}");
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_direct_linker_arguments(arguments: &[OsString]) -> Result<()> {
+    for argument in arguments {
+        let argument = option_text(argument)?;
+        validate_linker_argument(argument)?;
+    }
+    Ok(())
+}
+
+/// Reject include and library search paths which resolve into roots forbidden
+/// by the selected profile. Relative workspace paths remain allowed.
+pub fn validate_forbidden_path_arguments(
+    arguments: &[OsString],
+    forbidden_roots: &[String],
+    working_directory: &Path,
+) -> Result<()> {
+    let mut index = 0usize;
+    let mut linker_mode = false;
+    while index < arguments.len() {
+        let argument = option_text(&arguments[index])?;
+        if argument.eq_ignore_ascii_case("/link") {
+            linker_mode = true;
+            index += 1;
+            continue;
+        }
+        if argument == "-Xlinker" {
+            if let Some(value) = arguments.get(index + 1) {
+                let value_text = option_text(value)?;
+                if forwarded_path_needs_value(value_text) {
+                    let marker = arguments
+                        .get(index + 2)
+                        .context("forwarded linker search path is missing its value marker")?;
+                    let marker = option_text(marker)?;
+                    let path = if marker == "-Xlinker" {
+                        option_text(
+                            arguments
+                                .get(index + 3)
+                                .context("forwarded linker search path is missing its value")?,
+                        )?
+                    } else if let Some(path) = marker.strip_prefix("-Xlinker=") {
+                        path
+                    } else {
+                        bail!("forwarded linker search path must forward its value explicitly");
+                    };
+                    reject_forbidden_path(path, forbidden_roots, working_directory)?;
+                    index += if marker == "-Xlinker" { 4 } else { 3 };
+                    continue;
+                }
+                validate_forwarded_path_option(value_text, forbidden_roots, working_directory)?;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("-Xlinker=") {
+            if forwarded_path_needs_value(value) {
+                let marker = arguments
+                    .get(index + 1)
+                    .context("forwarded linker search path is missing its value")?;
+                let marker = option_text(marker)?;
+                let path = marker
+                    .strip_prefix("-Xlinker=")
+                    .context("forwarded linker search path must use -Xlinker=<path>")?;
+                reject_forbidden_path(path, forbidden_roots, working_directory)?;
+                index += 2;
+                continue;
+            }
+            validate_forwarded_path_option(value, forbidden_roots, working_directory)?;
+            index += 1;
+            continue;
+        }
+        if let Some(values) = argument.strip_prefix("-Wl,") {
+            validate_comma_linker_paths(values, forbidden_roots, working_directory)?;
+            index += 1;
+            continue;
+        }
+        if linker_mode {
+            validate_forwarded_path_option(argument, forbidden_roots, working_directory)?;
+        }
+        validate_forwarded_path_option(argument, forbidden_roots, working_directory)?;
+
+        if let Some((path, consumes_next)) = driver_search_path(argument, arguments.get(index + 1))?
+        {
+            reject_forbidden_path(&path, forbidden_roots, working_directory)?;
+            if consumes_next {
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn forwarded_path_needs_value(argument: &str) -> bool {
+    matches!(argument, "-L" | "--library-path")
+}
+
+fn driver_search_path(argument: &str, next: Option<&OsString>) -> Result<Option<(String, bool)>> {
+    for option in [
+        "-I",
+        "-L",
+        "-F",
+        "-isystem",
+        "-iquote",
+        "-idirafter",
+        "-iframework",
+    ] {
+        if argument == option {
+            let value = next
+                .context("search-path option requires an argument")?
+                .to_str()
+                .context("search paths must be valid UTF-8")?;
+            return Ok(Some((value.to_owned(), true)));
+        }
+        if let Some(value) = argument
+            .strip_prefix(option)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some((value.to_owned(), false)));
+        }
+    }
+    if argument == "--library-path" {
+        let value = next
+            .context("--library-path requires an argument")?
+            .to_str()
+            .context("search paths must be valid UTF-8")?;
+        return Ok(Some((value.to_owned(), true)));
+    }
+    if argument.eq_ignore_ascii_case("/I") {
+        let value = next
+            .context("/I requires an argument")?
+            .to_str()
+            .context("search paths must be valid UTF-8")?;
+        return Ok(Some((value.to_owned(), true)));
+    }
+    if let Some(value) = strip_ascii_case_prefix(argument, "/external:I") {
+        if !value.is_empty() {
+            return Ok(Some((value.to_owned(), false)));
+        }
+    }
+    if let Some(value) = strip_ascii_case_prefix(argument, "/I") {
+        if !value.is_empty() {
+            return Ok(Some((value.to_owned(), false)));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_forwarded_path_option(
+    argument: &str,
+    forbidden_roots: &[String],
+    working_directory: &Path,
+) -> Result<()> {
+    for option in ["-L", "--library-path="] {
+        if let Some(value) = argument
+            .strip_prefix(option)
+            .filter(|value| !value.is_empty())
+        {
+            return reject_forbidden_path(value, forbidden_roots, working_directory);
+        }
+    }
+    if let Some(value) = strip_ascii_case_prefix(argument, "/libpath:") {
+        return reject_forbidden_path(value, forbidden_roots, working_directory);
+    }
+    Ok(())
+}
+
+fn validate_comma_linker_paths(
+    values: &str,
+    forbidden_roots: &[String],
+    working_directory: &Path,
+) -> Result<()> {
+    let values = values.split(',').collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < values.len() {
+        let value = values[index];
+        if matches!(value, "-L" | "--library-path") {
+            let path = values
+                .get(index + 1)
+                .context("forwarded linker search path requires an argument")?;
+            reject_forbidden_path(path, forbidden_roots, working_directory)?;
+            index += 2;
+            continue;
+        }
+        validate_forwarded_path_option(value, forbidden_roots, working_directory)?;
+        index += 1;
+    }
+    Ok(())
+}
+
+fn reject_forbidden_path(
+    value: &str,
+    forbidden_roots: &[String],
+    working_directory: &Path,
+) -> Result<()> {
+    let candidate = normalized_absolute_path(Path::new(value), working_directory);
+    for forbidden_root in forbidden_roots {
+        let forbidden = normalized_absolute_path(Path::new(forbidden_root), working_directory);
+        if path_starts_with(&candidate, &forbidden) {
+            bail!(
+                "search path {} enters forbidden profile root {}",
+                candidate.display(),
+                forbidden.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn normalized_absolute_path(path: &Path, working_directory: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_directory.join(path)
+    };
+    if let Ok(canonical) = fs::canonicalize(&absolute) {
+        return canonical;
+    }
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn path_starts_with(path: &Path, root: &Path) -> bool {
+    if cfg!(windows) {
+        let path = path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let root = root
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        path.len() >= root.len()
+            && path
+                .iter()
+                .zip(root.iter())
+                .all(|(left, right)| left == right)
+    } else {
+        path.starts_with(root)
+    }
+}
+
+pub fn expand_response_files(
+    arguments: &[OsString],
+    working_directory: &Path,
+) -> Result<Vec<OsString>> {
+    expand_response_files_with_limits(arguments, working_directory, ResponseFileLimits::default())
+}
+
+pub fn expand_response_files_with_limits(
+    arguments: &[OsString],
+    working_directory: &Path,
+    limits: ResponseFileLimits,
+) -> Result<Vec<OsString>> {
+    let mut output = Vec::new();
+    let mut active_files = HashSet::new();
+    let mut total_bytes = 0usize;
+    expand_arguments(
+        arguments,
+        working_directory,
+        limits,
+        0,
+        &mut total_bytes,
+        &mut active_files,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+fn expand_arguments(
+    arguments: &[OsString],
+    working_directory: &Path,
+    limits: ResponseFileLimits,
+    depth: usize,
+    total_bytes: &mut usize,
+    active_files: &mut HashSet<PathBuf>,
+    output: &mut Vec<OsString>,
+) -> Result<()> {
+    reject_forwarded_response_files(arguments)?;
+    for argument in arguments {
+        let lossy = argument.to_string_lossy();
+        if !lossy.starts_with('@') {
+            output.push(argument.clone());
+            if output.len() > limits.maximum_arguments {
+                bail!(
+                    "response-file expansion exceeds {} arguments",
+                    limits.maximum_arguments
+                );
+            }
+            continue;
+        }
+
+        let argument = argument
+            .to_str()
+            .context("response-file arguments must be valid UTF-8")?;
+        let path_text = argument
+            .strip_prefix('@')
+            .expect("response argument was checked above");
+        if path_text.is_empty() {
+            bail!("empty response-file path");
+        }
+        if depth >= limits.maximum_depth {
+            bail!(
+                "response-file nesting exceeds maximum depth {}",
+                limits.maximum_depth
+            );
+        }
+
+        let candidate = Path::new(path_text);
+        let candidate = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            working_directory.join(candidate)
+        };
+        let canonical = fs::canonicalize(&candidate)
+            .with_context(|| format!("failed to resolve response file {}", candidate.display()))?;
+        if !active_files.insert(canonical.clone()) {
+            bail!(
+                "recursive response-file cycle involving {}",
+                canonical.display()
+            );
+        }
+
+        let bytes = fs::read(&canonical)
+            .with_context(|| format!("failed to read response file {}", canonical.display()))?;
+        *total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .context("response-file byte count overflow")?;
+        if *total_bytes > limits.maximum_bytes {
+            bail!(
+                "response-file expansion exceeds {} bytes",
+                limits.maximum_bytes
+            );
+        }
+        let text =
+            std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
+                .with_context(|| format!("response file {} is not UTF-8", canonical.display()))?;
+        let nested = parse_gcc_response_file(text)
+            .with_context(|| format!("failed to parse response file {}", canonical.display()))?;
+        expand_arguments(
+            &nested,
+            working_directory,
+            limits,
+            depth + 1,
+            total_bytes,
+            active_files,
+            output,
+        )?;
+        active_files.remove(&canonical);
+    }
+    Ok(())
+}
+
+fn reject_forwarded_response_files(arguments: &[OsString]) -> Result<()> {
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument = option_text(argument)?;
+        if argument == "-Xlinker"
+            && arguments
+                .get(index + 1)
+                .is_some_and(|value| value.to_string_lossy().starts_with('@'))
+        {
+            bail!(
+                "response files forwarded through -Xlinker are unsupported; pass the response file directly to the RCC linker launcher"
+            );
+        }
+        if argument
+            .strip_prefix("-Xlinker=")
+            .is_some_and(|value| value.starts_with('@'))
+            || argument
+                .strip_prefix("-Wl,")
+                .is_some_and(|values| values.split(',').any(|value| value.starts_with('@')))
+            || strip_ascii_case_prefix(argument, "/clang:")
+                .is_some_and(|value| value.starts_with('@'))
+        {
+            bail!("nested linker response files must not bypass RCC response-file validation");
+        }
+    }
+    Ok(())
+}
+
+/// Parse the common GCC/Clang response-file subset: whitespace separates
+/// arguments, single and double quotes preserve whitespace, and backslash
+/// escapes the following character. Empty quoted arguments are preserved.
+fn parse_gcc_response_file(text: &str) -> Result<Vec<OsString>> {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut quote = Quote::None;
+    let mut escaped = false;
+    let mut started = false;
+
+    for character in text.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            started = true;
+            continue;
+        }
+
+        match (quote, character) {
+            (Quote::None, '\'') => {
+                quote = Quote::Single;
+                started = true;
+            }
+            (Quote::Single, '\'') => quote = Quote::None,
+            (Quote::None, '"') => {
+                quote = Quote::Double;
+                started = true;
+            }
+            (Quote::Double, '"') => quote = Quote::None,
+            (Quote::None, character) if character.is_whitespace() => {
+                if started {
+                    result.push(OsString::from(std::mem::take(&mut current)));
+                    started = false;
+                }
+            }
+            (_, character) => {
+                current.push(character);
+                started = true;
+            }
+        }
+    }
+
+    if escaped {
+        bail!("response file ends with an incomplete escape");
+    }
+    if quote != Quote::None {
+        bail!("response file contains an unterminated quote");
+    }
+    if started {
+        result.push(OsString::from(current));
+    }
+    Ok(result)
+}
+
+pub fn validate_user_arguments(arguments: &[OsString]) -> Result<()> {
+    let mut index = 0usize;
+    let mut linker_mode = false;
+    while index < arguments.len() {
+        let argument = option_text(&arguments[index])?;
+
+        if linker_mode {
+            validate_linker_argument(argument)?;
+            index += 1;
+            continue;
+        }
+        if argument.eq_ignore_ascii_case("/link") {
+            linker_mode = true;
+            index += 1;
+            continue;
+        }
+        if argument == "-Xlinker" {
+            let forwarded = arguments
+                .get(index + 1)
+                .context("-Xlinker requires an argument")?;
+            validate_linker_argument(option_text(forwarded)?)?;
+            index += 2;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Xlinker=") {
+            validate_linker_argument(forwarded)?;
+            index += 1;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Wl,") {
+            for linker_argument in forwarded.split(',') {
+                validate_linker_argument(linker_argument)?;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(clang_argument) = strip_ascii_case_prefix(argument, "/clang:") {
+            if clang_argument == "-Xlinker"
+                || clang_argument.starts_with("-Xlinker=")
+                || clang_argument.starts_with("-Wl,")
+            {
+                bail!(
+                    "linker forwarding through /clang: is unsupported; use validated /link arguments"
+                );
+            }
+            if is_driver_search_option(clang_argument) {
+                bail!(
+                    "search-path forwarding through /clang: is unsupported; use a directly validated include or library option"
+                );
+            }
+            validate_single_driver_argument(clang_argument)?;
+            index += 1;
+            continue;
+        }
+
+        validate_single_driver_argument(argument)?;
+        index += 1;
+    }
+    Ok(())
+}
+
+fn is_driver_search_option(argument: &str) -> bool {
+    [
+        "-I",
+        "-L",
+        "-F",
+        "-isystem",
+        "-iquote",
+        "-idirafter",
+        "-iframework",
+        "--library-path",
+    ]
+    .iter()
+    .any(|option| argument == *option || argument.starts_with(option))
+}
+
+fn option_text(argument: &OsStr) -> Result<&str> {
+    match argument.to_str() {
+        Some(value) => Ok(value),
+        None if argument.to_string_lossy().starts_with(['-', '/', '@']) => {
+            bail!("non-UTF-8 option-like arguments are not supported")
+        }
+        None => Ok(""),
+    }
+}
+
+fn validate_single_driver_argument(argument: &str) -> Result<()> {
+    if argument.is_empty() || !argument.starts_with(['-', '/']) {
+        return Ok(());
+    }
+    if EXACT_OPTIONS
+        .iter()
+        .any(|candidate| argument.eq_ignore_ascii_case(candidate))
+        || OPTIONS_WITH_VALUE.contains(&argument)
+        || JOINED_OPTIONS
+            .iter()
+            .any(|prefix| argument.starts_with(prefix))
+        || argument.starts_with("-isysroot")
+        || argument.starts_with("-B")
+        || strip_ascii_case_prefix(argument, "/winsysroot:").is_some()
+        || argument.eq_ignore_ascii_case("/winsysroot")
+        || strip_ascii_case_prefix(argument, "/arch:").is_some()
+        || strip_ascii_case_prefix(argument, "/B1").is_some()
+        || strip_ascii_case_prefix(argument, "/B2").is_some()
+    {
+        bail!("forbidden hermetic driver option: {argument}");
+    }
+    Ok(())
+}
+
+fn validate_linker_argument(argument: &str) -> Result<()> {
+    if LINKER_OPTIONS_WITH_VALUE.contains(&argument)
+        || LINKER_JOINED_OPTIONS
+            .iter()
+            .any(|prefix| argument.starts_with(prefix))
+        || argument.eq_ignore_ascii_case("/machine")
+        || strip_ascii_case_prefix(argument, "/machine:").is_some()
+        || argument.eq_ignore_ascii_case("/winsysroot")
+        || strip_ascii_case_prefix(argument, "/winsysroot:").is_some()
+    {
+        bail!("forbidden hermetic linker option: {argument}");
+    }
+    Ok(())
+}
+
+fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+pub fn parse_driver_query(arguments: &[OsString]) -> Result<Option<DriverQuery>> {
+    let mut query = None;
+    let mut has_non_query_argument = false;
+    for argument in arguments {
+        let argument = option_text(argument)?;
+        let candidate = match argument {
+            "-dumpmachine" => Some(DriverQuery::DumpMachine),
+            "--print-target-triple" => Some(DriverQuery::PrintTargetTriple),
+            "--print-resource-dir" => Some(DriverQuery::PrintResourceDir),
+            "--print-sysroot" => Some(DriverQuery::PrintSysroot),
+            "--version" => Some(DriverQuery::Version),
+            _ => argument
+                .strip_prefix("-print-file-name=")
+                .map(|name| DriverQuery::PrintFileName(name.to_owned()))
+                .or_else(|| {
+                    argument
+                        .strip_prefix("-print-prog-name=")
+                        .map(|name| DriverQuery::PrintProgramName(name.to_owned()))
+                }),
+        };
+        if let Some(candidate) = candidate {
+            if query.replace(candidate).is_some() {
+                bail!("multiple driver queries in one invocation are not supported");
+            }
+        } else {
+            has_non_query_argument = true;
+        }
+    }
+    if query.is_some() && has_non_query_argument {
+        bail!("driver query cannot be combined with compilation arguments");
+    }
+    Ok(query)
+}
+
+/// Return all forbidden variables present in `variables`. Variable matching is
+/// case-insensitive on Windows, matching the host environment semantics.
+pub fn find_polluting_environment<I, K, V>(variables: I, extra_forbidden: &[String]) -> Vec<String>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let mut forbidden: HashSet<String> = BUILTIN_FORBIDDEN_ENV
+        .iter()
+        .map(|name| normalize_environment_name(name))
+        .collect();
+    forbidden.extend(
+        extra_forbidden
+            .iter()
+            .map(|name| normalize_environment_name(name)),
+    );
+
+    let mut found = variables
+        .into_iter()
+        .filter_map(|(name, _)| {
+            let name = name.as_ref().to_string_lossy();
+            forbidden
+                .contains(&normalize_environment_name(&name))
+                .then(|| name.into_owned())
+        })
+        .collect::<Vec<_>>();
+    found.sort();
+    found.dedup();
+    found
+}
+
+pub fn reject_polluting_environment(extra_forbidden: &[String]) -> Result<()> {
+    let found = find_polluting_environment(env::vars_os(), extra_forbidden);
+    if !found.is_empty() {
+        bail!(
+            "polluting toolchain environment is not allowed: {}",
+            found.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn normalize_environment_name(name: &str) -> String {
+    if cfg!(windows) {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn os(arguments: &[&str]) -> Vec<OsString> {
+        arguments.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn parses_gcc_quotes_escapes_and_empty_arguments() {
+        let parsed = parse_gcc_response_file(
+            r#"one "two words" 'three words' four\ five "" "quoted\"value""#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            os(&[
+                "one",
+                "two words",
+                "three words",
+                "four five",
+                "",
+                "quoted\"value"
+            ])
+        );
+    }
+
+    #[test]
+    fn recursively_expands_response_files() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("inner.rsp"),
+            "-DVALUE=1 'source file.c'",
+        )
+        .unwrap();
+        fs::write(directory.path().join("outer.rsp"), "@inner.rsp -c").unwrap();
+
+        let expanded = expand_response_files(&os(&["@outer.rsp"]), directory.path()).unwrap();
+        assert_eq!(expanded, os(&["-DVALUE=1", "source file.c", "-c"]));
+    }
+
+    #[test]
+    fn rejects_response_file_cycles_and_depth_overflow() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("a.rsp"), "@b.rsp").unwrap();
+        fs::write(directory.path().join("b.rsp"), "@a.rsp").unwrap();
+        let error = expand_response_files(&os(&["@a.rsp"]), directory.path()).unwrap_err();
+        assert!(error.to_string().contains("cycle"));
+
+        fs::write(directory.path().join("single.rsp"), "-c").unwrap();
+        let limits = ResponseFileLimits {
+            maximum_depth: 0,
+            ..ResponseFileLimits::default()
+        };
+        let error =
+            expand_response_files_with_limits(&os(&["@single.rsp"]), directory.path(), limits)
+                .unwrap_err();
+        assert!(error.to_string().contains("maximum depth"));
+    }
+
+    #[test]
+    fn response_file_cannot_hide_forbidden_arguments() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("args.rsp"),
+            "--target evil -c source.c",
+        )
+        .unwrap();
+        let error = prepare_invocation(
+            &os(&["@args.rsp"]),
+            &["--target=trusted".into()],
+            directory.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--target"));
+    }
+
+    #[test]
+    fn rejects_response_files_forwarded_beyond_the_policy_boundary() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("link.rsp"), "--plugin=/tmp/evil.so").unwrap();
+        fs::write(directory.path().join("driver.rsp"), "-Wl,@link.rsp").unwrap();
+
+        for arguments in [
+            os(&["-Wl,@link.rsp"]),
+            os(&["-Xlinker", "@link.rsp"]),
+            os(&["@driver.rsp"]),
+        ] {
+            assert!(
+                expand_response_files(&arguments, directory.path()).is_err(),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_driver_and_forwarded_linker_escape_options() {
+        for arguments in [
+            os(&["--sysroot=/host"]),
+            os(&["-B/usr/bin"]),
+            os(&["-fno-integrated-as"]),
+            os(&["-fno-integrated-cc1"]),
+            os(&["-fno-integrated-tools"]),
+            os(&["-fuse-ld=/usr/bin/ld"]),
+            os(&["-Wl,--dynamic-linker=/host/loader"]),
+            os(&["-Xlinker", "--plugin=/tmp/evil.so"]),
+            os(&["/clang:--target=evil"]),
+            os(&["/clang:-Wl,--plugin=/tmp/evil.so"]),
+            os(&["/clang:-Xlinker=--plugin=/tmp/evil.so"]),
+            os(&["-Wp,-I/usr/include"]),
+            os(&["-Xpreprocessor", "-I/usr/include"]),
+            os(&["/clang:-I/usr/include"]),
+            os(&["/link", "/machine:arm64"]),
+            os(&["-stdlib=libstdc++"]),
+            os(&["-rtlib=libgcc"]),
+            os(&["-unwindlib=libgcc"]),
+            os(&["-mmacosx-version-min=15.0"]),
+            os(&["-static-libgcc"]),
+            os(&["-arch", "x86_64"]),
+            os(&["-m32"]),
+            os(&["-mabi=ilp32"]),
+            os(&["/arch:AVX2"]),
+        ] {
+            assert!(
+                validate_user_arguments(&arguments).is_err(),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_direct_linker_escape_options() {
+        for arguments in [
+            os(&["--plugin=/tmp/evil.so"]),
+            os(&["--sysroot", "/host"]),
+            os(&["-syslibroot", "/host"]),
+            os(&["/machine:arm64"]),
+        ] {
+            assert!(
+                validate_direct_linker_arguments(&arguments).is_err(),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_contract_forbidden_args_cannot_be_forwarded() {
+        let forbidden = vec!["-nostdlib".to_owned()];
+        for arguments in [
+            os(&["-nostdlib"]),
+            os(&["-Wl,-nostdlib"]),
+            os(&["-Xlinker", "-nostdlib"]),
+            os(&["/link", "-nostdlib"]),
+            os(&["/clang:-nostdlib"]),
+        ] {
+            assert!(
+                validate_manifest_forbidden_arguments(&arguments, &forbidden).is_err(),
+                "{arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_profile_forbidden_include_and_library_roots() {
+        let directory = tempdir().unwrap();
+        let host_root = directory.path().join("host");
+        fs::create_dir_all(host_root.join("include")).unwrap();
+        fs::create_dir_all(host_root.join("lib")).unwrap();
+        let forbidden = vec![host_root.to_string_lossy().into_owned()];
+        let include = format!("-I{}", host_root.join("include").display());
+        let library = host_root.join("lib").to_string_lossy().into_owned();
+        let joined_library = format!("-L{library}");
+        let forwarded_library = format!("-Wl,-L,{library}");
+        let xlinker_library = format!("-Xlinker={library}");
+        let msvc_library = format!("/libpath:{library}");
+
+        for arguments in [
+            os(&[&include]),
+            os(&["-L", &library]),
+            os(&[&joined_library]),
+            os(&[&forwarded_library]),
+            os(&["-Xlinker", "-L", "-Xlinker", &library]),
+            os(&["-Xlinker=-L", &xlinker_library]),
+            os(&["/link", &msvc_library]),
+        ] {
+            assert!(
+                validate_forbidden_path_arguments(&arguments, &forbidden, directory.path())
+                    .is_err(),
+                "{arguments:?}"
+            );
+        }
+
+        validate_forbidden_path_arguments(
+            &os(&["-Iworkspace/include", "-Lworkspace/lib"]),
+            &forbidden,
+            directory.path(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn permits_normal_compile_and_link_arguments() {
+        validate_user_arguments(&os(&[
+            "-c",
+            "source.c",
+            "-O2",
+            "-Iworkspace/include",
+            "-Lworkspace/lib",
+            "-Wl,--gc-sections",
+            "-o",
+            "output.o",
+        ]))
+        .unwrap();
+    }
+
+    #[test]
+    fn prepends_trusted_profile_arguments() {
+        let prepared = prepare_invocation(
+            &os(&["-c", "source.c"]),
+            &["--target=trusted".into(), "--sysroot=/trusted".into()],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&["--target=trusted", "--sysroot=/trusted", "-c", "source.c"])
+        );
+    }
+
+    #[test]
+    fn recognizes_queries_and_rejects_mixed_query_invocations() {
+        assert_eq!(
+            parse_driver_query(&os(&["-print-file-name=crt1.o"])).unwrap(),
+            Some(DriverQuery::PrintFileName("crt1.o".into()))
+        );
+        assert!(parse_driver_query(&os(&["--print-sysroot", "source.c"])).is_err());
+    }
+
+    #[test]
+    fn reports_builtin_and_manifest_environment_pollution() {
+        let variables = vec![
+            (OsString::from("PATH"), OsString::from("/bin")),
+            (OsString::from("CPATH"), OsString::from("/poison")),
+            (
+                OsString::from("CUSTOM_TOOL_PATH"),
+                OsString::from("/poison"),
+            ),
+        ];
+        let found = find_polluting_environment(variables, &["CUSTOM_TOOL_PATH".into()]);
+        assert_eq!(found, vec!["CPATH", "CUSTOM_TOOL_PATH"]);
+    }
+}

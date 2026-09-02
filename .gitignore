@@ -1,0 +1,5 @@
+/target/
+dist/
+/.rcc-cache/
+*.rccpack
+.DS_Store

@@ -1,0 +1,72 @@
+# RCC developer and release tasks. List them with `mise tasks`.
+#
+# A distributable macOS release needs the two pinned LLVM archives and a new
+# output directory:
+#   mise run build:release -- \
+#     /path/to/LLVM-22.1.8-macOS-ARM64.tar.xz \
+#     /path/to/llvm-project-22.1.8.src.tar.xz \
+#     /absolute/path/to/new-output-directory
+
+min_version = "2024.11.1"
+
+[tools]
+# Cargo.toml enforces 1.85 as the MSRV; use the current stable toolchain for
+# normal development, including rustfmt and clippy.
+rust = { version = "stable", components = "rustfmt,clippy" }
+
+[tasks.fetch]
+description = "Fetch the locked Rust dependency graph"
+run = "cargo fetch --locked"
+
+[tasks.build]
+description = "Build the development workspace (not the distributable static-engine release)"
+run = "cargo build --workspace --locked"
+
+[tasks."build:pack"]
+description = "Build the release rcc-pack utility"
+run = "cargo build --release --locked -p rcc-pack"
+
+[tasks."build:release"]
+description = "Build the static macOS AArch64 release; pass bootstrap archive, source archive, and a new output directory"
+depends = ["fetch"]
+# These are build-host tools only. The resulting rcc binary does not depend on
+# CMake, Ninja, or a system C/C++ compiler at runtime.
+tools = { cmake = "4.4.3", ninja = "1.13.1" }
+run = "./scripts/build-macos-arm64-release.sh"
+
+[tasks.format]
+description = "Format all Rust code"
+run = "cargo fmt --all"
+
+[tasks."format:check"]
+description = "Check Rust formatting without modifying files"
+run = "cargo fmt --all -- --check"
+
+[tasks.test]
+description = "Run the workspace test suite"
+run = "cargo test --workspace --locked"
+
+[tasks.lint]
+description = "Run Clippy with warnings treated as errors"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks."metadata:check"]
+description = "Validate release scripts and pinned LLVM lock files"
+run = '''
+sh -n scripts/build-macos-arm64-release.sh
+sh -n scripts/stage-llvm-macos-arm64.sh
+python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
+python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
+'''
+
+[tasks.check]
+description = "Run formatting, tests, lint, and release-metadata checks"
+run = '''
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+sh -n scripts/build-macos-arm64-release.sh
+sh -n scripts/stage-llvm-macos-arm64.sh
+python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
+python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
+'''
