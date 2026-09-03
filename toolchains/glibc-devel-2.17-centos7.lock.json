@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "name": "glibc-devel-2.17-326.el7_9.x86_64.rpm",
+  "role": "linux_x86_64_glibc217_crt",
+  "source": "https://vault.centos.org/7.9.2009/updates/x86_64/Packages/glibc-devel-2.17-326.el7_9.x86_64.rpm",
+  "sha256": "68765f29d06d31652e80d398846d899e7437a836c1fffeb61248afa76e51b90f",
+  "license": "LGPL-2.1-or-later AND GPL-2.0-or-later",
+  "notes": "crt1/crti/crtn/libc_nonshared.a and linker scripts"
+}

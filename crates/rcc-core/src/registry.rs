@@ -242,6 +242,7 @@ fn forbidden_roots(os: &str) -> Vec<String> {
     }
 }
 
+#[allow(dead_code)]
 fn unix_tools() -> &'static [ToolKind] {
     &[
         ToolKind::Cc,
@@ -256,8 +257,7 @@ fn unix_tools() -> &'static [ToolKind] {
 
 fn linux_musl_tools() -> &'static [ToolKind] {
     // The static engine currently exposes Clang, LLD, and llvm-ar/ranlib.
-    // objcopy/strip remain registered for GNU/glibc profiles that are not yet
-    // in the payload.
+    // objcopy/strip stay registered only on Windows GNU profiles.
     &[
         ToolKind::Cc,
         ToolKind::Cxx,
@@ -388,7 +388,7 @@ fn linux_musl(id: &str, kind: ProfileKind, arch: &str, minimum_os: &str) -> Prof
         "libunwind",
         Some("pthread"),
         "itanium",
-        "rcc-libcxx",
+        "libcxx",
         "libcxx",
         "static",
         Some(&format!("sysroot-linux-{arch}-musl125")),
@@ -425,18 +425,23 @@ fn linux_glibc(id: &str, kind: ProfileKind, arch: &str, minimum_os: &str) -> Pro
         Some("2.17"),
         Some(loader),
         "dynamic",
-        "libgcc",
-        "libgcc_s",
+        "compiler-rt",
+        "libunwind",
         Some("pthread"),
         "itanium",
-        "libstdcxx",
-        "libstdcxx",
+        "libcxx",
+        "libcxx",
         "static",
         Some(&format!("sysroot-linux-{arch}-gnu-glibc217")),
         None,
-        unix_tools(),
+        linux_musl_tools(),
         &["lib/clang/22/include", "sysroot/usr/include"],
-        &["sysroot/usr/lib", "sysroot/lib"],
+        &[
+            "sysroot/usr/lib",
+            "sysroot/lib",
+            "sysroot/usr/lib64",
+            "sysroot/lib64",
+        ],
         &[],
     )
 }
@@ -620,8 +625,16 @@ mod tests {
         );
         let musl = resolve_target_profile("linux-x86_64-musl-static").unwrap();
         assert!(!musl.tool_kinds.contains(&ToolKind::Objcopy));
-        assert_eq!(musl.cxx_headers, "rcc-libcxx");
+        assert_eq!(musl.cxx_headers, "libcxx");
         assert_eq!(musl.linker_flavor, LinkerFlavor::Elf);
+        let gnu = resolve_target_profile("linux-x86_64-gnu-glibc217").unwrap();
+        assert_eq!(gnu.cxx_headers, "libcxx");
+        assert_eq!(gnu.compiler_runtime, "compiler-rt");
+        assert_eq!(gnu.unwind_runtime, "libunwind");
+        assert_eq!(gnu.cxx_runtime, "libcxx");
+        assert_eq!(gnu.crt_mode, "dynamic");
+        assert!(gnu.library_roots.iter().any(|path| path.contains("lib64")));
+        assert!(!gnu.tool_kinds.contains(&ToolKind::Objcopy));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use rcc_core::{EnvironmentManifest, RUSTC_LINUX_MUSL_V0};
+use rcc_core::{EnvironmentManifest, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -15,6 +15,8 @@ use std::process::{Command, Stdio};
 
 const LINUX_X64_MUSL: &str = "x86_64-unknown-linux-musl";
 const LINUX_X64_MUSL_PROFILE: &str = "linux-x86_64-musl-static";
+const LINUX_X64_GNU: &str = "x86_64-unknown-linux-gnu";
+const LINUX_X64_GNU_PROFILE: &str = "linux-x86_64-gnu-glibc217";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -61,11 +63,8 @@ pub struct TargetPlan {
 
 pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Result<TargetPlan> {
     let rust_target = match target {
-        "x86_64-unknown-linux-gnu" => {
-            bail!(
-                "{target} needs a glibc sysroot that this RCC release does not yet ship; \
-                 use {LINUX_X64_MUSL} to produce a linux x86_64 binary against musl 1.2.5"
-            )
+        "linux-x86_64-gnu" | "linux-x64-gnu" | LINUX_X64_GNU | LINUX_X64_GNU_PROFILE => {
+            LINUX_X64_GNU.to_owned()
         }
         "linux-x86_64" | "linux-x64" | LINUX_X64_MUSL | LINUX_X64_MUSL_PROFILE => {
             LINUX_X64_MUSL.to_owned()
@@ -73,11 +72,17 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
         other => other.to_owned(),
     };
 
+    if rust_target == LINUX_X64_GNU {
+        return Ok(TargetPlan {
+            rust_target,
+            profile_id: profile_override.unwrap_or(LINUX_X64_GNU_PROFILE).to_owned(),
+            runtime_contract: RUSTC_LINUX_GNU_V0.to_owned(),
+            rustflags: vec!["-C".into(), "panic=abort".into()],
+        });
+    }
+
     if rust_target != LINUX_X64_MUSL {
-        bail!(
-            "cargo-rcc currently supports {LINUX_X64_MUSL} (linux x86_64 musl-static); \
-             got {target}"
-        );
+        bail!("cargo-rcc currently supports {LINUX_X64_MUSL} and {LINUX_X64_GNU}; got {target}");
     }
 
     Ok(TargetPlan {
@@ -129,11 +134,17 @@ fn run() -> Result<()> {
         cli.cargo_args = args;
     }
     if cli.cargo_args.is_empty() {
-        bail!("missing Cargo subcommand; try `cargo rcc build --target {LINUX_X64_MUSL}`");
+        bail!(
+            "missing Cargo subcommand; try `cargo rcc build --target {LINUX_X64_MUSL}` \
+             or `--target {LINUX_X64_GNU}`"
+        );
     }
 
     let cargo_target = cargo_target_from_args(&cli.cargo_args).with_context(|| {
-        format!("cargo-rcc requires --target {LINUX_X64_MUSL} (or an explicit --profile)")
+        format!(
+            "cargo-rcc requires --target {LINUX_X64_MUSL} or {LINUX_X64_GNU} \
+             (or an explicit --rcc-profile)"
+        )
     })?;
     let plan = plan_for_rust_target(&cargo_target, cli.profile.as_deref())?;
     let runtime_contract = cli
@@ -280,8 +291,10 @@ fn apply_rcc_environment(
 
     let unwind_dir = isolate_rustc_unwind(&plan.rust_target, cache_dir)?;
     let mut rustflags = plan.rustflags.clone();
-    rustflags.push("-L".into());
-    rustflags.push(format!("native={}", unwind_dir.display()));
+    if let Some(unwind_dir) = unwind_dir {
+        rustflags.push("-L".into());
+        rustflags.push(format!("native={}", unwind_dir.display()));
+    }
 
     // Target-only rustflags. Global CARGO_ENCODED_RUSTFLAGS would also apply
     // crt-static / panic=abort to host build scripts.
@@ -295,13 +308,18 @@ fn apply_rcc_environment(
     Ok(())
 }
 
-fn isolate_rustc_unwind(rust_target: &str, cache_dir: Option<&Path>) -> Result<PathBuf> {
+fn isolate_rustc_unwind(rust_target: &str, cache_dir: Option<&Path>) -> Result<Option<PathBuf>> {
     let sysroot = rustc_sysroot()?;
     let libunwind = sysroot
         .join("lib/rustlib")
         .join(rust_target)
         .join("lib/self-contained/libunwind.a");
     if !libunwind.is_file() {
+        // Official gnu rust-std does not ship a self-contained libunwind.a;
+        // unwind lives in rustc rlibs. musl still requires the isolated .a.
+        if rust_target.ends_with("-linux-gnu") {
+            return Ok(None);
+        }
         bail!(
             "rust-std for {rust_target} is missing {}; run `rustup target add {rust_target}`",
             libunwind.display()
@@ -321,7 +339,7 @@ fn isolate_rustc_unwind(rust_target: &str, cache_dir: Option<&Path>) -> Result<P
     })?;
     let dest = isolated.join("libunwind.a");
     sync_file(&libunwind, &dest)?;
-    Ok(isolated)
+    Ok(Some(isolated))
 }
 
 fn rustc_sysroot() -> Result<PathBuf> {
@@ -391,9 +409,32 @@ mod tests {
     }
 
     #[test]
-    fn rejects_glibc_until_the_sysroot_exists() {
-        let error = plan_for_rust_target("x86_64-unknown-linux-gnu", None).unwrap_err();
-        assert!(error.to_string().contains("glibc"));
+    fn plans_glibc_gnu_without_crt_static() {
+        for query in [
+            LINUX_X64_GNU,
+            LINUX_X64_GNU_PROFILE,
+            "linux-x86_64-gnu",
+            "linux-x64-gnu",
+        ] {
+            let plan = plan_for_rust_target(query, None).unwrap();
+            assert_eq!(plan.rust_target, LINUX_X64_GNU, "{query}");
+            assert_eq!(plan.profile_id, LINUX_X64_GNU_PROFILE, "{query}");
+            assert_eq!(plan.runtime_contract, RUSTC_LINUX_GNU_V0, "{query}");
+            assert!(
+                !plan
+                    .rustflags
+                    .iter()
+                    .any(|flag| flag.contains("crt-static")),
+                "{query}"
+            );
+            assert!(
+                !plan
+                    .rustflags
+                    .iter()
+                    .any(|flag| flag.contains("link-self-contained")),
+                "{query}"
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 RCC 是一个可重定位的原生 C/C++ 工具链提供器。它把经过裁剪的 Clang driver、LLD 与 llvm-ar 作为静态库链接进单个 multicall `rcc`，并把 Clang resource、headers 与 runtime 作为纯资源 pack 内嵌。首次使用只物化资源与 profile 视图；`cc`、`cxx`、flavor-aware linker（当前为 `ld64.lld`）、`ar`、`ranlib` 路径都是同一份 RCC controller 的 cache hardlink alias，不再解包三套上游 executable，也没有独立 `rcc-launcher`。
 
-RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。Cargo 集成由独立的 `cargo-rcc` adapter 完成；当前已注册 `native-rcc-owned` 与面向 musl 的 `rustc-linux-musl-v0` 契约。
+RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。Cargo 集成由独立的 `cargo-rcc` adapter 完成；当前已注册 `native-rcc-owned`、`rustc-linux-musl-v0` 与 `rustc-linux-gnu-v0` 契约。
 
 详细设计见 [docs/designs/ARCH.md](docs/designs/ARCH.md)。
 
@@ -14,12 +14,13 @@ RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：�
 | --- | --- | --- | --- | --- |
 | `aarch64-apple-darwin` | `macos-aarch64` | 静态集成 Clang、LLD、llvm-ar/ranlib 22.1.8 | 外部 Apple macOS SDK | 已包含 |
 | `aarch64-apple-darwin` | `host-macos-aarch64` | 同上，供 host 构建上下文使用 | 外部 Apple macOS SDK | 已包含 |
-| `aarch64-apple-darwin` | `linux-x86_64-musl-static` | 静态集成 Clang、ELF LLD、llvm-ar；musl 1.2.5 + compiler-rt builtins/CRT | pack 内 hermetic musl sysroot | 已包含 |
+| `aarch64-apple-darwin` | `linux-x86_64-musl-static` | 静态集成 Clang、ELF LLD、llvm-ar；musl 1.2.5 + compiler-rt + 预编 libc++ | pack 内 hermetic musl sysroot | 已包含（C / C++ / cargo-rcc） |
+| `aarch64-apple-darwin` | `linux-x86_64-gnu-glibc217` | 同上引擎；CentOS 7 glibc 2.17 链接期 sysroot + compiler-rt + 预编 libc++ | pack 内 2.17 头/CRT/`libc.so.6` + `libc++.a`；运行时目标机 glibc ≥ 2.17 | 已包含（C / C++ / cargo-rcc） |
 | 任意 | `macos-x86_64` | — | — | 未包含 |
-| 任意 | 其他 Linux profiles（glibc 2.17、aarch64 musl） | — | — | 未包含 |
+| 任意 | 其他 Linux profiles（aarch64 musl/gnu） | — | — | 未包含 |
 | 任意 | Windows GNU/GNULLVM/MSVC profiles | — | — | 未包含 |
 
-当前 resource-only payload 内含 libc++ headers、Clang resource headers、Darwin compiler-rt、linux x86_64 musl 1.2.5 sysroot、linux x86_64 compiler-rt builtins/CRT 和 provenance，不含 Clang、LLD、llvm-ar 或 launcher executable。Apple SDK 不随 RCC 分发：运行时通过 `RCC_APPLE_SDK_ROOT` 指定，或在 macOS 上通过 `xcrun --sdk macosx --show-sdk-path` 自动发现。RCC 不调用系统 clang、gcc 或 ld；Apple SDK、操作系统动态库以及 RCC 本身所需的 macOS 运行环境仍是外部依赖。
+当前 resource-only payload 内含 libc++ headers、Clang resource headers、Darwin compiler-rt、linux x86_64 musl 1.2.5 sysroot（含预编 libc++）、linux x86_64 gnu glibc 2.17 链接期 sysroot（含预编 libc++）、linux x86_64 compiler-rt builtins/CRT 和 provenance，不含 Clang、LLD、llvm-ar 或 launcher executable。Apple SDK 不随 RCC 分发：运行时通过 `RCC_APPLE_SDK_ROOT` 指定，或在 macOS 上通过 `xcrun --sdk macosx --show-sdk-path` 自动发现。RCC 不调用系统 clang、gcc 或 ld；Apple SDK、操作系统动态库以及 RCC 本身所需的 macOS 运行环境仍是外部依赖。
 
 ### 为什么采用静态 multicall
 
@@ -31,11 +32,12 @@ RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：�
 
 ## 构建 release
 
-要求 Apple Silicon macOS、Rust 1.85 或更新版本、Xcode Command Line Tools（仅供 release 构建期 host linker）、CMake、Ninja，以及三个锁定归档：
+要求 Apple Silicon macOS、Rust 1.85 或更新版本、Xcode Command Line Tools（仅供 release 构建期 host linker）、CMake、Ninja，以及锁定归档：
 
 - `LLVM-22.1.8-macOS-ARM64.tar.xz`：仅作为 bootstrap compiler 和 Clang/resource 文件来源；
 - `llvm-project-22.1.8.src.tar.xz`：构建实际静态集成的、可裁剪 LLVM/Clang/LLD 引擎；
-- `musl-1.2.5.tar.gz`：linux x86_64 hermetic sysroot，见 `toolchains/musl-1.2.5.lock.json`。
+- `musl-1.2.5.tar.gz`：linux x86_64 hermetic sysroot，见 `toolchains/musl-1.2.5.lock.json`；
+- CentOS 7 glibc 2.17 RPM（`glibc` / `glibc-headers` / `glibc-devel` / `kernel-headers`）：linux x86_64 gnu 链接期 sysroot，见 `toolchains/glibc-*-centos7*.lock.json`。缺失时 release 仍可只带 musl。
 
 归档的固定 SHA-256、上游 commit 和默认静态构建配置分别见 `toolchains/llvm-22.1.8-macos-arm64.lock.json`、`toolchains/llvm-project-22.1.8-source.lock.json` 与 `toolchains/musl-1.2.5.lock.json`。构建脚本使用 Cargo offline 模式，因此 Rust 依赖须已在本机缓存。锁定归档下载到 gitignored 的 `inner/`，后续 release 构建直接复用：
 
@@ -135,6 +137,13 @@ export RCC=/absolute/path/to/rcc-release/rcc
 
 `openssl` crate 的 `vendored` feature 会编译 OpenSSL 自己的 C 源码；这就是 cargo-rcc 对 cc-rs 的验收路径。产物是 `x86_64-unknown-linux-musl` static-pie ELF，可在 linux x64 上运行，不依赖 glibc。OpenSSL 的 `Configure` 需要本机 `perl`。当前不支持 `x86_64-unknown-linux-gnu`（glibc 2.17 sysroot 尚未进入 payload）。
 
+更大的 cc-rs 栈（OpenSSL + bundled SQLite）、多翻译单元 C、以及 `rcc verify` 对 hermetic ELF 的检查见 [docs/verification.md](docs/verification.md)。一键验收（Apple Silicon 上会启动 Lima 并执行产物）：
+
+```sh
+export RCC=/absolute/path/to/rcc-release/rcc
+mise run test:linux-musl
+```
+
 等价写法：`cargo rcc --rcc "$RCC" build --manifest-path examples/openssl-linux/Cargo.toml --target x86_64-unknown-linux-musl --release`。
 
 如果显式加载外部 pack，必须确认它是本地信任输入：
@@ -165,11 +174,13 @@ RCC 的 profile-bound multicall alias 负责注入 target triple、resource dire
 
 ## 当前限制
 
-- release controller 目前只在 Apple Silicon macOS 上运行；已交付的 target 是 `macos-aarch64` 与 `linux-x86_64-musl-static`；
-- glibc、Windows 和 macOS x86_64 payload 尚未交付；
+- release controller 目前只在 Apple Silicon macOS 上运行；已交付的 target 是 `macos-aarch64`、`linux-x86_64-musl-static` 与 `linux-x86_64-gnu-glibc217`（C / C++ / cargo-rcc）；
+- Windows 和 macOS x86_64 payload 尚未交付；
 - 静态 LLVM 构建启用 AArch64 与 X86，仍不是通用 all-target LLVM distribution；
 - Apple SDK 必须由使用者合法安装并在本机提供，RCC 不分发该 SDK；
-- `cargo-rcc` 目前只编排 `x86_64-unknown-linux-musl`，并要求 host 为 `aarch64-apple-darwin`；
+- `cargo-rcc` 编排 `x86_64-unknown-linux-musl` 与 `x86_64-unknown-linux-gnu`，并要求 host 为 `aarch64-apple-darwin`；
+- linux musl / gnu 均携带对着各自 sysroot 预编的静态 `libc++.a`；默认不提供 shared `libc++.so`（多 DSO 会各带一份静态 libc++）；
+- 大型 C / cc-rs 项目的能力边界与 ELF 验收见 [docs/verification.md](docs/verification.md)；
 - `.rccpack` 有逐文件与整体 SHA-256 完整性校验，但当前格式本身没有发行方数字签名；外部 pack 必须显式确认；
 - 构建脚本固定校验上游 LLVM/musl 归档摘要并记录 attestation URL，但尚未在脚本中执行 attestation 签名验证；
 - 尚未提供 release code signing、Apple notarization、Linux/Windows release pipeline 或完整 SBOM 自动生成。

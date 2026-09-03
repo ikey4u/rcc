@@ -1,0 +1,26 @@
+# This template requires Lima v0.22.0 or later.
+# x86_64 CentOS 7 guest: glibc 2.17, for RCC linux-x86_64-gnu-glibc217 runtime tests.
+# Do not reuse the musl Alpine instance (rcc-x64).
+minimumLimaVersion: "0.22.0"
+os: Linux
+arch: x86_64
+vmType: qemu
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+firmware:
+  legacyBIOS: true
+# CentOS 7 is kernel 3.10 and cannot use virtiofs for host mounts.
+mountType: reverse-sshfs
+containerd:
+  system: false
+  user: false
+images:
+  - location: "https://cloud.centos.org/centos/7/images/CentOS-7-x86_64-GenericCloud-2009.qcow2"
+    arch: x86_64
+  - location: "https://cloud.centos.org/altarch/7/images/CentOS-7-x86_64-GenericCloud-2009.qcow2"
+    arch: x86_64
+    digest: "sha256:e38bab0475cc6d004d2e17015969c659e5a308111851b0e2715e84646035bdd3"
+mounts:
+  - location: "~"
+    writable: true

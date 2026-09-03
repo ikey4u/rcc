@@ -185,14 +185,9 @@ pub fn build_view_manifest(
         None => root.join(sysroot_directory(&pack.manifest.files, profile)?),
     };
     let cxx_headers = if profile.tool_kinds.contains(&ToolKind::Cxx) {
-        Some(cxx_header_directory(
-            &pack.manifest.files,
-            profile,
-            &root,
-            &sysroot,
-        )?)
+        cxx_header_directories(&pack.manifest.files, profile, &root, &sysroot)?
     } else {
-        None
+        Vec::new()
     };
 
     let mut tools = BTreeMap::new();
@@ -208,14 +203,8 @@ pub fn build_view_manifest(
                 driver_kind: static_driver_kind(profile, *kind),
             },
         );
-        let arguments = trusted_arguments(
-            profile,
-            *kind,
-            &root,
-            &sysroot,
-            &resource_dir,
-            cxx_headers.as_deref(),
-        )?;
+        let arguments =
+            trusted_arguments(profile, *kind, &root, &sysroot, &resource_dir, &cxx_headers)?;
         if !arguments.is_empty() {
             injected_args.insert(*kind, arguments);
         }
@@ -468,12 +457,12 @@ fn ensure_resource_only_pack(files: &[PackFile]) -> Result<()> {
     Ok(())
 }
 
-fn cxx_header_directory(
+fn cxx_header_directories(
     files: &[PackFile],
     profile: &Profile,
     root: &Path,
     sysroot: &Path,
-) -> Result<PathBuf> {
+) -> Result<Vec<PathBuf>> {
     match profile.cxx_headers.as_str() {
         "rcc-libcxx" => {
             const RELATIVE: &str = "lib/c++/v1";
@@ -481,17 +470,27 @@ fn cxx_header_directory(
                 has_directory(files, RELATIVE),
                 "payload has no RCC-owned libc++ headers at {RELATIVE}"
             );
-            Ok(root.join(RELATIVE))
+            Ok(vec![root.join(RELATIVE)])
         }
         "libcxx" => {
+            const SHARED: &str = "lib/c++/linux/v1";
             let relative = format!("sysroots/{}/include/c++/v1", profile.profile_id);
+            let has_profile = has_directory(files, &relative)
+                || has_directory(files, "sysroot/include/c++/v1");
+            let has_shared = has_directory(files, SHARED);
             ensure!(
-                has_directory(files, &relative)
-                    || has_directory(files, "sysroot/include/c++/v1"),
+                has_profile || has_shared,
                 "payload has no libc++ headers for profile {}",
                 profile.profile_id
             );
-            Ok(sysroot.join("include/c++/v1"))
+            let mut directories = Vec::new();
+            if has_profile {
+                directories.push(sysroot.join("include/c++/v1"));
+            }
+            if has_shared {
+                directories.push(root.join(SHARED));
+            }
+            Ok(directories)
         }
         implementation => bail!(
             "controller has no fail-closed C++ header binding for profile {} implementation {}; this profile cannot be activated by this release",
@@ -517,7 +516,7 @@ fn trusted_arguments(
     root: &Path,
     sysroot: &Path,
     resource_dir: &Path,
-    cxx_headers: Option<&Path>,
+    cxx_headers: &[PathBuf],
 ) -> Result<Vec<String>> {
     if !matches!(kind, ToolKind::Cc | ToolKind::Cxx) {
         return Ok(Vec::new());
@@ -529,11 +528,20 @@ fn trusted_arguments(
         format!("-resource-dir={}", resource_dir.display()),
     ];
     if kind == ToolKind::Cxx {
-        let cxx_headers = cxx_headers.context("C++ driver has no bound header directory")?;
+        ensure!(
+            !cxx_headers.is_empty(),
+            "C++ driver has no bound header directory"
+        );
         arguments.push("--driver-mode=g++".into());
         arguments.push("-nostdinc++".into());
-        arguments.push("-isystem".into());
-        arguments.push(cxx_headers.display().to_string());
+        for directory in cxx_headers {
+            arguments.push("-isystem".into());
+            arguments.push(directory.display().to_string());
+        }
+        if profile.os == "linux" {
+            arguments.push("-stdlib=libc++".into());
+            arguments.push("-faligned-allocation".into());
+        }
     }
     if profile.tool_kinds.contains(&ToolKind::Linker) {
         let linker = launcher_path_from_root(root, profile, ToolKind::Linker);
@@ -550,9 +558,24 @@ fn trusted_arguments(
     }
     if profile.os == "linux" {
         arguments.push("--rtlib=compiler-rt".into());
-        arguments.push("-unwindlib=none".into());
-        if profile.crt_mode == "static" {
+        if profile.libc_family == "musl" && profile.crt_mode == "static" {
+            if kind == ToolKind::Cxx {
+                arguments.push("-unwindlib=libunwind".into());
+            } else {
+                arguments.push("-unwindlib=none".into());
+            }
             arguments.push("-static".into());
+        } else if profile.libc_family == "glibc" {
+            if kind == ToolKind::Cxx {
+                arguments.push("-unwindlib=libunwind".into());
+            } else {
+                arguments.push("-unwindlib=none".into());
+            }
+        } else {
+            arguments.push("-unwindlib=none".into());
+            if profile.crt_mode == "static" {
+                arguments.push("-static".into());
+            }
         }
     }
     Ok(arguments)
@@ -648,14 +671,18 @@ mod tests {
         let profile = registry::resolve_target_profile("linux-x86_64-musl-static").unwrap();
         for directory in [
             "lib/clang/22",
-            "lib/c++/v1",
             "sysroots/linux-x86_64-musl-static/usr/include",
             "sysroots/linux-x86_64-musl-static/usr/lib",
+            "sysroots/linux-x86_64-musl-static/include/c++/v1",
         ] {
             fs::create_dir_all(source.join(directory)).unwrap();
         }
         fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
-        fs::write(source.join("lib/c++/v1/vector"), b"header").unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-musl-static/include/c++/v1/vector"),
+            b"header",
+        )
+        .unwrap();
         fs::write(
             source.join("sysroots/linux-x86_64-musl-static/usr/include/stdio.h"),
             b"stdio",
@@ -701,7 +728,162 @@ mod tests {
             .iter()
             .any(|argument| argument == "--rtlib=compiler-rt"));
         assert!(injected.iter().any(|argument| argument == "-static"));
+        let cxx = &view.injected_args[&ToolKind::Cxx];
+        assert!(cxx.iter().any(|argument| argument == "-static"));
+        assert!(cxx
+            .iter()
+            .any(|argument| argument == "-unwindlib=libunwind"));
+        assert!(cxx.iter().any(|argument| argument == "-stdlib=libc++"));
         assert_eq!(view.runtime_contract.contract_id, "rustc-linux-musl-v0");
+        validate_view_binding(&view).unwrap();
+    }
+
+    #[test]
+    fn binds_linux_gnu_sysroot_without_static() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let profile = registry::resolve_target_profile("linux-x86_64-gnu-glibc217").unwrap();
+        for directory in [
+            "lib/clang/22",
+            "sysroots/linux-x86_64-gnu-glibc217/usr/include",
+            "sysroots/linux-x86_64-gnu-glibc217/usr/lib",
+            "sysroots/linux-x86_64-gnu-glibc217/include/c++/v1",
+        ] {
+            fs::create_dir_all(source.join(directory)).unwrap();
+        }
+        fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-gnu-glibc217/include/c++/v1/vector"),
+            b"header",
+        )
+        .unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-gnu-glibc217/usr/include/stdio.h"),
+            b"stdio",
+        )
+        .unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-gnu-glibc217/usr/lib/libc.so.6"),
+            b"libc",
+        )
+        .unwrap();
+        let pack = create_pack(
+            &source,
+            &temporary.path().join("fixture.rccpack"),
+            &PackOptions::new(
+                "fixture",
+                "r1",
+                "aarch64-apple-darwin",
+                [profile.profile_id.as_str()],
+            ),
+        )
+        .unwrap();
+        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let controller = materializer
+            .persist_controller(&controller_fixture(temporary.path()))
+            .unwrap();
+        let view = build_view_manifest(
+            &materializer,
+            &pack,
+            profile,
+            &contract,
+            &ControllerIdentity::new(
+                &"11".repeat(32),
+                &controller,
+                "llvm-22.1.8-aarch64-x86-minsize",
+            ),
+            None,
+        )
+        .unwrap();
+        let injected = &view.injected_args[&ToolKind::Cc];
+        assert!(injected
+            .iter()
+            .any(|argument| argument == "--rtlib=compiler-rt"));
+        assert!(!injected.iter().any(|argument| argument == "-static"));
+        assert!(injected
+            .iter()
+            .any(|argument| argument == "-unwindlib=none"));
+        let cxx = &view.injected_args[&ToolKind::Cxx];
+        assert!(cxx
+            .iter()
+            .any(|argument| argument == "-unwindlib=libunwind"));
+        assert!(cxx.iter().any(|argument| argument == "-stdlib=libc++"));
+        validate_view_binding(&view).unwrap();
+    }
+
+    #[test]
+    fn linux_cxx_uses_shared_headers_and_profile_config_site() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let profile = registry::resolve_target_profile("linux-x86_64-gnu-glibc217").unwrap();
+        for directory in [
+            "lib/clang/22",
+            "lib/c++/linux/v1",
+            "sysroots/linux-x86_64-gnu-glibc217/usr/include",
+            "sysroots/linux-x86_64-gnu-glibc217/usr/lib",
+            "sysroots/linux-x86_64-gnu-glibc217/include/c++/v1",
+        ] {
+            fs::create_dir_all(source.join(directory)).unwrap();
+        }
+        fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
+        fs::write(source.join("lib/c++/linux/v1/vector"), b"vector").unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-gnu-glibc217/include/c++/v1/__config_site"),
+            b"site",
+        )
+        .unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-gnu-glibc217/usr/include/stdio.h"),
+            b"stdio",
+        )
+        .unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-gnu-glibc217/usr/lib/libc.so.6"),
+            b"libc",
+        )
+        .unwrap();
+        let pack = create_pack(
+            &source,
+            &temporary.path().join("fixture.rccpack"),
+            &PackOptions::new(
+                "fixture",
+                "r1",
+                "aarch64-apple-darwin",
+                [profile.profile_id.as_str()],
+            ),
+        )
+        .unwrap();
+        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let controller = materializer
+            .persist_controller(&controller_fixture(temporary.path()))
+            .unwrap();
+        let view = build_view_manifest(
+            &materializer,
+            &pack,
+            profile,
+            &contract,
+            &ControllerIdentity::new(
+                &"11".repeat(32),
+                &controller,
+                "llvm-22.1.8-aarch64-x86-minsize",
+            ),
+            None,
+        )
+        .unwrap();
+        let cxx = &view.injected_args[&ToolKind::Cxx];
+        let isystem_dirs: Vec<&str> = cxx
+            .windows(2)
+            .filter(|pair| pair[0] == "-isystem")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert!(isystem_dirs
+            .iter()
+            .any(|path| path.contains("include/c++/v1")));
+        assert!(isystem_dirs
+            .iter()
+            .any(|path| path.contains("lib/c++/linux/v1")));
         validate_view_binding(&view).unwrap();
     }
 

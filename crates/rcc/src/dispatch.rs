@@ -410,6 +410,27 @@ fn validate_and_sanitize_linker_binding(
                 output.extend_from_slice(&arguments[index..index + 2]);
                 index += 2;
             }
+            "--dynamic-linker" | "-dynamic-linker" => {
+                let value = arguments
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .context("-dynamic-linker requires a UTF-8 path")?;
+                ensure_bound_dynamic_linker(manifest, value)?;
+                output.extend_from_slice(&arguments[index..index + 2]);
+                index += 2;
+            }
+            value
+                if value.starts_with("--dynamic-linker=")
+                    || value.starts_with("-dynamic-linker=") =>
+            {
+                let path = value
+                    .split_once('=')
+                    .map(|(_, path)| path)
+                    .context("linker -dynamic-linker= requires a path")?;
+                ensure_bound_dynamic_linker(manifest, path)?;
+                output.push(arguments[index].clone());
+                index += 1;
+            }
             _ => {
                 validate_direct_linker_arguments(&arguments[index..index + 1])?;
                 output.push(arguments[index].clone());
@@ -431,6 +452,23 @@ fn ensure_bound_linker_sysroot(manifest: &ViewManifest, value: &Path) -> Result<
             actual.display(),
             expected.display()
         );
+    }
+    Ok(())
+}
+
+fn ensure_bound_dynamic_linker(manifest: &ViewManifest, value: &str) -> Result<()> {
+    let expected = manifest
+        .profile
+        .dynamic_loader
+        .as_deref()
+        .with_context(|| {
+            format!(
+                "profile {} has no dynamic loader; -dynamic-linker is not allowed",
+                manifest.profile.profile_id
+            )
+        })?;
+    if value != expected {
+        bail!("linker dynamic interpreter {value} does not match profile {expected}");
     }
     Ok(())
 }

@@ -239,6 +239,7 @@ if [ "$reuse_sysroot" -eq 0 ]; then
 fi
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repository=$(CDPATH= cd -- "$script_directory/.." && pwd)
 cp -L \
     "$script_directory/../toolchains/musl-1.2.5.lock.json" \
     "$stage/provenance/musl-1.2.5.lock.json"
@@ -248,5 +249,61 @@ test -f "$stage/lib/clang/22/lib/linux/libclang_rt.builtins-x86_64.a"
 test -f "$stage/lib/clang/22/lib/linux/clang_rt.crtbegin-x86_64.o"
 test -f "$stage/lib/clang/22/lib/linux/clang_rt.crtend-x86_64.o"
 test ! -e "$sysroot_destination/bin"
+
+# libc++ atomics on linux need <linux/futex.h>. musl does not ship UAPI
+# headers; overlay the same pinned CentOS 7 kernel-headers used by gnu.
+kernel_rpm=${RCC_KERNEL_HEADERS_RPM:-$repository/inner/kernel-headers-3.10.0-1160.el7.x86_64.rpm}
+kernel_sha256=81b4e4f401d2402736ceba4627eaafd5b615c2cc45aa4d4f941ea79562045139
+if [ ! -f "$kernel_rpm" ]; then
+    echo "kernel-headers RPM is required to build musl libc++: $kernel_rpm" >&2
+    exit 69
+fi
+kernel_actual=$(shasum -a 256 "$kernel_rpm" | awk '{print $1}')
+if [ "$kernel_actual" != "$kernel_sha256" ]; then
+    echo "kernel-headers digest mismatch: expected $kernel_sha256, got $kernel_actual" >&2
+    exit 65
+fi
+kernel_extract=$temporary/kernel-headers
+mkdir -p "$kernel_extract"
+if ! tar -xf "$kernel_rpm" -C "$kernel_extract" 2>/dev/null; then
+    if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
+        (cd "$kernel_extract" && rpm2cpio "$kernel_rpm" | cpio -idm --quiet)
+    else
+        echo "unable to extract kernel-headers RPM $kernel_rpm" >&2
+        exit 69
+    fi
+fi
+if [ ! -d "$kernel_extract/usr/include/linux" ]; then
+    echo "kernel-headers RPM did not contain usr/include/linux" >&2
+    exit 65
+fi
+for dir in linux asm asm-generic; do
+    if [ -e "$kernel_extract/usr/include/$dir" ]; then
+        mkdir -p "$sysroot_destination/usr/include/$dir"
+        cp -RL "$kernel_extract/usr/include/$dir/." "$sysroot_destination/usr/include/$dir/"
+    fi
+done
+cp -L \
+    "$script_directory/../toolchains/kernel-headers-3.10-centos7.lock.json" \
+    "$stage/provenance/kernel-headers-3.10-centos7.lock.json"
+test -f "$sysroot_destination/usr/include/linux/futex.h"
+
+cxx_build=${RCC_LINUX_MUSL_LIBCXX_BUILD:-$repository/inner/llvm-engine/libcxx-linux-x86_64-musl}
+"$script_directory/stage-linux-x86_64-libcxx.sh" \
+    "$sysroot_destination" \
+    "$stage/lib/clang/22" \
+    "$llvm_source" \
+    "$bootstrap_prefix" \
+    "$target_triple" \
+    musl \
+    "$cxx_build" \
+    "$stage/lib/c++/linux/v1"
+
+test -f "$sysroot_destination/usr/lib/libc++.a"
+test -f "$sysroot_destination/usr/lib/libc++abi.a"
+test -f "$sysroot_destination/usr/lib/libunwind.a"
+test -f "$stage/lib/c++/linux/v1/iostream"
+test -f "$sysroot_destination/include/c++/v1/__config_site"
+test ! -e "$sysroot_destination/include/c++/v1/vector"
 
 echo "staged linux x86_64 musl sysroot at $sysroot_destination"

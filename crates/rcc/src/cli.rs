@@ -316,6 +316,13 @@ fn print_licenses(options: &GlobalOptions) -> Result<()> {
             stdout.write_all(b"\n")?;
         }
     }
+    if let Ok(license) = pack::read_pack_file_bytes(payload.bytes(), "licenses/GLIBC-COPYING.LIB") {
+        stdout.write_all(b"\n## Embedded glibc license\n\n")?;
+        stdout.write_all(&license)?;
+        if !license.ends_with(b"\n") {
+            stdout.write_all(b"\n")?;
+        }
+    }
     Ok(())
 }
 
@@ -927,6 +934,31 @@ fn verify_artifact(profile_query: &str, path: &Path, json: bool) -> Result<()> {
             profile.profile_id,
             profile.object_format
         );
+    }
+    if profile.os == "linux" && profile.libc_family == "musl" && profile.crt_mode == "static" {
+        let violations = report.linux_musl_static_violations();
+        if !violations.is_empty() {
+            bail!(
+                "artifact is not a hermetic linux musl-static binary: {}",
+                violations.join("; ")
+            );
+        }
+    }
+    if profile.os == "linux" && profile.libc_family == "glibc" {
+        let max_glibc = profile
+            .libc_version
+            .as_deref()
+            .and_then(artifact::parse_dotted_glibc_version)
+            .unwrap_or((2, 17, 0));
+        let interpreter = profile.dynamic_loader.as_deref().unwrap_or("");
+        let violations = report.linux_gnu_glibc_violations(interpreter, max_glibc);
+        if !violations.is_empty() {
+            bail!(
+                "artifact is not a linux gnu glibc {} binary: {}",
+                profile.libc_version.as_deref().unwrap_or("2.17"),
+                violations.join("; ")
+            );
+        }
     }
 
     let verified = VerifiedArtifact {

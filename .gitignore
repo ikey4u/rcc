@@ -6,3 +6,9 @@ dist/
 .DS_Store
 examples/openssl-linux/target/
 examples/openssl-linux/Cargo.lock
+examples/linux-musl-c/out/
+examples/linux-musl-cxx/out/
+examples/linux-glibc-c/out/
+examples/linux-glibc-cxx/out/
+examples/native-stack-linux/target/
+examples/native-stack-linux/Cargo.lock

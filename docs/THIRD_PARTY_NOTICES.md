@@ -14,7 +14,9 @@ The macOS AArch64 RCC release statically links selected components built from
 - LLD 22.1.8, exposed by RCC as the Mach-O linker `ld64.lld` and the ELF linker
   `ld.lld`;
 - LLVM `llvm-ar` and `llvm-ranlib` 22.1.8;
-- libc++ 22.1.8 headers;
+- libc++ 22.1.8 headers (macOS pack root plus linux sysroot copies);
+- linux x86_64 musl and gnu prebuilt `libc++.a` / `libc++abi.a` / `libunwind.a`
+  compiled from the same pinned LLVM 22.1.8 source against each sysroot;
 - compiler-rt 22.1.8 runtime artifacts carried in the Clang resource directory.
 
 Upstream project: <https://github.com/llvm/llvm-project>
@@ -61,6 +63,25 @@ The musl copyright notice is copied into the generated payload at
 `licenses/MUSL-COPYRIGHT`. Source URL, digest and default static-build identity
 are recorded in `toolchains/musl-1.2.5.lock.json` and included in the resource
 payload.
+
+## CentOS 7 glibc 2.17 (link-time sysroot)
+
+The macOS AArch64 RCC release may also carry a `linux-x86_64-gnu-glibc217`
+sysroot staged from pinned CentOS 7 RPMs (headers, CRT, `libc_nonshared.a`, and
+link-time `libc.so.6`). Produced programs are dynamically linked and require
+**glibc ≥ 2.17** on the target machine; RCC does not ship a runnable glibc
+implementation for execution on the build host.
+
+RPMs, URLs and SHA-256 digests are recorded in:
+
+- `toolchains/glibc-2.17-centos7-runtime.lock.json`
+- `toolchains/glibc-headers-2.17-centos7.lock.json`
+- `toolchains/glibc-devel-2.17-centos7.lock.json`
+- `toolchains/kernel-headers-3.10-centos7.lock.json`
+
+License: LGPL-2.1-or-later AND GPL-2.0-or-later (glibc); GPL-2.0-only
+(kernel-headers UAPI). The glibc LGPL notice is copied into the payload at
+`licenses/GLIBC-COPYING.LIB` when the RPMs are staged.
 
 ## Apple SDK and operating-system components
 

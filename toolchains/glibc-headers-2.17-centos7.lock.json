@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "name": "glibc-headers-2.17-326.el7_9.x86_64.rpm",
+  "role": "linux_x86_64_glibc217_headers",
+  "source": "https://vault.centos.org/7.9.2009/updates/x86_64/Packages/glibc-headers-2.17-326.el7_9.x86_64.rpm",
+  "sha256": "cffd614b0edc8b160d92daa7f3c4c4dffd5e33a66532c35ee32132d1b56e63b7",
+  "license": "LGPL-2.1-or-later AND GPL-2.0-or-later"
+}

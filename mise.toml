@@ -1,6 +1,6 @@
 # RCC developer and release tasks. List them with `mise tasks`.
 #
-# Pinned LLVM/musl archives and the LLVM engine work tree live in inner/
+# Pinned LLVM/musl/glibc archives and the LLVM engine work tree live in inner/
 # (gitignored; reused by later release builds):
 #   mise run fetch:archives
 #   mise run build:release -- \
@@ -17,7 +17,7 @@ min_version = "2024.11.1"
 rust = { version = "stable", components = "rustfmt,clippy" }
 
 [tasks."fetch:archives"]
-description = "Download pinned LLVM bootstrap, LLVM source, and musl archives into inner/"
+description = "Download pinned LLVM, musl, and CentOS 7 glibc RPM archives into inner/"
 run = "./scripts/fetch-pinned-archives.sh"
 
 [tasks.fetch]
@@ -33,7 +33,7 @@ description = "Build the release rcc-pack utility"
 run = "cargo build --release --locked -p rcc-pack"
 
 [tasks."build:release"]
-description = "Build the static macOS AArch64 release with linux-x86_64-musl-static; pass bootstrap, LLVM source, musl, and a new output directory"
+description = "Build the static macOS AArch64 release with musl-static and, when RPMs are present, gnu-glibc217"
 depends = ["fetch"]
 # These are build-host tools only. The resulting rcc binary does not depend on
 # CMake, Ninja, or a system C/C++ compiler at runtime.
@@ -48,6 +48,38 @@ run = "cargo fmt --all"
 description = "Check Rust formatting without modifying files"
 run = "cargo fmt --all -- --check"
 
+[tasks."lima:x64"]
+description = "Start the x86_64 Alpine Lima VM used to execute linux musl binaries on Apple Silicon"
+run = "./scripts/ensure-linux-x86_64-guest.sh"
+
+[tasks."verify:linux-musl"]
+description = "Compile C and cargo-rcc native stacks for linux-x86_64-musl-static and verify hermetic ELF artifacts"
+run = "./scripts/verify-linux-x86_64-musl.sh"
+
+[tasks."test:linux-musl"]
+description = "Compile, verify, and run linux-x86_64-musl-static binaries (starts Lima on macOS)"
+run = '''
+rustup target add x86_64-unknown-linux-musl
+./scripts/ensure-linux-x86_64-guest.sh
+RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh
+'''
+
+[tasks."lima:glibc217"]
+description = "Start the x86_64 CentOS 7 Lima VM used to execute linux gnu glibc 2.17 binaries"
+run = "./scripts/ensure-linux-x86_64-glibc-guest.sh"
+
+[tasks."verify:linux-glibc"]
+description = "Compile C and cargo-rcc native stacks for linux-x86_64-gnu-glibc217 and verify GLIBC_ <= 2.17"
+run = "./scripts/verify-linux-x86_64-gnu.sh"
+
+[tasks."test:linux-glibc"]
+description = "Compile, verify, and run linux-x86_64-gnu-glibc217 binaries (starts CentOS 7 Lima on macOS)"
+run = '''
+rustup target add x86_64-unknown-linux-gnu
+./scripts/ensure-linux-x86_64-glibc-guest.sh
+RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-gnu.sh
+'''
+
 [tasks.test]
 description = "Run the workspace test suite"
 run = "cargo test --workspace --locked"
@@ -57,15 +89,26 @@ description = "Run Clippy with warnings treated as errors"
 run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 
 [tasks."metadata:check"]
-description = "Validate release scripts and pinned LLVM lock files"
+description = "Validate release scripts and pinned LLVM/musl/glibc lock files"
 run = '''
 sh -n scripts/build-macos-arm64-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
+sh -n scripts/stage-linux-x86_64-libcxx.sh
 sh -n scripts/stage-linux-x86_64-musl.sh
+sh -n scripts/stage-linux-x86_64-gnu-glibc217.sh
 sh -n scripts/fetch-pinned-archives.sh
+sh -n scripts/verify-linux-x86_64-musl.sh
+sh -n scripts/verify-linux-x86_64-gnu.sh
+sh -n scripts/ensure-linux-x86_64-guest.sh
+sh -n scripts/ensure-linux-x86_64-glibc-guest.sh
+sh -n scripts/repack-linux-x86_64-gnu-glibc217.sh
 python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
 python3 -m json.tool toolchains/musl-1.2.5.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-2.17-centos7-runtime.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-headers-2.17-centos7.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-devel-2.17-centos7.lock.json >/dev/null
+python3 -m json.tool toolchains/kernel-headers-3.10-centos7.lock.json >/dev/null
 '''
 
 [tasks.check]
@@ -76,9 +119,20 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 sh -n scripts/build-macos-arm64-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
+sh -n scripts/stage-linux-x86_64-libcxx.sh
 sh -n scripts/stage-linux-x86_64-musl.sh
+sh -n scripts/stage-linux-x86_64-gnu-glibc217.sh
 sh -n scripts/fetch-pinned-archives.sh
+sh -n scripts/verify-linux-x86_64-musl.sh
+sh -n scripts/verify-linux-x86_64-gnu.sh
+sh -n scripts/ensure-linux-x86_64-guest.sh
+sh -n scripts/ensure-linux-x86_64-glibc-guest.sh
+sh -n scripts/repack-linux-x86_64-gnu-glibc217.sh
 python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
 python3 -m json.tool toolchains/musl-1.2.5.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-2.17-centos7-runtime.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-headers-2.17-centos7.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-devel-2.17-centos7.lock.json >/dev/null
+python3 -m json.tool toolchains/kernel-headers-3.10-centos7.lock.json >/dev/null
 '''

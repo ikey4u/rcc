@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "name": "kernel-headers-3.10.0-1160.el7.x86_64.rpm",
+  "role": "linux_x86_64_glibc217_uapi",
+  "source": "https://vault.centos.org/7.9.2009/os/x86_64/Packages/kernel-headers-3.10.0-1160.el7.x86_64.rpm",
+  "sha256": "81b4e4f401d2402736ceba4627eaafd5b615c2cc45aa4d4f941ea79562045139",
+  "license": "GPL-2.0-only"
+}

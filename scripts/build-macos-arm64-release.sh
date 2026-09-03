@@ -271,15 +271,46 @@ pack=$output/llvm-22.1.8-macos-arm64.rccpack
     "$source_directory" \
     "$stage"
 
-"$repository/target/release/rcc-pack" create \
-    "$stage" \
-    "$pack" \
-    --pack-id llvm-22.1.8-macos-arm64-static \
-    --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
-    --host aarch64-apple-darwin \
-    --profile macos-aarch64 \
-    --profile host-macos-aarch64 \
-    --profile linux-x86_64-musl-static
+gnu_glibc_rpm=${RCC_GLIBC_RUNTIME_RPM:-$repository/inner/glibc-2.17-326.el7_9.x86_64.rpm}
+gnu_headers_rpm=${RCC_GLIBC_HEADERS_RPM:-$repository/inner/glibc-headers-2.17-326.el7_9.x86_64.rpm}
+gnu_devel_rpm=${RCC_GLIBC_DEVEL_RPM:-$repository/inner/glibc-devel-2.17-326.el7_9.x86_64.rpm}
+gnu_kernel_rpm=${RCC_KERNEL_HEADERS_RPM:-$repository/inner/kernel-headers-3.10.0-1160.el7.x86_64.rpm}
+gnu_in_payload=0
+if [ -f "$gnu_glibc_rpm" ] && [ -f "$gnu_headers_rpm" ] && [ -f "$gnu_devel_rpm" ] && [ -f "$gnu_kernel_rpm" ]; then
+    "$script_directory/stage-linux-x86_64-gnu-glibc217.sh" \
+        "$gnu_glibc_rpm" \
+        "$gnu_headers_rpm" \
+        "$gnu_devel_rpm" \
+        "$gnu_kernel_rpm" \
+        "$stage"
+    gnu_in_payload=1
+else
+    echo "skipping linux-x86_64-gnu-glibc217: CentOS 7 RPMs not present under inner/" >&2
+    echo "run: mise run fetch:archives" >&2
+fi
+
+if [ "$gnu_in_payload" -eq 1 ]; then
+    "$repository/target/release/rcc-pack" create \
+        "$stage" \
+        "$pack" \
+        --pack-id llvm-22.1.8-macos-arm64-static \
+        --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
+        --host aarch64-apple-darwin \
+        --profile macos-aarch64 \
+        --profile host-macos-aarch64 \
+        --profile linux-x86_64-musl-static \
+        --profile linux-x86_64-gnu-glibc217
+else
+    "$repository/target/release/rcc-pack" create \
+        "$stage" \
+        "$pack" \
+        --pack-id llvm-22.1.8-macos-arm64-static \
+        --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
+        --host aarch64-apple-darwin \
+        --profile macos-aarch64 \
+        --profile host-macos-aarch64 \
+        --profile linux-x86_64-musl-static
+fi
 "$repository/target/release/rcc-pack" verify "$pack"
 
 RCC_LLVM_BUILD_DIR="$llvm_build_directory" \
