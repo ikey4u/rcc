@@ -1,0 +1,15 @@
+[package]
+name = "libcap-ng-linux"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "capng crate + static libcap-ng, used to exercise cargo-rcc linux gnu linking of -lcap-ng"
+
+[workspace]
+
+[dependencies]
+capng = "=0.2.3" # matches the C library pin in libcap-ng-0.8.5.lock.json
+
+[profile.release]
+lto = true

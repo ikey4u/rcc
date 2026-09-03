@@ -102,6 +102,8 @@ sh -n scripts/verify-linux-x86_64-gnu.sh
 sh -n scripts/ensure-linux-x86_64-guest.sh
 sh -n scripts/ensure-linux-x86_64-glibc-guest.sh
 sh -n scripts/repack-linux-x86_64-gnu-glibc217.sh
+sh -n examples/libcap-ng-linux/stage.sh
+python3 -m json.tool examples/libcap-ng-linux/libcap-ng-0.8.5.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
 python3 -m json.tool toolchains/musl-1.2.5.lock.json >/dev/null
@@ -128,6 +130,8 @@ sh -n scripts/verify-linux-x86_64-gnu.sh
 sh -n scripts/ensure-linux-x86_64-guest.sh
 sh -n scripts/ensure-linux-x86_64-glibc-guest.sh
 sh -n scripts/repack-linux-x86_64-gnu-glibc217.sh
+sh -n examples/libcap-ng-linux/stage.sh
+python3 -m json.tool examples/libcap-ng-linux/libcap-ng-0.8.5.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-22.1.8-macos-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-project-22.1.8-source.lock.json >/dev/null
 python3 -m json.tool toolchains/musl-1.2.5.lock.json >/dev/null

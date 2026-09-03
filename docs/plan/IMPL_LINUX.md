@@ -1,8 +1,8 @@
 # Linux 目标实现：musl 现状与 glibc 2.17 规划
 
-> 状态：C 与 C++ 切片均已落地。ARCH（`docs/designs/ARCH.md`）管产品边界和 profile 矩阵。  
+> 状态：C 与 C++ 切片均已落地。ARCH（`docs/design/ARCH.md`）管产品边界和 profile 矩阵。  
 > 本文管「现在 Linux 实际编出了什么」和「glibc 2.17 按什么做」。  
-> 验收命令见 `docs/verification.md`。
+> 验收命令见 `docs/VERIFY.md`。
 
 本文只覆盖 **Apple Silicon macOS 上的 RCC release controller** 交叉编译 Linux。不讨论 RCC 自己跑在 Linux 上（`host-linux-*-gnu-glibc217`）。
 
@@ -130,7 +130,7 @@ RCC 不带 rustc / rust-std。`cargo-rcc` 只物化 profile、导出环境、exe
 
 ### 1.5 正确性怎么证
 
-分三层，见 `docs/verification.md`。
+分三层，见 `docs/VERIFY.md`。
 
 1. **工具链身份**：`rcc doctor --profile linux-x86_64-musl-static`，`IN_PAYLOAD=yes`，进程只用 view 内 alias。
 2. **产物闭包**：`rcc verify` 对 musl-static 可执行文件拒绝 `PT_INTERP`、`DT_NEEDED`、字节里的 `GLIBC_`。`.o` 只查 ELF/arch。实现：`ArtifactReport::linux_musl_static_violations()`。
@@ -263,7 +263,7 @@ ARCH §10.2 写过：GNU `libgcc`/`libstdc++` 是一条线，`compiler-rt`/`libc
 | `cargo-rcc` | gnu triple 直接 bail | 接受 gnu + `rustc-linux-gnu-v0`，无 `+crt-static` | 已改 |
 | `contracts.rs` | 只有 musl 契约 | `rustc-linux-gnu-v0` | 已改 |
 | `layout.rs` 测试 | 假定 sysroot 有 `libc.a` | gnu 夹具是 `libc.so.6` | 已改 |
-| `docs` / README | 「glibc 尚未进入 payload」 | C 切片已进 pack | 本文与 `docs/verification.md` |
+| `docs` / README | 「glibc 尚未进入 payload」 | C 切片已进 pack | 本文与 `docs/VERIFY.md` |
 
 `GLIBC_` 扫描覆盖常见版本字符串。后续可改为只读 `DT_VERNEED`，避免误伤只出现在注释/调试串里的标记。
 

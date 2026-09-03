@@ -35,9 +35,11 @@ mise run test:linux-glibc
 1. `rcc doctor --profile linux-x86_64-gnu-glibc217`
 2. 多翻译单元 C（pthread + `clock_gettime`）
 3. 原生 C++：iostream / exception / `std::thread`（静态 libc++，无 `libstdc++`）
-4. `cargo-rcc --target x86_64-unknown-linux-gnu` 编 OpenSSL 与 native-stack
+4. `cargo-rcc --target x86_64-unknown-linux-gnu` 编 OpenSSL、native-stack，以及 `examples/libcap-ng-linux`（`capng` crate + `libcap-ng-0.8.5.lock.json` 钉死的静态 `libcap-ng.a`）
 5. `rcc verify`：`PT_INTERP=/lib64/ld-linux-x86-64.so.2`、`DT_NEEDED` 含 `libc.so.6`、最高 `GLIBC_` ≤ 2.17、无 `libstdc++.so.6` / `libgcc_s.so.1` / `libc++.so.1`
 6. 运行时：linux-user qemu，否则 Lima `rcc-x64-glibc217`（CentOS 7）
+
+`-lcap-ng` 与 zigbuild `.2.17` 过不了的原因见 `docs/plan/LIBCAP_NG_GLIBC217.md`。调用方自己编静态 `libcap-ng.a` 并导出 `LIBCAPNG_LIB_PATH` / `LIBCAPNG_LINK_TYPE=static`；fat LTO 下 rustc 的 `statx` 由 `cargo-rcc` 的无版本 syscall shim 满足。
 
 本机一次性准备：
 
@@ -54,7 +56,7 @@ mise run lima:glibc217
 | 多文件 C、静态库、可执行文件 | 已验收 | 已实现 |
 | Rust + cc-rs（vendored OpenSSL） | 已验收 | 已实现 |
 | OpenSSL + bundled SQLite | 已验收 | 已实现 |
-| 纯 Rust crate | 原则上可以（`panic=abort`） | 原则上可以（无 `+crt-static`） |
+| 纯 Rust crate | 原则上可以（`panic=abort`） | 已验收（openssl / native-stack / libcap-ng） |
 | C++（libc++ 闭包） | 已验收（iostream / exception / thread） | 已实现 |
 | cmake-rs / meson / autotools | **未验收** | **未验收** |
 | bindgen / libclang | **未验收** | **未验收** |

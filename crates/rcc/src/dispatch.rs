@@ -221,7 +221,7 @@ fn prepare_bound_invocation(
         .cloned()
         .unwrap_or_default();
     if !is_link {
-        injected.retain(|argument| !argument.starts_with("--ld-path="));
+        injected.retain(|argument| !is_link_only_injected_argument(argument));
     }
     // Runtime link arguments are injected exactly once at the final bound
     // linker alias. Adding them to the compiler driver as well would make the
@@ -491,6 +491,14 @@ fn normalize_version(value: &str) -> Vec<u64> {
     components
 }
 
+fn is_link_only_injected_argument(argument: &str) -> bool {
+    argument.starts_with("--ld-path=")
+        || argument.starts_with("--rtlib=")
+        || argument.starts_with("-rtlib=")
+        || argument.starts_with("-unwindlib=")
+        || argument.starts_with("--unwindlib=")
+}
+
 fn is_link_invocation(kind: ToolKind, arguments: &[OsString]) -> bool {
     match kind {
         ToolKind::Linker => true,
@@ -659,5 +667,30 @@ mod tests {
         assert!(validate_published_view_root(temporary.path()).is_ok());
 
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn drops_linker_runtime_flags_when_not_linking() {
+        assert!(is_link_only_injected_argument(
+            "--ld-path=/view/launchers/ld.lld"
+        ));
+        assert!(is_link_only_injected_argument("--rtlib=compiler-rt"));
+        assert!(is_link_only_injected_argument("-unwindlib=none"));
+        assert!(!is_link_only_injected_argument(
+            "--target=x86_64-unknown-linux-gnu"
+        ));
+        assert!(!is_link_only_injected_argument("--sysroot=/sysroot"));
+
+        let mut injected = vec![
+            "--target=x86_64-unknown-linux-gnu".to_string(),
+            "--rtlib=compiler-rt".to_string(),
+            "-unwindlib=none".to_string(),
+            "--ld-path=/view/launchers/ld.lld".to_string(),
+        ];
+        injected.retain(|argument| !is_link_only_injected_argument(argument));
+        assert_eq!(
+            injected,
+            vec!["--target=x86_64-unknown-linux-gnu".to_string()]
+        );
     }
 }

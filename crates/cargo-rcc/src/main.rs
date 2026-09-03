@@ -62,15 +62,7 @@ pub struct TargetPlan {
 }
 
 pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Result<TargetPlan> {
-    let rust_target = match target {
-        "linux-x86_64-gnu" | "linux-x64-gnu" | LINUX_X64_GNU | LINUX_X64_GNU_PROFILE => {
-            LINUX_X64_GNU.to_owned()
-        }
-        "linux-x86_64" | "linux-x64" | LINUX_X64_MUSL | LINUX_X64_MUSL_PROFILE => {
-            LINUX_X64_MUSL.to_owned()
-        }
-        other => other.to_owned(),
-    };
+    let rust_target = canonical_rust_target(target)?;
 
     if rust_target == LINUX_X64_GNU {
         return Ok(TargetPlan {
@@ -104,6 +96,50 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
             "target-feature=+crt-static".into(),
         ],
     })
+}
+
+fn canonical_rust_target(target: &str) -> Result<String> {
+    match target {
+        "linux-x86_64-gnu" | "linux-x64-gnu" | LINUX_X64_GNU | LINUX_X64_GNU_PROFILE => {
+            return Ok(LINUX_X64_GNU.to_owned());
+        }
+        "linux-x86_64" | "linux-x64" | LINUX_X64_MUSL | LINUX_X64_MUSL_PROFILE => {
+            return Ok(LINUX_X64_MUSL.to_owned());
+        }
+        _ => {}
+    }
+
+    if target.strip_prefix("x86_64-unknown-linux-gnu.").is_some() {
+        // Zig cargo-zigbuild uses *.gnu.2.17 / *.gnu.2.28 as a glibc floor.
+        // That is not a rustc triple. RCC's gnu profile is always 2.17.
+        bail!(
+            "cargo-rcc uses rustc triples, not Zig glibc suffixes; \
+             got {target}, use {LINUX_X64_GNU}"
+        );
+    }
+
+    Ok(target.to_owned())
+}
+
+/// Rewrite Cargo `--target` aliases to the rustc triple after planning.
+pub fn rewrite_cargo_target_args(args: &mut [OsString], rust_target: &str) {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--target" {
+            if let Some(value) = args.get_mut(index + 1) {
+                *value = OsString::from(rust_target);
+            }
+            index += 2;
+            continue;
+        }
+        let current = args[index].to_string_lossy();
+        if let Some(value) = current.strip_prefix("--target=") {
+            if value != rust_target {
+                args[index] = OsString::from(format!("--target={rust_target}"));
+            }
+        }
+        index += 1;
+    }
 }
 
 pub fn cargo_target_from_args(args: &[OsString]) -> Option<String> {
@@ -147,6 +183,7 @@ fn run() -> Result<()> {
         )
     })?;
     let plan = plan_for_rust_target(&cargo_target, cli.profile.as_deref())?;
+    rewrite_cargo_target_args(&mut cli.cargo_args, &plan.rust_target);
     let runtime_contract = cli
         .runtime_contract
         .as_deref()
@@ -291,6 +328,11 @@ fn apply_rcc_environment(
 
     let unwind_dir = isolate_rustc_unwind(&plan.rust_target, cache_dir)?;
     let mut rustflags = plan.rustflags.clone();
+    if plan.rust_target == LINUX_X64_GNU {
+        let compat_obj = ensure_glibc217_compat(cache_dir, cc)?;
+        rustflags.push("-C".into());
+        rustflags.push(format!("link-arg={}", compat_obj.display()));
+    }
     if let Some(unwind_dir) = unwind_dir {
         rustflags.push("-L".into());
         rustflags.push(format!("native={}", unwind_dir.display()));
@@ -306,6 +348,52 @@ fn apply_rcc_environment(
     cargo.env_remove("CARGO_ENCODED_RUSTFLAGS");
     cargo.env_remove("RUSTFLAGS");
     Ok(())
+}
+
+fn ensure_glibc217_compat(cache_dir: Option<&Path>, cc: &str) -> Result<PathBuf> {
+    const VERSION: &str = "1";
+    let source = include_str!("../compat/glibc217_compat.c");
+    let root = cache_dir
+        .map(Path::to_path_buf)
+        .or_else(|| env::var_os("RCC_CACHE_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| env::temp_dir().join("rcc-glibc217-compat"));
+    let dir = root
+        .join("glibc217-compat")
+        .join(VERSION)
+        .join(LINUX_X64_GNU);
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create glibc 2.17 compat directory {}",
+            dir.display()
+        )
+    })?;
+    let src = dir.join("glibc217_compat.c");
+    let obj = dir.join("rcc_glibc217_compat.o");
+    if obj.is_file()
+        && src.is_file()
+        && fs::read_to_string(&src).is_ok_and(|existing| existing == source)
+    {
+        return Ok(obj);
+    }
+    fs::write(&src, source)
+        .with_context(|| format!("failed to write glibc 2.17 compat source {}", src.display()))?;
+    let output = Command::new(cc)
+        .args(["-c", "-O2", "-fPIC", "-fvisibility=hidden", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .with_context(|| format!("failed to invoke RCC cc ({cc})"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to compile glibc 2.17 compat object:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if !obj.is_file() {
+        bail!("RCC cc did not produce {}", obj.display());
+    }
+    Ok(obj)
 }
 
 fn isolate_rustc_unwind(rust_target: &str, cache_dir: Option<&Path>) -> Result<Option<PathBuf>> {
@@ -435,6 +523,40 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_zig_glibc_suffixes() {
+        for query in [
+            "x86_64-unknown-linux-gnu.2.17",
+            "x86_64-unknown-linux-gnu.2.28",
+            "x86_64-unknown-linux-gnu.2.12",
+        ] {
+            let error = plan_for_rust_target(query, None).unwrap_err();
+            assert!(
+                error.to_string().contains("not Zig glibc suffixes"),
+                "{query}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrites_gnu_alias_before_cargo() {
+        let mut args = vec![
+            OsString::from("build"),
+            OsString::from("--release"),
+            OsString::from("--target"),
+            OsString::from("linux-x86_64-gnu"),
+        ];
+        rewrite_cargo_target_args(&mut args, LINUX_X64_GNU);
+        assert_eq!(args[3], OsString::from(LINUX_X64_GNU));
+
+        let mut joined = vec![OsString::from("--target=linux-x86_64-gnu")];
+        rewrite_cargo_target_args(&mut joined, LINUX_X64_GNU);
+        assert_eq!(
+            joined[0],
+            OsString::from(format!("--target={LINUX_X64_GNU}"))
+        );
     }
 
     #[test]

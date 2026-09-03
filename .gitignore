@@ -12,3 +12,6 @@ examples/linux-glibc-c/out/
 examples/linux-glibc-cxx/out/
 examples/native-stack-linux/target/
 examples/native-stack-linux/Cargo.lock
+examples/libcap-ng-linux/target/
+examples/libcap-ng-linux/Cargo.lock
+examples/libcap-ng-linux/out/

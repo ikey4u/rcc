@@ -101,9 +101,20 @@ if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ]; then
         --release
     stack_bin=$repository/examples/native-stack-linux/target/$rust_target/release/native-stack-linux
     "$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$stack_bin"
+
+    echo "==> cargo-rcc libcap-ng-linux (capng crate + static libcap-ng)"
+    capng_prefix=$("$repository/examples/libcap-ng-linux/stage.sh")
+    LIBCAPNG_LIB_PATH=$capng_prefix/lib LIBCAPNG_LINK_TYPE=static \
+        "$CARGO_RCC" --rcc "$RCC" --cache-dir "$cache_dir" build \
+        --manifest-path "$repository/examples/libcap-ng-linux/Cargo.toml" \
+        --target "$rust_target" \
+        --release
+    capng_bin=$repository/examples/libcap-ng-linux/target/$rust_target/release/libcap-ng-linux
+    "$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$capng_bin"
 else
     openssl_bin=
     stack_bin=
+    capng_bin=
 fi
 
 run_guest() {
@@ -166,6 +177,9 @@ fi
 if [ -n "$stack_bin" ]; then
     run_guest "$stack_bin" "sqlite="
 fi
+if [ -n "$capng_bin" ]; then
+    run_guest "$capng_bin" "libcap-ng-ok"
+fi
 
 echo
 echo "linux-x86_64-gnu-glibc217 verification passed"
@@ -174,6 +188,7 @@ echo "native C++: $cxx_out_dir/linux-glibc-cxx"
 if [ -n "$openssl_bin" ]; then
     echo "openssl:  $openssl_bin"
     echo "stack:    $stack_bin"
+    echo "capng:    $capng_bin"
 fi
 if [ "$qemu_ran" -eq 0 ]; then
     echo "runtime checks were skipped (no linux-user qemu and no running glibc Lima VM)"

@@ -4,7 +4,7 @@ RCC 是一个可重定位的原生 C/C++ 工具链提供器。它把经过裁剪
 
 RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。Cargo 集成由独立的 `cargo-rcc` adapter 完成；当前已注册 `native-rcc-owned`、`rustc-linux-musl-v0` 与 `rustc-linux-gnu-v0` 契约。
 
-详细设计见 [docs/designs/ARCH.md](docs/designs/ARCH.md)。
+详细设计见 [docs/design/ARCH.md](docs/design/ARCH.md)。
 
 ## 当前可验收范围
 
@@ -109,8 +109,9 @@ cargo fetch --locked
 
 - `native-rcc-owned`：原生 C/C++ 链路，RCC 拥有 CRT/libc；
 - `rustc-linux-musl-v0`：`cargo-rcc` 用于 `x86_64-unknown-linux-musl`。RCC 拥有 musl CRT/libc/compiler-rt（含 `clang_rt.crtbegin`/`crtend`）；rustc 保留 rust-std unwind。稳定版 rustc 的 `link-self-contained` 只能整体开关，因此 `cargo-rcc` 使用 `-C link-self-contained=no -C panic=abort -C target-feature=+crt-static`，并把 rust-std 的 `libunwind.a` 单独放到隔离的 `-L native=` 搜索路径，避免 rustc 自带的 musl `libc.a` 参与链接。
+- `rustc-linux-gnu-v0`：`cargo-rcc` 用于 `x86_64-unknown-linux-gnu`。RCC 用 CentOS 7 真 `libc.so.6` 链接；fat LTO 若把 `statx` 变成强引用，则链入无版本 syscall shim。Zig 的 `.2.17` / `.2.28` 后缀不是 rustc triple，`cargo-rcc` 不接受。
 
-## cargo-rcc 与 linux x86_64（OpenSSL）
+## cargo-rcc 与 linux x86_64
 
 `cargo-rcc` 是独立的 Cargo adapter，对应 cargo-zigbuild 那一层：它不编译 C/Rust，只物化 RCC profile、导出 cc-rs/rustc 环境，再 exec Cargo。日常 `mise build` 可以编出 `cargo-rcc`，但交叉编译必须使用带静态引擎和 musl sysroot 的 **release `rcc`**。`rustup target add x86_64-unknown-linux-musl` 不只是为了 rust-std，也是为了那份 `libunwind.a`。
 
@@ -135,14 +136,17 @@ export RCC=/absolute/path/to/rcc-release/rcc
   --release
 ```
 
-`openssl` crate 的 `vendored` feature 会编译 OpenSSL 自己的 C 源码；这就是 cargo-rcc 对 cc-rs 的验收路径。产物是 `x86_64-unknown-linux-musl` static-pie ELF，可在 linux x64 上运行，不依赖 glibc。OpenSSL 的 `Configure` 需要本机 `perl`。当前不支持 `x86_64-unknown-linux-gnu`（glibc 2.17 sysroot 尚未进入 payload）。
+`openssl` crate 的 `vendored` feature 会编译 OpenSSL 自己的 C 源码；这就是 cargo-rcc 对 cc-rs 的验收路径。musl 产物是 `x86_64-unknown-linux-musl` static-pie ELF。OpenSSL 的 `Configure` 需要本机 `perl`。gnu 用同一套 adapter、`--target x86_64-unknown-linux-gnu`，链接期走 pack 内 glibc 2.17 sysroot。需要 `-lcap-ng` 的 crate（例如 `capng`）由调用方提供静态库并设置 `LIBCAPNG_LIB_PATH` / `LIBCAPNG_LINK_TYPE=static`；RCC 用 `examples/libcap-ng-linux` 覆盖这条路径，不把 libcap-ng 放进 toolchains。zigbuild `.2.17` 过不了、RCC 怎么过，见 [docs/plan/LIBCAP_NG_GLIBC217.md](docs/plan/LIBCAP_NG_GLIBC217.md)。
 
-更大的 cc-rs 栈（OpenSSL + bundled SQLite）、多翻译单元 C、以及 `rcc verify` 对 hermetic ELF 的检查见 [docs/verification.md](docs/verification.md)。一键验收（Apple Silicon 上会启动 Lima 并执行产物）：
+更大的 cc-rs 栈（OpenSSL + bundled SQLite）、多翻译单元 C、以及 `rcc verify` 对 ELF 的检查见 [docs/VERIFY.md](docs/VERIFY.md)。一键验收（Apple Silicon 上会启动 Lima 并执行产物）：
 
 ```sh
 export RCC=/absolute/path/to/rcc-release/rcc
 mise run test:linux-musl
+mise run test:linux-glibc
 ```
+
+`cargo-rcc` 只接受 rustc triple（gnu 为 `x86_64-unknown-linux-gnu`），不要 Zig 的 glibc 版本后缀。
 
 等价写法：`cargo rcc --rcc "$RCC" build --manifest-path examples/openssl-linux/Cargo.toml --target x86_64-unknown-linux-musl --release`。
 
@@ -180,7 +184,7 @@ RCC 的 profile-bound multicall alias 负责注入 target triple、resource dire
 - Apple SDK 必须由使用者合法安装并在本机提供，RCC 不分发该 SDK；
 - `cargo-rcc` 编排 `x86_64-unknown-linux-musl` 与 `x86_64-unknown-linux-gnu`，并要求 host 为 `aarch64-apple-darwin`；
 - linux musl / gnu 均携带对着各自 sysroot 预编的静态 `libc++.a`；默认不提供 shared `libc++.so`（多 DSO 会各带一份静态 libc++）；
-- 大型 C / cc-rs 项目的能力边界与 ELF 验收见 [docs/verification.md](docs/verification.md)；
+- 大型 C / cc-rs 项目的能力边界与 ELF 验收见 [docs/VERIFY.md](docs/VERIFY.md)；
 - `.rccpack` 有逐文件与整体 SHA-256 完整性校验，但当前格式本身没有发行方数字签名；外部 pack 必须显式确认；
 - 构建脚本固定校验上游 LLVM/musl 归档摘要并记录 attestation URL，但尚未在脚本中执行 attestation 签名验证；
 - 尚未提供 release code signing、Apple notarization、Linux/Windows release pipeline 或完整 SBOM 自动生成。
