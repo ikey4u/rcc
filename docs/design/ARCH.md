@@ -1,7 +1,7 @@
 # RCC 可移植 C/C++ 工具链与 Sysroot 架构设计
 
 > [!NOTE] 文档状态
-> 本文记录 RCC 的目标架构、已采纳决策、资源布局、平台策略和验收门槛。当前 Apple Silicon macOS 实现采用静态 LLVM multicall 架构；其余 host/profile 仍按路线图交付。
+> 本文记录 RCC 的目标架构、已采纳决策、资源布局、平台策略和验收门槛。当前 Apple Silicon macOS 实现采用静态 LLVM multicall 架构；其余 host/profile 仍按路线图交付。按 OS 拆开的交叉矩阵与**当前实现**见 [RCC_MACOS.md](RCC_MACOS.md)、[RCC_LINUX.md](RCC_LINUX.md)、[RCC_WINDOWS.md](RCC_WINDOWS.md)。
 
 | 属性 | 值 |
 |---|---|

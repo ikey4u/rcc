@@ -1,10 +1,10 @@
-# Linux 目标实现：musl 现状与 glibc 2.17 规划
+# macOS host 实现记录：Linux x86_64 musl 与 glibc 2.17
 
-> 状态：C 与 C++ 切片均已落地。ARCH（`docs/design/ARCH.md`）管产品边界和 profile 矩阵。  
-> 本文管「现在 Linux 实际编出了什么」和「glibc 2.17 按什么做」。  
+> 状态：C 与 C++ 切片均已落地。ARCH（`docs/design/ARCH.md`）管产品边界；按 OS 拆开的现状见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。  
+> 本文管「Apple Silicon macOS 上的 RCC **现在把 Linux 目标编成了什么**」以及 glibc 2.17 怎么进 pack。  
 > 验收命令见 `docs/VERIFY.md`。
 
-本文只覆盖 **Apple Silicon macOS 上的 RCC release controller** 交叉编译 Linux。不讨论 RCC 自己跑在 Linux 上（`host-linux-*-gnu-glibc217`）。
+本文只覆盖 **Apple Silicon macOS 上的 RCC release controller** 交叉编译 Linux。不讨论 RCC 自己跑在 Linux 上（`host-linux-*-gnu-glibc217`）；那条见 `docs/design/RCC_LINUX.md`。
 
 ---
 

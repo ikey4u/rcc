@@ -4,21 +4,24 @@ RCC 是一个可重定位的原生 C/C++ 工具链提供器。它把经过裁剪
 
 RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。Cargo 集成由独立的 `cargo-rcc` adapter 完成；当前已注册 `native-rcc-owned`、`rustc-linux-musl-v0` 与 `rustc-linux-gnu-v0` 契约。
 
-详细设计见 [docs/design/ARCH.md](docs/design/ARCH.md)。
+详细设计见 [docs/design/ARCH.md](docs/design/ARCH.md)。按 OS 拆开的交叉矩阵与现状：[macOS](docs/design/RCC_MACOS.md)、[Linux](docs/design/RCC_LINUX.md)、[Windows](docs/design/RCC_WINDOWS.md)。
 
 ## 当前可验收范围
 
-仓库内的 profile registry 描述了后续 Linux、Windows 与 macOS 目标，但 profile 存在不代表当前 payload 已包含对应资源。以 `rcc targets` 的 `IN_PAYLOAD` 列为准。
+交叉编译按 host 拆开，各自只编另外两个 OS（原生编译不进交叉表）：[macOS → Linux / Windows](docs/design/RCC_MACOS.md)、[Linux → macOS / Windows](docs/design/RCC_LINUX.md)、[Windows → Linux / macOS](docs/design/RCC_WINDOWS.md)。
+
+当前唯一能跑的 controller host 是 Apple Silicon macOS（`aarch64-apple-darwin`），已交付 **macOS → Linux x86_64**（musl-static 与 gnu-glibc217）。仓库里的 profile registry 还登记了 linux aarch64、macOS x86_64 和 Windows GNU/GNULLVM/MSVC，但 profile 存在不代表 payload 已包含对应资源。以 `rcc targets` 的 `IN_PAYLOAD` 列为准。
 
 | Controller host | Profile | C/C++/链接/归档 | Sysroot/SDK | 当前状态 |
 | --- | --- | --- | --- | --- |
-| `aarch64-apple-darwin` | `macos-aarch64` | 静态集成 Clang、LLD、llvm-ar/ranlib 22.1.8 | 外部 Apple macOS SDK | 已包含 |
+| `aarch64-apple-darwin` | `macos-aarch64` | 静态集成 Clang、LLD、llvm-ar/ranlib 22.1.8 | 外部 Apple macOS SDK | 已包含（原生） |
 | `aarch64-apple-darwin` | `host-macos-aarch64` | 同上，供 host 构建上下文使用 | 外部 Apple macOS SDK | 已包含 |
-| `aarch64-apple-darwin` | `linux-x86_64-musl-static` | 静态集成 Clang、ELF LLD、llvm-ar；musl 1.2.5 + compiler-rt + 预编 libc++ | pack 内 hermetic musl sysroot | 已包含（C / C++ / cargo-rcc） |
-| `aarch64-apple-darwin` | `linux-x86_64-gnu-glibc217` | 同上引擎；CentOS 7 glibc 2.17 链接期 sysroot + compiler-rt + 预编 libc++ | pack 内 2.17 头/CRT/`libc.so.6` + `libc++.a`；运行时目标机 glibc ≥ 2.17 | 已包含（C / C++ / cargo-rcc） |
+| `aarch64-apple-darwin` | `linux-x86_64-musl-static` | 静态集成 Clang、ELF LLD、llvm-ar；musl 1.2.5 + compiler-rt + 预编 libc++ | pack 内 hermetic musl sysroot | 已包含（macOS → Linux） |
+| `aarch64-apple-darwin` | `linux-x86_64-gnu-glibc217` | 同上引擎；CentOS 7 glibc 2.17 链接期 sysroot + compiler-rt + 预编 libc++ | pack 内 2.17 头/CRT/`libc.so.6` + `libc++.a`；运行时目标机 glibc ≥ 2.17 | 已包含（macOS → Linux） |
+| 任意 | `linux-aarch64-musl-static` / `linux-aarch64-gnu-glibc217` | — | — | 未包含 |
 | 任意 | `macos-x86_64` | — | — | 未包含 |
-| 任意 | 其他 Linux profiles（aarch64 musl/gnu） | — | — | 未包含 |
-| 任意 | Windows GNU/GNULLVM/MSVC profiles | — | — | 未包含 |
+| 任意 | Windows GNU / GNULLVM / MSVC | — | — | 未包含 |
+| Linux / Windows | 任意 | — | — | controller 未交付 |
 
 当前 resource-only payload 内含 libc++ headers、Clang resource headers、Darwin compiler-rt、linux x86_64 musl 1.2.5 sysroot（含预编 libc++）、linux x86_64 gnu glibc 2.17 链接期 sysroot（含预编 libc++）、linux x86_64 compiler-rt builtins/CRT 和 provenance，不含 Clang、LLD、llvm-ar 或 launcher executable。Apple SDK 不随 RCC 分发：运行时通过 `RCC_APPLE_SDK_ROOT` 指定，或在 macOS 上通过 `xcrun --sdk macosx --show-sdk-path` 自动发现。RCC 不调用系统 clang、gcc 或 ld；Apple SDK、操作系统动态库以及 RCC 本身所需的 macOS 运行环境仍是外部依赖。
 
@@ -177,10 +180,9 @@ RCC 的 profile-bound multicall alias 负责注入 target triple、resource dire
 
 ## 当前限制
 
-- release controller 目前只在 Apple Silicon macOS 上运行；已交付的 target 是 `macos-aarch64`、`linux-x86_64-musl-static` 与 `linux-x86_64-gnu-glibc217`（C / C++ / cargo-rcc）；
-- Windows 和 macOS x86_64 payload 尚未交付；
+- 目标矩阵是 macOS → Linux/Windows、Linux → macOS/Windows、Windows → Linux/macOS。目前只交付了 **macOS aarch64 → Linux x86_64**（musl-static 与 gnu-glibc217）以及 macOS aarch64 原生；Linux/Windows controller、macOS → Windows、以及编向 macOS x86_64 / linux aarch64 均未交付；
 - 静态 LLVM 构建启用 AArch64 与 X86，仍不是通用 all-target LLVM distribution；
-- Apple SDK 必须由使用者合法安装并在本机提供，RCC 不分发该 SDK；
+- Apple SDK 必须由使用者合法安装并在本机提供，RCC 不分发该 SDK；编向 macOS 的 Linux/Windows host 同样受此约束；
 - `cargo-rcc` 编排 `x86_64-unknown-linux-musl` 与 `x86_64-unknown-linux-gnu`，并要求 host 为 `aarch64-apple-darwin`；
 - linux musl / gnu 均携带对着各自 sysroot 预编的静态 `libc++.a`；默认不提供 shared `libc++.so`（多 DSO 会各带一份静态 libc++）；
 - 大型 C / cc-rs 项目的能力边界与 ELF 验收见 [docs/VERIFY.md](docs/VERIFY.md)；

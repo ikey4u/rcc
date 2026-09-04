@@ -1,6 +1,6 @@
 # Linux x86_64：大型项目能力与正确性验收
 
-本文是当前 RCC release 对 `linux-x86_64-musl-static` 与 `linux-x86_64-gnu-glibc217` 的能力边界、正确性定义和可重复验收入口。它不承诺 Windows 或 macOS x86_64，也不把“能编过 hello.c”等同于“任意大型项目都能编”。设计背景见 `docs/plan/IMPL_LINUX.md`。
+本文是当前 RCC release 对 `linux-x86_64-musl-static` 与 `linux-x86_64-gnu-glibc217` 的能力边界、正确性定义和可重复验收入口。它不承诺 Windows 或 macOS x86_64，也不把“能编过 hello.c”等同于“任意大型项目都能编”。设计背景见 `docs/plan/IMPL_RCC_MACOS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
 
 需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。
 
