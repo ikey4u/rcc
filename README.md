@@ -39,15 +39,20 @@ RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：�
 - `musl-1.2.5.tar.gz`：linux x86_64 hermetic sysroot，见 `toolchains/musl-1.2.5.lock.json`；
 - CentOS 7 glibc 2.17 RPM（`glibc` / `glibc-headers` / `glibc-devel` / `kernel-headers`）：linux x86_64 gnu 链接期 sysroot，见 `toolchains/glibc-*-centos7*.lock.json`。缺失时 release 仍可只带 musl。
 
-归档的固定 SHA-256、上游 commit 和默认静态构建配置分别见 `toolchains/llvm-22.1.8-macos-arm64.lock.json`、`toolchains/llvm-project-22.1.8-source.lock.json` 与 `toolchains/musl-1.2.5.lock.json`。构建脚本使用 Cargo offline 模式，因此 Rust 依赖须已在本机缓存。锁定归档下载到 gitignored 的 `inner/`，后续 release 构建直接复用：
+归档的固定 SHA-256、上游 commit 和默认静态构建配置分别见 `toolchains/llvm-22.1.8-macos-arm64.lock.json`、`toolchains/llvm-project-22.1.8-source.lock.json` 与 `toolchains/musl-1.2.5.lock.json`。构建脚本使用 Cargo offline 模式，因此 Rust 依赖须已在本机缓存。锁定归档下载到 gitignored 的 `.cache/`；LLVM 引擎编译树仍在 `inner/llvm-engine`，后续 release 构建直接复用：
 
 ```sh
-mise run fetch:archives
+mise release
+```
+
+`mise release` 会先把 LLVM 工具链、LLVM 源码、musl 源码和 CentOS 7 glibc RPM 拉到 `.cache/`（已存在且摘要匹配则跳过；若 `inner/` 里已有同一份文件则硬链接过去），再编 `cargo-rcc`，把 release `rcc` 与 `cargo-rcc` 放到 `dist/bin/`，并生成 `dist/rcc-{os}-{arch}-{version}.zip`（当前 host 例如 `rcc-macos-arm64-0.1.0.zip`）。若 `dist/rcc-release/rcc` 尚不存在，它会用 `.cache/` 里的锁定归档构建静态引擎 controller。也可继续直接调用底层脚本，输出目录必须尚不存在：
+
+```sh
 cargo fetch --locked
 ./scripts/build-macos-arm64-release.sh \
-  inner/LLVM-22.1.8-macOS-ARM64.tar.xz \
-  inner/llvm-project-22.1.8.src.tar.xz \
-  inner/musl-1.2.5.tar.gz \
+  .cache/LLVM-22.1.8-macOS-ARM64.tar.xz \
+  .cache/llvm-project-22.1.8.src.tar.xz \
+  .cache/musl-1.2.5.tar.gz \
   /absolute/path/to/new-output-directory
 ```
 
@@ -113,27 +118,21 @@ cargo fetch --locked
 
 ## cargo-rcc 与 linux x86_64
 
-`cargo-rcc` 是独立的 Cargo adapter，对应 cargo-zigbuild 那一层：它不编译 C/Rust，只物化 RCC profile、导出 cc-rs/rustc 环境，再 exec Cargo。日常 `mise build` 可以编出 `cargo-rcc`，但交叉编译必须使用带静态引擎和 musl sysroot 的 **release `rcc`**。`rustup target add x86_64-unknown-linux-musl` 不只是为了 rust-std，也是为了那份 `libunwind.a`。
+`cargo-rcc` 是独立的 Cargo adapter，对应 cargo-zigbuild 那一层：它不编译 C/Rust，只物化 RCC profile、导出 cc-rs/rustc 环境，再 exec Cargo。`cargo rcc` 与 `cargo zigbuild` 一样，默认就是 `cargo build`（不带 `--target` 时产物仍在 `target/{debug,release}`）。日常 `mise build` 可以编出 `cargo-rcc`，但交叉编译必须使用带静态引擎和 musl sysroot 的 **release `rcc`**。`rustup target add x86_64-unknown-linux-musl` 不只是为了 rust-std，也是为了那份 `libunwind.a`。
 
 ```sh
-# 1. 构建可分发 rcc（见上文，需要 LLVM 与 musl 归档）
-mise run fetch:archives
-mise run build:release -- \
-  inner/LLVM-22.1.8-macOS-ARM64.tar.xz \
-  inner/llvm-project-22.1.8.src.tar.xz \
-  inner/musl-1.2.5.tar.gz \
-  /absolute/path/to/rcc-release
+# 1. 构建并打包可分发的 rcc + cargo-rcc（会自动把 LLVM/musl 拉到 .cache/）
+mise release
 
-# 2. 构建 cargo-rcc，并安装 rustc 的 musl std
-cargo build --release -p cargo-rcc
+# 2. 安装到本机 Cargo（之后可用 cargo rcc，等同 cargo zigbuild）
+install -m 755 dist/bin/cargo-rcc dist/bin/rcc ~/.cargo/bin/
 rustup target add x86_64-unknown-linux-musl
+rustup target add x86_64-unknown-linux-gnu
 
 # 3. 用 vendored OpenSSL 源码编出 linux x86_64 musl 静态二进制
-export RCC=/absolute/path/to/rcc-release/rcc
-./target/release/cargo-rcc build \
+cargo rcc --release \
   --manifest-path examples/openssl-linux/Cargo.toml \
-  --target x86_64-unknown-linux-musl \
-  --release
+  --target x86_64-unknown-linux-musl
 ```
 
 `openssl` crate 的 `vendored` feature 会编译 OpenSSL 自己的 C 源码；这就是 cargo-rcc 对 cc-rs 的验收路径。musl 产物是 `x86_64-unknown-linux-musl` static-pie ELF。OpenSSL 的 `Configure` 需要本机 `perl`。gnu 用同一套 adapter、`--target x86_64-unknown-linux-gnu`，链接期走 pack 内 glibc 2.17 sysroot。需要 `-lcap-ng` 的 crate（例如 `capng`）由调用方提供静态库并设置 `LIBCAPNG_LIB_PATH` / `LIBCAPNG_LINK_TYPE=static`；RCC 用 `examples/libcap-ng-linux` 覆盖这条路径，不把 libcap-ng 放进 toolchains。zigbuild `.2.17` 过不了、RCC 怎么过，见 [docs/plan/LIBCAP_NG_GLIBC217.md](docs/plan/LIBCAP_NG_GLIBC217.md)。
@@ -148,7 +147,7 @@ mise run test:linux-glibc
 
 `cargo-rcc` 只接受 rustc triple（gnu 为 `x86_64-unknown-linux-gnu`），不要 Zig 的 glibc 版本后缀。
 
-等价写法：`cargo rcc --rcc "$RCC" build --manifest-path examples/openssl-linux/Cargo.toml --target x86_64-unknown-linux-musl --release`。
+等价写法：`cargo rcc --rcc "$RCC" --manifest-path examples/openssl-linux/Cargo.toml --target x86_64-unknown-linux-musl --release`。`cargo rcc build ...` 与 `cargo rcc ...` 相同。
 
 如果显式加载外部 pack，必须确认它是本地信任输入：
 

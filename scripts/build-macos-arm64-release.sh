@@ -70,6 +70,19 @@ fi
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository=$(CDPATH= cd -- "$script_directory/.." && pwd)
+archive_cache=${RCC_ARCHIVE_CACHE:-$repository/.cache}
+
+default_archive() {
+    name=$1
+    if [ -f "$archive_cache/$name" ]; then
+        printf '%s\n' "$archive_cache/$name"
+    elif [ -f "$repository/inner/$name" ]; then
+        printf '%s\n' "$repository/inner/$name"
+    else
+        printf '%s\n' "$archive_cache/$name"
+    fi
+}
+
 engine_patch=$script_directory/patches/clang-integrated-cc1-multijob.patch
 engine_patch_expected_sha256=41d5e092ac23ac44c90714e95425a3be25775bf0127d5f9539000f306863b759
 if [ ! -f "$engine_patch" ]; then
@@ -271,10 +284,10 @@ pack=$output/llvm-22.1.8-macos-arm64.rccpack
     "$source_directory" \
     "$stage"
 
-gnu_glibc_rpm=${RCC_GLIBC_RUNTIME_RPM:-$repository/inner/glibc-2.17-326.el7_9.x86_64.rpm}
-gnu_headers_rpm=${RCC_GLIBC_HEADERS_RPM:-$repository/inner/glibc-headers-2.17-326.el7_9.x86_64.rpm}
-gnu_devel_rpm=${RCC_GLIBC_DEVEL_RPM:-$repository/inner/glibc-devel-2.17-326.el7_9.x86_64.rpm}
-gnu_kernel_rpm=${RCC_KERNEL_HEADERS_RPM:-$repository/inner/kernel-headers-3.10.0-1160.el7.x86_64.rpm}
+gnu_glibc_rpm=${RCC_GLIBC_RUNTIME_RPM:-$(default_archive glibc-2.17-326.el7_9.x86_64.rpm)}
+gnu_headers_rpm=${RCC_GLIBC_HEADERS_RPM:-$(default_archive glibc-headers-2.17-326.el7_9.x86_64.rpm)}
+gnu_devel_rpm=${RCC_GLIBC_DEVEL_RPM:-$(default_archive glibc-devel-2.17-326.el7_9.x86_64.rpm)}
+gnu_kernel_rpm=${RCC_KERNEL_HEADERS_RPM:-$(default_archive kernel-headers-3.10.0-1160.el7.x86_64.rpm)}
 gnu_in_payload=0
 if [ -f "$gnu_glibc_rpm" ] && [ -f "$gnu_headers_rpm" ] && [ -f "$gnu_devel_rpm" ] && [ -f "$gnu_kernel_rpm" ]; then
     "$script_directory/stage-linux-x86_64-gnu-glibc217.sh" \
@@ -285,7 +298,7 @@ if [ -f "$gnu_glibc_rpm" ] && [ -f "$gnu_headers_rpm" ] && [ -f "$gnu_devel_rpm"
         "$stage"
     gnu_in_payload=1
 else
-    echo "skipping linux-x86_64-gnu-glibc217: CentOS 7 RPMs not present under inner/" >&2
+    echo "skipping linux-x86_64-gnu-glibc217: CentOS 7 RPMs not present under .cache/ or inner/" >&2
     echo "run: mise run fetch:archives" >&2
 fi
 

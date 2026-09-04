@@ -1,12 +1,13 @@
-//! Cargo adapter that drives `cargo` with RCC as the native toolchain.
+//! Cargo adapter that drives `cargo` with RCC as the C/C++ toolchain.
 //!
 //! This is the RCC equivalent of cargo-zigbuild: it does not compile C or Rust
 //! itself. It materializes an RCC profile, exports cc-rs / rustc environment
-//! variables, and execs Cargo.
+//! variables, and execs Cargo. `cargo rcc` is `cargo build`, including the
+//! default artifact directory when `--target` is omitted.
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use rcc_core::{EnvironmentManifest, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0};
+use rcc_core::{EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -17,40 +18,155 @@ const LINUX_X64_MUSL: &str = "x86_64-unknown-linux-musl";
 const LINUX_X64_MUSL_PROFILE: &str = "linux-x86_64-musl-static";
 const LINUX_X64_GNU: &str = "x86_64-unknown-linux-gnu";
 const LINUX_X64_GNU_PROFILE: &str = "linux-x86_64-gnu-glibc217";
+const HOST_MACOS_AARCH64: &str = "aarch64-apple-darwin";
+const HOST_MACOS_AARCH64_PROFILE: &str = "host-macos-aarch64";
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "cargo-rcc",
-    bin_name = "cargo",
     version,
-    about = "Cargo subcommand that cross-compiles with RCC",
-    bin_name = "cargo rcc"
+    name = "cargo-rcc",
+    display_order = 1,
+    styles = cargo_options::styles(),
 )]
 struct Cli {
-    /// Cargo subcommand wrapper. `cargo rcc ...` passes this extra token.
-    #[arg(hide = true)]
-    rcc_token: Option<String>,
+    #[command(flatten)]
+    rcc: RccArgs,
+    #[command(subcommand)]
+    command: Opt,
+}
 
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Parser)]
+enum Opt {
+    /// Compile a local package and all of its dependencies using RCC as the
+    /// C/C++ toolchain and linker
+    #[command(name = "rcc", aliases = ["build", "b"])]
+    Build(Build),
+    #[command(name = "clippy")]
+    Clippy(Clippy),
+    #[command(name = "check", aliases = ["c"])]
+    Check(Check),
+    #[command(name = "doc")]
+    Doc(Doc),
+    #[command(name = "install")]
+    Install(Install),
+    #[command(name = "rustc")]
+    Rustc(Rustc),
+    #[command(name = "run", alias = "r")]
+    Run(Run),
+    #[command(name = "test", alias = "t")]
+    Test(Test),
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help build` for more detailed information."
+)]
+struct Build {
+    #[command(flatten)]
+    cargo: cargo_options::Build,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help clippy` for more detailed information."
+)]
+struct Clippy {
+    #[command(flatten)]
+    cargo: cargo_options::Clippy,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help check` for more detailed information."
+)]
+struct Check {
+    #[command(flatten)]
+    cargo: cargo_options::Check,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help doc` for more detailed information."
+)]
+struct Doc {
+    #[command(flatten)]
+    cargo: cargo_options::Doc,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help install` for more detailed information."
+)]
+struct Install {
+    #[command(flatten)]
+    cargo: cargo_options::Install,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help rustc` for more detailed information."
+)]
+struct Rustc {
+    #[command(flatten)]
+    cargo: cargo_options::Rustc,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help run` for more detailed information."
+)]
+struct Run {
+    #[command(flatten)]
+    cargo: cargo_options::Run,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    display_order = 1,
+    after_help = "Run `cargo help test` for more detailed information."
+)]
+struct Test {
+    #[command(flatten)]
+    cargo: cargo_options::Test,
+}
+
+#[derive(Clone, Debug, Default, Parser)]
+struct RccArgs {
     /// Path to a release `rcc` executable. Defaults to $RCC, then PATH, then
     /// a sibling of this cargo-rcc binary.
-    #[arg(long, env = "RCC", global = true)]
+    #[arg(long, env = "RCC", global = true, help_heading = "RCC Options")]
     rcc: Option<PathBuf>,
 
     /// Override the RCC cache directory.
-    #[arg(long, env = "RCC_CACHE_DIR", global = true)]
+    #[arg(
+        long,
+        env = "RCC_CACHE_DIR",
+        global = true,
+        help_heading = "RCC Options"
+    )]
     cache_dir: Option<PathBuf>,
 
     /// Override the RCC target profile. Inferred from Cargo `--target`.
-    #[arg(long = "rcc-profile", global = true)]
-    profile: Option<String>,
+    #[arg(long = "rcc-profile", global = true, help_heading = "RCC Options")]
+    rcc_profile: Option<String>,
 
     /// Override the RCC target runtime contract.
-    #[arg(long = "rcc-runtime-contract", global = true)]
+    #[arg(
+        long = "rcc-runtime-contract",
+        global = true,
+        help_heading = "RCC Options"
+    )]
     runtime_contract: Option<String>,
-
-    /// Remaining Cargo arguments, including the Cargo subcommand.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    cargo_args: Vec<OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +179,17 @@ pub struct TargetPlan {
 
 pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Result<TargetPlan> {
     let rust_target = canonical_rust_target(target)?;
+
+    if rust_target == HOST_MACOS_AARCH64 {
+        return Ok(TargetPlan {
+            rust_target,
+            profile_id: profile_override
+                .unwrap_or(HOST_MACOS_AARCH64_PROFILE)
+                .to_owned(),
+            runtime_contract: NATIVE_RCC_OWNED.to_owned(),
+            rustflags: Vec::new(),
+        });
+    }
 
     if rust_target == LINUX_X64_GNU {
         return Ok(TargetPlan {
@@ -163,48 +290,100 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut cli = Cli::parse();
-    if cli.rcc_token.as_deref().is_some_and(|token| token != "rcc") {
-        let mut args = vec![OsString::from(cli.rcc_token.take().unwrap())];
-        args.extend(cli.cargo_args);
-        cli.cargo_args = args;
+    let cli = Cli::parse();
+    match cli.command {
+        Opt::Build(mut build) => {
+            canonicalize_targets(&mut build.cargo.common.target)?;
+            execute_rcc(&cli.rcc, &build.cargo.common.target, build.cargo.command())
+        }
+        Opt::Clippy(mut clippy) => {
+            canonicalize_targets(&mut clippy.cargo.common.target)?;
+            execute_rcc(
+                &cli.rcc,
+                &clippy.cargo.common.target,
+                clippy.cargo.command(),
+            )
+        }
+        Opt::Check(mut check) => {
+            canonicalize_targets(&mut check.cargo.common.target)?;
+            execute_rcc(&cli.rcc, &check.cargo.common.target, check.cargo.command())
+        }
+        Opt::Doc(mut doc) => {
+            canonicalize_targets(&mut doc.cargo.common.target)?;
+            execute_rcc(&cli.rcc, &doc.cargo.common.target, doc.cargo.command())
+        }
+        Opt::Install(mut install) => {
+            canonicalize_targets(&mut install.cargo.common.target)?;
+            execute_rcc(
+                &cli.rcc,
+                &install.cargo.common.target,
+                install.cargo.command(),
+            )
+        }
+        Opt::Rustc(mut rustc) => {
+            canonicalize_targets(&mut rustc.cargo.common.target)?;
+            execute_rcc(&cli.rcc, &rustc.cargo.common.target, rustc.cargo.command())
+        }
+        Opt::Run(mut run) => {
+            canonicalize_targets(&mut run.cargo.common.target)?;
+            execute_rcc(&cli.rcc, &run.cargo.common.target, run.cargo.command())
+        }
+        Opt::Test(mut test) => {
+            canonicalize_targets(&mut test.cargo.common.target)?;
+            execute_rcc(&cli.rcc, &test.cargo.common.target, test.cargo.command())
+        }
+        Opt::External(args) => {
+            let mut cargo = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+            cargo.args(args).env_remove("CARGO");
+            spawn_cargo(cargo)
+        }
     }
-    if cli.cargo_args.is_empty() {
-        bail!(
-            "missing Cargo subcommand; try `cargo rcc build --target {LINUX_X64_MUSL}` \
-             or `--target {LINUX_X64_GNU}`"
-        );
+}
+
+fn canonicalize_targets(targets: &mut [String]) -> Result<()> {
+    for target in targets.iter_mut() {
+        *target = canonical_rust_target(target)?;
     }
+    Ok(())
+}
 
-    let cargo_target = cargo_target_from_args(&cli.cargo_args).with_context(|| {
-        format!(
-            "cargo-rcc requires --target {LINUX_X64_MUSL} or {LINUX_X64_GNU} \
-             (or an explicit --rcc-profile)"
-        )
-    })?;
-    let plan = plan_for_rust_target(&cargo_target, cli.profile.as_deref())?;
-    rewrite_cargo_target_args(&mut cli.cargo_args, &plan.rust_target);
-    let runtime_contract = cli
-        .runtime_contract
-        .as_deref()
-        .unwrap_or(plan.runtime_contract.as_str());
-
-    let rcc = locate_rcc(cli.rcc.as_deref())?;
+fn execute_rcc(rcc_args: &RccArgs, targets: &[String], mut cargo: Command) -> Result<()> {
     let host = detect_rustc_host()?;
-    // Host build scripts (proc-macro, openssl-src's rust build.rs) must keep
-    // the Apple rustc/cc toolchain. RCC is applied only to the Cargo --target.
     host_profile_for(&host)?;
 
+    let rust_targets = if targets.is_empty() {
+        vec![host]
+    } else {
+        targets.to_vec()
+    };
+    let mut plans = Vec::new();
+    for target in &rust_targets {
+        plans.push(plan_for_rust_target(
+            target,
+            rcc_args.rcc_profile.as_deref(),
+        )?);
+    }
+
+    let profile_id = &plans[0].profile_id;
+    if plans.iter().any(|plan| plan.profile_id != *profile_id) {
+        bail!("cargo-rcc can apply one RCC profile per invocation");
+    }
+    let runtime_contract = rcc_args
+        .runtime_contract
+        .as_deref()
+        .unwrap_or(plans[0].runtime_contract.as_str());
+
+    let rcc = locate_rcc(rcc_args.rcc.as_deref())?;
     let mut env_command = Command::new(&rcc);
     env_command
         .arg("env")
         .arg("--profile")
-        .arg(&plan.profile_id)
+        .arg(profile_id)
         .arg("--target-runtime-contract")
         .arg(runtime_contract)
         .arg("--format")
         .arg("json");
-    if let Some(cache_dir) = &cli.cache_dir {
+    if let Some(cache_dir) = &rcc_args.cache_dir {
         env_command.arg("--cache-dir").arg(cache_dir);
     }
     let output = env_command
@@ -212,19 +391,16 @@ fn run() -> Result<()> {
         .with_context(|| format!("failed to spawn {}", rcc.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "rcc env failed while materializing {} / {}:\n{stderr}",
-            plan.profile_id,
-            runtime_contract
-        );
+        bail!("rcc env failed while materializing {profile_id} / {runtime_contract}:\n{stderr}");
     }
     let manifest: EnvironmentManifest = serde_json::from_slice(&output.stdout)
         .context("failed to parse `rcc env --format json`")?;
 
-    let mut cargo = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    cargo.args(&cli.cargo_args);
-    cargo.env_remove("CARGO");
-    apply_rcc_environment(&mut cargo, &manifest, &plan, cli.cache_dir.as_deref())?;
+    apply_rcc_environment(&mut cargo, &manifest, &plans, rcc_args.cache_dir.as_deref())?;
+    spawn_cargo(cargo)
+}
+
+fn spawn_cargo(mut cargo: Command) -> Result<()> {
     cargo
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -294,7 +470,7 @@ fn detect_rustc_host() -> Result<String> {
 
 fn host_profile_for(host: &str) -> Result<String> {
     match host {
-        "aarch64-apple-darwin" => Ok("host-macos-aarch64".into()),
+        "aarch64-apple-darwin" => Ok(HOST_MACOS_AARCH64_PROFILE.into()),
         other => bail!(
             "cargo-rcc currently requires an aarch64-apple-darwin host (got {other}); \
              this matches the first RCC release controller"
@@ -305,7 +481,7 @@ fn host_profile_for(host: &str) -> Result<String> {
 fn apply_rcc_environment(
     cargo: &mut Command,
     manifest: &EnvironmentManifest,
-    plan: &TargetPlan,
+    plans: &[TargetPlan],
     cache_dir: Option<&Path>,
 ) -> Result<()> {
     for (name, value) in &manifest.variables {
@@ -320,31 +496,34 @@ fn apply_rcc_environment(
         .tool(rcc_core::ToolKind::Cc)
         .map(|tool| tool.path.as_str())
         .context("RCC environment is missing a C compiler")?;
-    let linker_key = format!(
-        "CARGO_TARGET_{}_LINKER",
-        plan.rust_target.replace('-', "_").to_ascii_uppercase()
-    );
-    cargo.env(&linker_key, cc);
 
-    let unwind_dir = isolate_rustc_unwind(&plan.rust_target, cache_dir)?;
-    let mut rustflags = plan.rustflags.clone();
-    if plan.rust_target == LINUX_X64_GNU {
-        let compat_obj = ensure_glibc217_compat(cache_dir, cc)?;
-        rustflags.push("-C".into());
-        rustflags.push(format!("link-arg={}", compat_obj.display()));
-    }
-    if let Some(unwind_dir) = unwind_dir {
-        rustflags.push("-L".into());
-        rustflags.push(format!("native={}", unwind_dir.display()));
-    }
+    for plan in plans {
+        let linker_key = format!(
+            "CARGO_TARGET_{}_LINKER",
+            plan.rust_target.replace('-', "_").to_ascii_uppercase()
+        );
+        cargo.env(&linker_key, cc);
 
-    // Target-only rustflags. Global CARGO_ENCODED_RUSTFLAGS would also apply
-    // crt-static / panic=abort to host build scripts.
-    let rustflags_key = format!(
-        "CARGO_TARGET_{}_RUSTFLAGS",
-        plan.rust_target.replace('-', "_").to_ascii_uppercase()
-    );
-    cargo.env(&rustflags_key, rustflags.join(" "));
+        let unwind_dir = isolate_rustc_unwind(&plan.rust_target, cache_dir)?;
+        let mut rustflags = plan.rustflags.clone();
+        if plan.rust_target == LINUX_X64_GNU {
+            let compat_obj = ensure_glibc217_compat(cache_dir, cc)?;
+            rustflags.push("-C".into());
+            rustflags.push(format!("link-arg={}", compat_obj.display()));
+        }
+        if let Some(unwind_dir) = unwind_dir {
+            rustflags.push("-L".into());
+            rustflags.push(format!("native={}", unwind_dir.display()));
+        }
+
+        // Target-only rustflags. Global CARGO_ENCODED_RUSTFLAGS would also apply
+        // crt-static / panic=abort to host build scripts.
+        let rustflags_key = format!(
+            "CARGO_TARGET_{}_RUSTFLAGS",
+            plan.rust_target.replace('-', "_").to_ascii_uppercase()
+        );
+        cargo.env(&rustflags_key, rustflags.join(" "));
+    }
     cargo.env_remove("CARGO_ENCODED_RUSTFLAGS");
     cargo.env_remove("RUSTFLAGS");
     Ok(())
@@ -404,14 +583,14 @@ fn isolate_rustc_unwind(rust_target: &str, cache_dir: Option<&Path>) -> Result<O
         .join("lib/self-contained/libunwind.a");
     if !libunwind.is_file() {
         // Official gnu rust-std does not ship a self-contained libunwind.a;
-        // unwind lives in rustc rlibs. musl still requires the isolated .a.
-        if rust_target.ends_with("-linux-gnu") {
-            return Ok(None);
+        // unwind lives in rustc rlibs. Host and gnu builds skip isolation.
+        if rust_target == LINUX_X64_MUSL {
+            bail!(
+                "rust-std for {rust_target} is missing {}; run `rustup target add {rust_target}`",
+                libunwind.display()
+            );
         }
-        bail!(
-            "rust-std for {rust_target} is missing {}; run `rustup target add {rust_target}`",
-            libunwind.display()
-        );
+        return Ok(None);
     }
 
     let root = cache_dir
@@ -523,6 +702,15 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn plans_host_macos_without_linux_rustflags() {
+        let plan = plan_for_rust_target(HOST_MACOS_AARCH64, None).unwrap();
+        assert_eq!(plan.rust_target, HOST_MACOS_AARCH64);
+        assert_eq!(plan.profile_id, HOST_MACOS_AARCH64_PROFILE);
+        assert_eq!(plan.runtime_contract, NATIVE_RCC_OWNED);
+        assert!(plan.rustflags.is_empty());
     }
 
     #[test]

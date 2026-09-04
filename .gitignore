@@ -1,5 +1,6 @@
 /target/
 dist/
+.cache/
 /inner/
 /.rcc-cache/
 *.rccpack

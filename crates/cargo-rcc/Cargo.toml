@@ -8,6 +8,7 @@ description = "Cargo subcommand that builds Rust crates with RCC as the C/C++ to
 
 [dependencies]
 anyhow.workspace = true
+cargo-options = "0.7.5"
 clap.workspace = true
 rcc-core = { path = "../rcc-core" }
 serde_json.workspace = true

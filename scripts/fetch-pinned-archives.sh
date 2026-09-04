@@ -1,17 +1,20 @@
 #!/bin/sh
-# Download the pinned LLVM bootstrap, LLVM source, musl, and CentOS 7 glibc
-# RPMs into inner/. Subsequent release builds reuse these files.
+# Download pinned LLVM bootstrap, LLVM source, musl, and CentOS 7 glibc RPMs
+# into .cache/ (override with RCC_ARCHIVE_CACHE). Subsequent release builds
+# reuse these files. Existing matching files under inner/ are hardlinked in
+# so a previous fetch:archives layout is not re-downloaded.
 set -eu
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-inner=$repository/inner
-mkdir -p "$inner"
+archive_cache=${RCC_ARCHIVE_CACHE:-$repository/.cache}
+legacy_inner=$repository/inner
+mkdir -p "$archive_cache"
 
 fetch() {
     name=$1
     url=$2
     expected=$3
-    destination=$inner/$name
+    destination=$archive_cache/$name
     if [ -f "$destination" ]; then
         actual=$(shasum -a 256 "$destination" | awk '{print $1}')
         if [ "$actual" = "$expected" ]; then
@@ -19,6 +22,17 @@ fetch() {
             return 0
         fi
         echo "digest mismatch for existing $destination; resuming or re-downloading"
+    elif [ -f "$legacy_inner/$name" ]; then
+        actual=$(shasum -a 256 "$legacy_inner/$name" | awk '{print $1}')
+        if [ "$actual" = "$expected" ]; then
+            if ln "$legacy_inner/$name" "$destination" 2>/dev/null; then
+                echo "hardlinked from inner/: $destination"
+            else
+                cp -p "$legacy_inner/$name" "$destination"
+                echo "copied from inner/: $destination"
+            fi
+            return 0
+        fi
     fi
     echo "fetching $name"
     curl -L --fail --retry 3 --retry-delay 2 -C - -o "$destination" "$url"
@@ -28,6 +42,11 @@ fetch() {
         exit 65
     fi
 }
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to download pinned archives" >&2
+    exit 69
+fi
 
 fetch \
     LLVM-22.1.8-macOS-ARM64.tar.xz \
@@ -58,4 +77,4 @@ fetch \
     https://vault.centos.org/7.9.2009/os/x86_64/Packages/kernel-headers-3.10.0-1160.el7.x86_64.rpm \
     81b4e4f401d2402736ceba4627eaafd5b615c2cc45aa4d4f941ea79562045139
 
-echo "pinned archives ready in $inner"
+echo "pinned archives ready in $archive_cache"

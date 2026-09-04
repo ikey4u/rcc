@@ -1,12 +1,16 @@
 # RCC developer and release tasks. List them with `mise tasks`.
 #
-# Pinned LLVM/musl/glibc archives and the LLVM engine work tree live in inner/
-# (gitignored; reused by later release builds):
-#   mise run fetch:archives
+# Pinned LLVM/musl/glibc archives are downloaded into .cache/ (gitignored).
+# The LLVM engine work tree still lives in inner/ so later release builds
+# can reuse a finished compile:
+#   mise release
+#     -> fetches archives into .cache/
+#     -> dist/bin/{cargo-rcc,rcc}
+#     -> dist/rcc-{os}-{arch}-{version}.zip
 #   mise run build:release -- \
-#     inner/LLVM-22.1.8-macOS-ARM64.tar.xz \
-#     inner/llvm-project-22.1.8.src.tar.xz \
-#     inner/musl-1.2.5.tar.gz \
+#     .cache/LLVM-22.1.8-macOS-ARM64.tar.xz \
+#     .cache/llvm-project-22.1.8.src.tar.xz \
+#     .cache/musl-1.2.5.tar.gz \
 #     /absolute/path/to/new-output-directory
 
 min_version = "2024.11.1"
@@ -17,7 +21,7 @@ min_version = "2024.11.1"
 rust = { version = "stable", components = "rustfmt,clippy" }
 
 [tasks."fetch:archives"]
-description = "Download pinned LLVM, musl, and CentOS 7 glibc RPM archives into inner/"
+description = "Download pinned LLVM, musl, and CentOS 7 glibc RPM archives into .cache/"
 run = "./scripts/fetch-pinned-archives.sh"
 
 [tasks.fetch]
@@ -39,6 +43,14 @@ depends = ["fetch"]
 # CMake, Ninja, or a system C/C++ compiler at runtime.
 tools = { cmake = "4.4.3", ninja = "1.13.1" }
 run = "./scripts/build-macos-arm64-release.sh"
+
+[tasks.release]
+description = "Build cargo-rcc, stage rcc + cargo-rcc into dist/bin, and zip dist/rcc-{os}-{arch}-{version}.zip"
+depends = ["fetch"]
+# cmake/ninja are only used if dist/rcc-release/rcc is missing and this task
+# falls back to build-macos-arm64-release.sh.
+tools = { cmake = "4.4.3", ninja = "1.13.1" }
+run = "./scripts/package-release.sh"
 
 [tasks.format]
 description = "Format all Rust code"
@@ -92,6 +104,7 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 description = "Validate release scripts and pinned LLVM/musl/glibc lock files"
 run = '''
 sh -n scripts/build-macos-arm64-release.sh
+sh -n scripts/package-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
 sh -n scripts/stage-linux-x86_64-libcxx.sh
 sh -n scripts/stage-linux-x86_64-musl.sh
@@ -120,6 +133,7 @@ cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 sh -n scripts/build-macos-arm64-release.sh
+sh -n scripts/package-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
 sh -n scripts/stage-linux-x86_64-libcxx.sh
 sh -n scripts/stage-linux-x86_64-musl.sh
