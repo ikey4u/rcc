@@ -25,3 +25,7 @@ examples/windows-c/out-*/
 examples/windows-cxx/out-*/
 examples/windows-hello/target/
 examples/windows-hello/Cargo.lock
+examples/macos-c/out-*/
+examples/macos-cxx/out-*/
+examples/macos-hello/target/
+examples/macos-hello/Cargo.lock

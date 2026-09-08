@@ -86,7 +86,7 @@ Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x
 ## 已知限制（验收失败时先看这里）
 
 - 必须使用 **release `rcc`**。
-- `cargo-rcc` 要求 host `aarch64-apple-darwin`。
+- `cargo-rcc` 要求 host `aarch64-apple-darwin` 或 `x86_64-unknown-linux-gnu`。
 - 稳定 rustc 不能按组件关闭 `link-self-contained`；adapter 使用 `=no`，并把 rust-std 的 `libunwind.a` 放到隔离 `-L`。
 - 上游若强行 `--sysroot=/usr` 或冲突 `--target`，RCC 会 fail-closed。
 - gnu 产物在 musl Alpine 上会因动态 loader 失败，这不是 bug。
@@ -98,6 +98,10 @@ Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x
 ## Windows PE
 
 `scripts/verify-windows.sh <profile>` 编 `examples/windows-c`、`examples/windows-cxx` 和 `examples/windows-hello`，然后 `rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`。x86_64 在装了 `wine64` 时可跑 native C。MSVC 需要调用方的 Windows SDK，本脚本不覆盖。
+
+## macOS Mach-O（Linux host）
+
+`scripts/verify-macos.sh` 编 `examples/macos-c` / `macos-cxx` / `macos-hello`，然后 `rcc verify` 检查 Mach-O 架构。需要 `RCC_APPLE_SDK_ROOT`（`scripts/stage-apple-sdk.sh` 摊平 phracker MacOSX11.3.sdk）。不在 Linux 上执行产物。
 
 ## 扩展下一批大型项目时怎么加
 

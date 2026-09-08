@@ -220,6 +220,9 @@ pub fn prepare_invocation_with_forbidden(
     }
 
     let expanded = strip_user_flags_that_restate_injected(&expanded, injected_arguments);
+    // rustc 1.90+ on GNU hosts injects `-B rustlib/.../gcc-ld -fuse-ld=lld`.
+    // RCC already binds LLD; drop the rustc self-contained linker prefix.
+    let expanded = strip_rustc_self_contained_linker(&expanded);
     validate_user_arguments(&expanded)?;
     validate_manifest_forbidden_arguments(&expanded, manifest_forbidden_arguments)?;
     let mut arguments = Vec::with_capacity(injected_arguments.len() + expanded.len());
@@ -254,7 +257,27 @@ fn strip_user_flags_that_restate_injected(
         .iter()
         .filter_map(|argument| rtlib_value(argument))
         .collect();
-    if injected_targets.is_empty() && injected_unwindlib.is_empty() && injected_rtlib.is_empty() {
+    let injected_macos_min: HashSet<String> = injected_arguments
+        .iter()
+        .filter_map(|argument| argument.strip_prefix("-mmacosx-version-min="))
+        .map(normalize_dotted_version)
+        .collect();
+    let injected_darwin_arch: HashSet<&str> = injected_arguments
+        .iter()
+        .filter_map(|argument| darwin_arch_from_target(argument))
+        .collect();
+    let injected_sysroots: HashSet<String> = injected_arguments
+        .iter()
+        .filter_map(|argument| sysroot_value(argument))
+        .map(normalize_sysroot_path)
+        .collect();
+    if injected_targets.is_empty()
+        && injected_unwindlib.is_empty()
+        && injected_rtlib.is_empty()
+        && injected_macos_min.is_empty()
+        && injected_darwin_arch.is_empty()
+        && injected_sysroots.is_empty()
+    {
         return user_arguments.to_vec();
     }
 
@@ -267,14 +290,14 @@ fn strip_user_flags_that_restate_injected(
             .strip_prefix("--target=")
             .or_else(|| text.strip_prefix("-target="))
         {
-            if injected_targets.contains(target) {
+            if restates_injected_clang_target(target, &injected_targets) {
                 index += 1;
                 continue;
             }
         }
         if (text == "--target" || text == "-target") && index + 1 < user_arguments.len() {
             if let Some(target) = user_arguments[index + 1].to_str() {
-                if injected_targets.contains(target) {
+                if restates_injected_clang_target(target, &injected_targets) {
                     index += 2;
                     continue;
                 }
@@ -290,6 +313,37 @@ fn strip_user_flags_that_restate_injected(
             if injected_rtlib.contains(value) {
                 index += 1;
                 continue;
+            }
+        }
+        if text.strip_prefix("-mmacosx-version-min=").is_some() && !injected_macos_min.is_empty() {
+            // RCC owns the deployment target. cc-rs on x86_64 Darwin often
+            // restates 10.7; that must not override or fail the profile floor.
+            index += 1;
+            continue;
+        }
+        if text == "-arch" {
+            if let Some(arch) = user_arguments
+                .get(index + 1)
+                .and_then(|argument| argument.to_str())
+            {
+                if injected_darwin_arch.contains(arch) {
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        if let Some(sysroot) = sysroot_value(text) {
+            if injected_sysroots.contains(&normalize_sysroot_path(sysroot)) {
+                index += 1;
+                continue;
+            }
+        }
+        if is_sysroot_flag(text) && index + 1 < user_arguments.len() {
+            if let Some(sysroot) = user_arguments[index + 1].to_str() {
+                if injected_sysroots.contains(&normalize_sysroot_path(sysroot)) {
+                    index += 2;
+                    continue;
+                }
             }
         }
         stripped.push(current.clone());
@@ -308,6 +362,131 @@ fn rtlib_value(argument: &str) -> Option<&str> {
     argument
         .strip_prefix("-rtlib=")
         .or_else(|| argument.strip_prefix("--rtlib="))
+}
+
+fn sysroot_value(argument: &str) -> Option<&str> {
+    argument
+        .strip_prefix("--sysroot=")
+        .or_else(|| argument.strip_prefix("-isysroot="))
+}
+
+fn is_sysroot_flag(argument: &str) -> bool {
+    argument == "--sysroot" || argument == "-isysroot"
+}
+
+fn normalize_sysroot_path(path: &str) -> String {
+    path.trim_end_matches('/').to_owned()
+}
+
+fn restates_injected_clang_target(user: &str, injected_targets: &HashSet<&str>) -> bool {
+    if injected_targets.contains(user) {
+        return true;
+    }
+    let Some(user_family) = darwin_clang_target_family(user) else {
+        return false;
+    };
+    injected_targets
+        .iter()
+        .copied()
+        .any(|injected| darwin_clang_target_family(injected) == Some(user_family))
+}
+
+/// cc-rs on Darwin emits Apple's Clang spelling (`arm64-apple-macosx`) while
+/// RCC injects the LLVM triple (`aarch64-apple-macosx11.0`). Same arch+OS is
+/// a restatement; a different arch remains forbidden.
+fn darwin_clang_target_family(target: &str) -> Option<(&'static str, &'static str)> {
+    let (arch, rest) = if let Some(rest) = target.strip_prefix("arm64-apple-") {
+        ("aarch64", rest)
+    } else if let Some(rest) = target.strip_prefix("aarch64-apple-") {
+        ("aarch64", rest)
+    } else if let Some(rest) = target.strip_prefix("x86_64-apple-") {
+        ("x86_64", rest)
+    } else {
+        return None;
+    };
+    for os in ["macosx", "ios", "tvos", "watchos"] {
+        if rest == os {
+            return Some((arch, os));
+        }
+        if let Some(version) = rest.strip_prefix(os) {
+            if version.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return Some((arch, os));
+            }
+        }
+    }
+    None
+}
+
+fn darwin_arch_from_target(argument: &str) -> Option<&'static str> {
+    let target = argument
+        .strip_prefix("--target=")
+        .or_else(|| argument.strip_prefix("-target="))?;
+    if target.starts_with("aarch64-apple-") {
+        Some("arm64")
+    } else if target.starts_with("x86_64-apple-") {
+        Some("x86_64")
+    } else {
+        None
+    }
+}
+
+fn normalize_dotted_version(value: &str) -> String {
+    let mut parts = value.split('.').collect::<Vec<_>>();
+    while parts.len() > 1 && parts.last() == Some(&"0") {
+        parts.pop();
+    }
+    parts.join(".")
+}
+
+fn strip_rustc_self_contained_linker(user_arguments: &[OsString]) -> Vec<OsString> {
+    let mut stripped = Vec::with_capacity(user_arguments.len());
+    let mut index = 0usize;
+    while index < user_arguments.len() {
+        let text = user_arguments[index].to_str().unwrap_or("");
+        if is_rustc_gcc_ld_prefix(text) {
+            index += 1;
+            continue;
+        }
+        if text == "-B" {
+            if let Some(path) = user_arguments
+                .get(index + 1)
+                .and_then(|argument| argument.to_str())
+            {
+                if is_rustc_gcc_ld_dir(path) {
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        if text == "-fuse-ld=lld" {
+            index += 1;
+            continue;
+        }
+        if text == "-fuse-ld"
+            && user_arguments
+                .get(index + 1)
+                .and_then(|argument| argument.to_str())
+                == Some("lld")
+        {
+            index += 2;
+            continue;
+        }
+        stripped.push(user_arguments[index].clone());
+        index += 1;
+    }
+    stripped
+}
+
+fn is_rustc_gcc_ld_prefix(argument: &str) -> bool {
+    argument.strip_prefix("-B").is_some_and(is_rustc_gcc_ld_dir)
+}
+
+fn is_rustc_gcc_ld_dir(path: &str) -> bool {
+    let path = Path::new(path);
+    path.file_name().is_some_and(|name| name == "gcc-ld")
+        && path
+            .components()
+            .any(|component| component.as_os_str() == "rustlib")
 }
 
 pub fn validate_manifest_forbidden_arguments(
@@ -1253,6 +1432,31 @@ mod tests {
     }
 
     #[test]
+    fn drops_rustc_self_contained_linker_prefix() {
+        let gcc_ld = "/root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld";
+        let prepared = prepare_invocation(
+            &os(&["-c", "source.c", &format!("-B{gcc_ld}"), "-fuse-ld=lld"]),
+            &["--target=x86_64-unknown-linux-gnu".into()],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&["--target=x86_64-unknown-linux-gnu", "-c", "source.c",])
+        );
+        assert!(
+            prepare_invocation(&os(&["-c", "source.c", "-B/usr/bin"]), &[], Path::new("."),)
+                .is_err()
+        );
+        assert!(prepare_invocation(
+            &os(&["-c", "source.c", "-fuse-ld=/usr/bin/ld"]),
+            &[],
+            Path::new("."),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn prepends_trusted_profile_arguments() {
         let prepared = prepare_invocation(
             &os(&["-c", "source.c"]),
@@ -1281,6 +1485,130 @@ mod tests {
         assert!(prepare_invocation(
             &os(&["--target=aarch64-unknown-linux-musl", "-c", "source.c"]),
             &["--target=x86_64-unknown-linux-musl".into()],
+            Path::new("."),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn drops_rustc_darwin_arch_and_min_os_that_match_injection() {
+        let prepared = prepare_invocation(
+            &os(&[
+                "-arch",
+                "arm64",
+                "-mmacosx-version-min=11.0.0",
+                "-c",
+                "source.c",
+            ]),
+            &[
+                "--target=aarch64-apple-macosx11.0".into(),
+                "-mmacosx-version-min=11.0".into(),
+            ],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&[
+                "--target=aarch64-apple-macosx11.0",
+                "-mmacosx-version-min=11.0",
+                "-c",
+                "source.c",
+            ])
+        );
+        assert!(prepare_invocation(
+            &os(&["-arch", "x86_64", "-c", "source.c"]),
+            &["--target=aarch64-apple-macosx11.0".into()],
+            Path::new("."),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn drops_cc_rs_macos_min_when_the_profile_already_injects_one() {
+        let prepared = prepare_invocation(
+            &os(&["-mmacosx-version-min=10.7", "-c", "source.c"]),
+            &[
+                "--target=x86_64-apple-macosx11.0".into(),
+                "-mmacosx-version-min=11.0".into(),
+            ],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&[
+                "--target=x86_64-apple-macosx11.0",
+                "-mmacosx-version-min=11.0",
+                "-c",
+                "source.c",
+            ])
+        );
+    }
+
+    #[test]
+    fn drops_cc_rs_apple_clang_target_alias() {
+        let prepared = prepare_invocation(
+            &os(&["--target=arm64-apple-macosx", "-c", "source.c"]),
+            &["--target=aarch64-apple-macosx11.0".into()],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&["--target=aarch64-apple-macosx11.0", "-c", "source.c"])
+        );
+        let unversioned = prepare_invocation(
+            &os(&["--target=aarch64-apple-macosx", "-c", "source.c"]),
+            &["--target=aarch64-apple-macosx11.0".into()],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            unversioned.arguments,
+            os(&["--target=aarch64-apple-macosx11.0", "-c", "source.c"])
+        );
+        assert!(prepare_invocation(
+            &os(&["--target=x86_64-apple-macosx", "-c", "source.c"]),
+            &["--target=aarch64-apple-macosx11.0".into()],
+            Path::new("."),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn drops_rustc_isysroot_that_matches_injected_sysroot() {
+        let prepared = prepare_invocation(
+            &os(&["-isysroot", "/MacOSX.sdk", "-c", "source.c"]),
+            &[
+                "--target=aarch64-apple-macosx11.0".into(),
+                "--sysroot=/MacOSX.sdk".into(),
+            ],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&[
+                "--target=aarch64-apple-macosx11.0",
+                "--sysroot=/MacOSX.sdk",
+                "-c",
+                "source.c",
+            ])
+        );
+        let joined = prepare_invocation(
+            &os(&["-isysroot=/MacOSX.sdk/", "-c", "source.c"]),
+            &["--sysroot=/MacOSX.sdk".into()],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            joined.arguments,
+            os(&["--sysroot=/MacOSX.sdk", "-c", "source.c"])
+        );
+        assert!(prepare_invocation(
+            &os(&["-isysroot", "/other.sdk", "-c", "source.c"]),
+            &["--sysroot=/MacOSX.sdk".into()],
             Path::new("."),
         )
         .is_err());

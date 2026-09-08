@@ -70,16 +70,34 @@ build_rcc_if_missing() {
     done
 
     echo "building release rcc into $rcc_release_dir" >&2
-    RCC_ARCHIVE_CACHE=$archive_cache \
-    RCC_GLIBC_RUNTIME_RPM=$archive_cache/glibc-2.17-326.el7_9.x86_64.rpm \
-    RCC_GLIBC_HEADERS_RPM=$archive_cache/glibc-headers-2.17-326.el7_9.x86_64.rpm \
-    RCC_GLIBC_DEVEL_RPM=$archive_cache/glibc-devel-2.17-326.el7_9.x86_64.rpm \
-    RCC_KERNEL_HEADERS_RPM=$archive_cache/kernel-headers-3.10.0-1160.el7.x86_64.rpm \
-    "$script_directory/build-macos-arm64-release.sh" \
-        "$bootstrap_archive" \
-        "$source_archive" \
-        "$musl_archive" \
-        "$rcc_release_dir"
+    host=$(rustc -vV | awk '/^host:/{print $2}')
+    case "$host" in
+        aarch64-apple-darwin)
+            RCC_ARCHIVE_CACHE=$archive_cache \
+            RCC_GLIBC_RUNTIME_RPM=$archive_cache/glibc-2.17-326.el7_9.x86_64.rpm \
+            RCC_GLIBC_HEADERS_RPM=$archive_cache/glibc-headers-2.17-326.el7_9.x86_64.rpm \
+            RCC_GLIBC_DEVEL_RPM=$archive_cache/glibc-devel-2.17-326.el7_9.x86_64.rpm \
+            RCC_KERNEL_HEADERS_RPM=$archive_cache/kernel-headers-3.10.0-1160.el7.x86_64.rpm \
+            "$script_directory/build-macos-arm64-release.sh" \
+                "$bootstrap_archive" \
+                "$source_archive" \
+                "$musl_archive" \
+                "$rcc_release_dir"
+            ;;
+        x86_64-unknown-linux-gnu|x86_64-unknown-linux-musl)
+            resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
+            RCC_ARCHIVE_CACHE=$archive_cache \
+            "$script_directory/build-linux-x86_64-release.sh" \
+                "$resource_archive" \
+                "$source_archive" \
+                "$musl_archive" \
+                "$rcc_release_dir"
+            ;;
+        *)
+            echo "no release build script for rustc host $host" >&2
+            exit 64
+            ;;
+    esac
     rcc=$rcc_release_dir/rcc
 }
 

@@ -32,7 +32,7 @@ pub fn run(kind: ToolKind, argv0: &OsStr, arguments: &[OsString]) -> Result<i32>
         let _ = (argv0, arguments);
         bail!(
             "this development RCC was built without the static LLVM engine; \
-             use scripts/build-macos-arm64-release.sh or set the pinned LLVM build inputs"
+             use scripts/build-macos-arm64-release.sh, scripts/build-linux-x86_64-release.sh, or set the pinned LLVM build inputs"
         )
     }
 }

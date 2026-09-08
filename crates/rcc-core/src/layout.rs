@@ -587,6 +587,9 @@ fn trusted_arguments(
                 .as_deref()
                 .context("macOS profile has no minimum OS")?
         ));
+        // Linux-hosted Clang otherwise treats the bound ld64.lld as an old
+        // ld64 and emits -macosx_version_min instead of -platform_version.
+        arguments.push("-mlinker-version=907".into());
     }
     if profile.os == "linux" {
         arguments.push("--rtlib=compiler-rt".into());

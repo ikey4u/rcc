@@ -31,6 +31,10 @@ use walkdir::WalkDir;
     about = "Relocatable C/C++ cross-toolchain provider"
 )]
 pub struct Cli {
+    /// Override the RCC home directory (`vendor/` SDKs live here).
+    #[arg(long, global = true, env = "RCC_HOME_DIR")]
+    pub home_dir: Option<PathBuf>,
+
     /// Override the RCC content-addressed cache.
     #[arg(long, global = true, env = "RCC_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
@@ -232,6 +236,7 @@ pub enum CacheCommand {
 
 #[derive(Debug)]
 struct GlobalOptions {
+    home_dir: Option<PathBuf>,
     cache_dir: Option<PathBuf>,
     pack: Option<PathBuf>,
     allow_external_pack: bool,
@@ -239,12 +244,14 @@ struct GlobalOptions {
 
 pub fn run(cli: Cli) -> Result<i32> {
     let Cli {
+        home_dir,
         cache_dir,
         pack,
         allow_external_pack,
         command,
     } = cli;
     let options = GlobalOptions {
+        home_dir,
         cache_dir,
         pack,
         allow_external_pack,
@@ -332,6 +339,7 @@ fn materialize_profile(
     runtime_contract: &str,
 ) -> Result<toolchain::ResolvedView> {
     toolchain::materialize(
+        options.home_dir.as_deref(),
         options.cache_dir.as_deref(),
         options.pack.as_deref(),
         options.allow_external_pack,

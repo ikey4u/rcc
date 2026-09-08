@@ -2,6 +2,7 @@ mod cache;
 mod cli;
 mod dispatch;
 mod engine;
+mod home;
 mod payload;
 mod provider;
 mod toolchain;

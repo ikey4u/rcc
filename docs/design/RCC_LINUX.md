@@ -2,41 +2,42 @@
 
 > 本文写 **Linux 作为 controller host**：编向 macOS 与 Windows。  
 > 总架构见 [ARCH.md](ARCH.md)。  
-> 从 macOS / Windows 编 Linux，见 [RCC_MACOS.md](RCC_MACOS.md)、[RCC_WINDOWS.md](RCC_WINDOWS.md)。
+> 从 macOS / Windows 编 Linux，见 [RCC_MACOS.md](RCC_MACOS.md)、[RCC_WINDOWS.md](RCC_WINDOWS.md)。  
+> 落地计划：[IMPL_RCC_LINUX.md](../plan/IMPL_RCC_LINUX.md)。
 
 ## 交叉矩阵
 
-| Host → Target | macOS | Windows |
-| --- | --- | --- |
-| **Linux** | **未交付**（尽最大努力：自备 Apple SDK；不要求签名/公证） | **未交付**（gnu/gnullvm 拟 hermetic；MSVC 尽最大努力 + 自备 SDK） |
+| Host → Target | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| **Linux x86_64** | 本机 gnu-glibc217 + 交叉 musl/gnu（含 aarch64） | 尽最大努力：自备 Apple SDK；不要求签名/公证 | gnu/gnullvm hermetic；MSVC 尽最大努力 + 自备 SDK |
 
-还没有能在 Linux 上跑的 `rcc`（ELF）。registry 里的 `host-linux-*-gnu-glibc217` 只是 host 原生 C 的 profile 名，不是一份 Linux 发行物。原生 Linux 编译不进上表。
+发行物：`rcc-linux-x86_64`（ELF multicall）。registry 里的 `host-linux-*-gnu-glibc217` 是 host ABI 名；本机 C 实际走 pack 内的 `linux-x86_64-gnu-glibc217` sysroot。
 
-Linux 目标（`linux-x86_64-musl-static` / `linux-x86_64-gnu-glibc217`）已在 macOS host 交付，合同与验收见 [RCC_MACOS.md](RCC_MACOS.md)。
+Linux **目标**在 macOS host 上的合同见 [RCC_MACOS.md](RCC_MACOS.md)；Linux host 复用同一批 sysroot。
 
-## Linux 作为 host（未交付）
+## Linux 作为 host
 
-要先有一份 **Linux LLVM 引擎**（不能把现在的 Darwin `.a` 链进 ELF `rcc`）。可行路径包括用现有 macOS RCC 交叉编 Linux `rcc`，或在 Linux CI/Lima 上编引擎。发行物形态应对齐 `rcc-linux-x86_64`（ARCH §3.3）。
+引擎必须在 Linux 上编成 ELF 静态库（不能链 Darwin `.a`）。`scripts/build-linux-x86_64-release.sh` 用系统 clang 15 或官方 `LLVM-22.1.8-Linux-X64` 当 bootstrap，从钉死的 `llvm-project-22.1.8.src` 编 Clang + LLD（Mach-O/ELF/COFF/MinGW）+ llvm-ar。`cargo-rcc` 接受 `x86_64-unknown-linux-gnu` host。
 
-`cargo-rcc` 目前写死 Apple Silicon host，Linux host 需要改成「当前 edition 声明的 host」。
+Apple SDK **不分发**。Linux 上必须设 `RCC_APPLE_SDK_ROOT`（例如 phracker MacOSX11.3.sdk，经 `scripts/stage-apple-sdk.sh` 摊平）。Darwin compiler-rt 从官方 macOS LLVM 归档抽资源，不执行 Mach-O。
+
+`rcc` 自身动态依赖 host glibc（此实现机为 2.28）；**用户** gnu 产物仍是 GLIBC_ ≤ 2.17。不依赖 `libstdc++.so` / LLVM dylib。
 
 ### Linux → macOS（尽最大努力）
 
-不把签名、公证当门槛。调用方提供 Apple SDK（`RCC_APPLE_SDK_ROOT`）；RCC 不分发 SDK。provider 在非 macOS 上已拒绝自动 `xcrun`。
+不把签名、公证当门槛。`RCC_APPLE_SDK_ROOT`；provider 拒绝自动 `xcrun`。验收是 Mach-O 格式与架构，不在 Linux 上执行。
 
-技术上 Clang + 已链接的 Mach-O LLD 可以出 Mach-O。未做：Linux controller、Mach-O 在 Linux 上的验收、ad-hoc signer。需要上机运行时由调用方自行 `codesign`。
+### Linux → Linux
 
-### Linux → Linux（controller 就绪后）
+本机与交叉（另一 arch）在对应 sysroot 进 pack 后成立。合同与 macOS host 上相同。
 
-host 原生 C/C++ 走 `host-linux-x86_64-gnu-glibc217`（或之后的 aarch64 host profile）。交叉编另一 arch 的 Linux（例如 aarch64 host → x86_64 musl）在 sysroot 进 pack 之后才成立。
+### Linux → Windows
 
-### Linux → Windows（未交付，gnu 优先）
-
-引擎还缺 COFF LLD。计划与 Windows 文档相同：先 hermetic `windows-x86_64-gnu`（MinGW-w64 sysroot 进 pack），再 gnullvm；MSVC 尽最大努力，调用方准备 Windows SDK 与 headers/libs。见 [RCC_WINDOWS.md](RCC_WINDOWS.md)。
+gnu / gnullvm hermetic sysroot 进 pack；MSVC 尽最大努力，`RCC_WINDOWS_SDK_ROOT`。COFF/MinGW LLD 已在引擎源里挂上，Linux 静态引擎同样链接。
 
 ## 相关文档
 
-- [RCC_MACOS.md](RCC_MACOS.md) — macOS host；Linux 目标在 macOS 上的交付合同
+- [RCC_MACOS.md](RCC_MACOS.md)
 - [RCC_WINDOWS.md](RCC_WINDOWS.md)
-- [../plan/IMPL_RCC_MACOS.md](../plan/IMPL_RCC_MACOS.md) — macOS host 上 Linux 目标怎么编进 pack
+- [../plan/IMPL_RCC_LINUX.md](../plan/IMPL_RCC_LINUX.md)
 - [../VERIFY.md](../VERIFY.md)

@@ -123,7 +123,11 @@ run_guest() {
     runner=
     output=
 
-    if command -v qemu-x86_64 >/dev/null 2>&1; then
+    if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+        runner=native
+        echo "==> native $binary"
+        output=$("$binary")
+    elif command -v qemu-x86_64 >/dev/null 2>&1; then
         runner=qemu-x86_64
         echo "==> qemu-user $binary"
         output=$(qemu-x86_64 "$binary")

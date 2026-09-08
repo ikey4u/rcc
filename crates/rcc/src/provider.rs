@@ -1,17 +1,16 @@
+use crate::home;
 use anyhow::{bail, ensure, Context, Result};
 use rcc_core::layout::ExternalSysroot;
 use rcc_core::registry::{APPLE_DEVELOPER_PROVIDER, WINDOWS_MSVC_PROVIDER};
 use rcc_core::Profile;
 use sha2::{Digest, Sha256};
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
-const APPLE_SDK_ENV: &str = "RCC_APPLE_SDK_ROOT";
-const WINDOWS_SDK_ENV: &str = "RCC_WINDOWS_SDK_ROOT";
 const MAX_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 65_536;
 
@@ -21,29 +20,35 @@ const MAX_DIRECTORY_ENTRIES: usize = 65_536;
 /// canonicalized, shape checked, and assigned an identity which deliberately
 /// samples only descriptors and one level of deterministic metadata beneath
 /// critical directories. This keeps discovery bounded even for large SDKs.
-pub fn resolve_external_sysroot(profile: &Profile) -> Result<Option<ExternalSysroot>> {
+pub fn resolve_external_sysroot(
+    profile: &Profile,
+    home_dir: Option<&Path>,
+) -> Result<Option<ExternalSysroot>> {
     profile.validate().context("invalid profile")?;
     let Some(provider) = profile.sdk_provider.as_deref() else {
         return Ok(None);
     };
+    let home = home::resolve(home_dir)?;
 
     let (candidate, reject_candidate_symlink) = match provider {
-        APPLE_DEVELOPER_PROVIDER => match nonempty_env_path(APPLE_SDK_ENV)? {
-            Some(path) => (path, true),
-            None if cfg!(target_os = "macos") => (discover_apple_sdk()?, false),
+        APPLE_DEVELOPER_PROVIDER => match discover_apple_sdk_candidate(&home)? {
+            Some(candidate) => candidate,
             None => bail!(
-                "profile {} requires an Apple SDK; set {APPLE_SDK_ENV} (automatic discovery is only available on macOS)",
-                profile.profile_id
+                "profile {} requires an Apple SDK; place one at {}",
+                profile.profile_id,
+                home::vendor_dir(&home, "macos").display()
             ),
         },
         WINDOWS_MSVC_PROVIDER => {
-            let path = nonempty_env_path(WINDOWS_SDK_ENV)?.with_context(|| {
-                format!(
-                    "profile {} requires a Windows SDK; set {WINDOWS_SDK_ENV}",
-                    profile.profile_id
-                )
-            })?;
-            (path, true)
+            let vendor = home::vendor_dir(&home, "windows");
+            match discover_vendor_sdk(&vendor, looks_like_windows_sdk)? {
+                Some(path) => (path, true),
+                None => bail!(
+                    "profile {} requires a Windows SDK; place one at {}",
+                    profile.profile_id,
+                    vendor.display()
+                ),
+            }
         }
         other => bail!(
             "profile {} names unsupported SDK provider {other}",
@@ -80,14 +85,97 @@ pub fn resolve_external_sysroot(profile: &Profile) -> Result<Option<ExternalSysr
     }))
 }
 
-fn nonempty_env_path(name: &str) -> Result<Option<PathBuf>> {
-    let Some(value) = env::var_os(name) else {
-        return Ok(None);
-    };
-    ensure!(!value.is_empty(), "{name} is set but empty");
-    Ok(Some(PathBuf::from(value)))
+fn discover_apple_sdk_candidate(home: &Path) -> Result<Option<(PathBuf, bool)>> {
+    let vendor = home::vendor_dir(home, "macos");
+    if vendor.exists() {
+        return Ok(discover_vendor_sdk(&vendor, looks_like_apple_sdk)?.map(|path| (path, true)));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(Some((discover_apple_sdk()?, false)));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = vendor;
+        Ok(None)
+    }
 }
 
+fn discover_vendor_sdk(vendor: &Path, looks_like: fn(&Path) -> bool) -> Result<Option<PathBuf>> {
+    match fs::symlink_metadata(vendor) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect vendor directory {}", vendor.display())
+            });
+        }
+        Ok(metadata) => {
+            ensure!(
+                !metadata.file_type().is_symlink(),
+                "vendor directory {} has a symbolic-link leaf",
+                vendor.display()
+            );
+            ensure!(
+                metadata.is_dir(),
+                "vendor directory {} is not a directory",
+                vendor.display()
+            );
+        }
+    }
+    if looks_like(vendor) {
+        return Ok(Some(vendor.to_path_buf()));
+    }
+
+    let mut matches = Vec::new();
+    let mut inspected = 0_usize;
+    for entry in fs::read_dir(vendor)
+        .with_context(|| format!("failed to read vendor directory {}", vendor.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!("failed to enumerate vendor directory {}", vendor.display())
+        })?;
+        inspected += 1;
+        ensure!(
+            inspected <= MAX_DIRECTORY_ENTRIES,
+            "vendor directory {} contains too many entries",
+            vendor.display()
+        );
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect vendor entry {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        if looks_like(&path) {
+            matches.push(path);
+        }
+    }
+    matches.sort();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.pop().expect("one vendor SDK"))),
+        _ => bail!(
+            "multiple SDKs found under {}; keep exactly one",
+            vendor.display()
+        ),
+    }
+}
+
+fn looks_like_apple_sdk(root: &Path) -> bool {
+    is_real_directory(root)
+        && (root.join("SDKSettings.json").is_file() || root.join("SDKSettings.plist").is_file())
+        && is_real_directory(&root.join("usr/include"))
+        && is_real_directory(&root.join("usr/lib"))
+        && is_real_directory(&root.join("System/Library/Frameworks"))
+}
+
+fn looks_like_windows_sdk(root: &Path) -> bool {
+    is_real_directory(root)
+        && is_real_directory(&root.join("Include"))
+        && is_real_directory(&root.join("Lib"))
+}
+
+#[cfg(target_os = "macos")]
 fn discover_apple_sdk() -> Result<PathBuf> {
     let output = Command::new("/usr/bin/xcrun")
         .args(["--sdk", "macosx", "--show-sdk-path"])
@@ -435,6 +523,7 @@ fn os_bytes(value: &OsStr) -> Vec<u8> {
 mod tests {
     use super::*;
     use rcc_core::registry::resolve_target_profile;
+    use std::env;
     use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
@@ -468,22 +557,19 @@ mod tests {
         }
     }
 
-    fn apple_sdk() -> TempDir {
-        let temp = tempfile::tempdir().unwrap();
+    fn write_apple_sdk(root: &Path) {
         fs::write(
-            temp.path().join("SDKSettings.json"),
+            root.join("SDKSettings.json"),
             br#"{"Version":"14.0","CanonicalName":"macosx14.0"}"#,
         )
         .unwrap();
         for directory in ["usr/include", "usr/lib", "System/Library/Frameworks"] {
-            fs::create_dir_all(temp.path().join(directory)).unwrap();
+            fs::create_dir_all(root.join(directory)).unwrap();
         }
-        fs::write(temp.path().join("usr/lib/libSystem.tbd"), b"stub-v1").unwrap();
-        temp
+        fs::write(root.join("usr/lib/libSystem.tbd"), b"stub-v1").unwrap();
     }
 
-    fn windows_sdk() -> TempDir {
-        let temp = tempfile::tempdir().unwrap();
+    fn write_windows_sdk(root: &Path) {
         let version = "10.0.22621.0";
         for directory in [
             format!("Include/{version}/ucrt"),
@@ -492,27 +578,33 @@ mod tests {
             format!("Lib/{version}/ucrt"),
             format!("Lib/{version}/um"),
         ] {
-            fs::create_dir_all(temp.path().join(directory)).unwrap();
+            fs::create_dir_all(root.join(directory)).unwrap();
         }
         fs::write(
-            temp.path()
-                .join(format!("Include/{version}/ucrt/corecrt.h")),
+            root.join(format!("Include/{version}/ucrt/corecrt.h")),
             b"#pragma once\n",
         )
         .unwrap();
-        temp
+    }
+
+    fn home_with_vendor_sdk(os: &str, write_sdk: fn(&Path)) -> (TempDir, EnvRestore) {
+        let home = tempfile::tempdir().unwrap();
+        let sdk = home.path().join("vendor").join(os).join("sdk");
+        fs::create_dir_all(&sdk).unwrap();
+        write_sdk(&sdk);
+        let restore = EnvRestore::set(home::HOME_ENV, home.path());
+        (home, restore)
     }
 
     #[test]
     fn explicit_apple_sdk_is_canonical_and_stable() {
-        let sdk = apple_sdk();
-        let _restore = EnvRestore::set(APPLE_SDK_ENV, sdk.path());
+        let (_home, _restore) = home_with_vendor_sdk("macos", write_apple_sdk);
         let profile = resolve_target_profile("macos-aarch64").unwrap();
 
-        let first = resolve_external_sysroot(profile).unwrap().unwrap();
-        let second = resolve_external_sysroot(profile).unwrap().unwrap();
+        let first = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        let second = resolve_external_sysroot(profile, None).unwrap().unwrap();
 
-        assert_eq!(first.path, sdk.path().canonicalize().unwrap());
+        assert!(first.path.ends_with("vendor/macos/sdk"));
         assert_eq!(first.identity, second.identity);
         assert_eq!(first.identity.len(), 64);
         assert!(first
@@ -523,40 +615,42 @@ mod tests {
 
     #[test]
     fn apple_descriptor_content_changes_identity() {
-        let sdk = apple_sdk();
-        let _restore = EnvRestore::set(APPLE_SDK_ENV, sdk.path());
+        let (home, _restore) = home_with_vendor_sdk("macos", write_apple_sdk);
         let profile = resolve_target_profile("macos-aarch64").unwrap();
-        let before = resolve_external_sysroot(profile).unwrap().unwrap();
+        let before = resolve_external_sysroot(profile, None).unwrap().unwrap();
 
         fs::write(
-            sdk.path().join("SDKSettings.json"),
+            home.path()
+                .join("vendor/macos/sdk")
+                .join("SDKSettings.json"),
             br#"{"Version":"15.0","CanonicalName":"macosx15.0"}"#,
         )
         .unwrap();
-        let after = resolve_external_sysroot(profile).unwrap().unwrap();
+        let after = resolve_external_sysroot(profile, None).unwrap().unwrap();
         assert_ne!(before.identity, after.identity);
     }
 
     #[test]
     fn explicit_windows_sdk_requires_matching_include_and_lib_shape() {
-        let sdk = windows_sdk();
-        let _restore = EnvRestore::set(WINDOWS_SDK_ENV, sdk.path());
+        let (_home, _restore) = home_with_vendor_sdk("windows", write_windows_sdk);
         let profile = resolve_target_profile("windows-x86_64-msvc").unwrap();
 
-        let resolved = resolve_external_sysroot(profile).unwrap().unwrap();
-        assert_eq!(resolved.path, sdk.path().canonicalize().unwrap());
+        let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        assert!(resolved.path.ends_with("vendor/windows/sdk"));
         assert_eq!(resolved.identity.len(), 64);
     }
 
     #[test]
     fn malformed_apple_sdk_is_rejected() {
-        let sdk = tempfile::tempdir().unwrap();
-        fs::write(sdk.path().join("SDKSettings.json"), b"{}").unwrap();
-        let _restore = EnvRestore::set(APPLE_SDK_ENV, sdk.path());
+        let home = tempfile::tempdir().unwrap();
+        let vendor = home.path().join("vendor/macos");
+        fs::create_dir_all(&vendor).unwrap();
+        fs::write(vendor.join("SDKSettings.json"), b"{}").unwrap();
+        let _restore = EnvRestore::set(home::HOME_ENV, home.path());
         let profile = resolve_target_profile("macos-aarch64").unwrap();
 
-        let error = resolve_external_sysroot(profile).unwrap_err();
-        assert!(error.to_string().contains("usr/include"));
+        let error = resolve_external_sysroot(profile, None).unwrap_err();
+        assert!(error.to_string().contains("vendor/macos"), "{error}");
     }
 
     #[cfg(unix)]
@@ -564,20 +658,37 @@ mod tests {
     fn explicit_sdk_symlink_leaf_is_rejected() {
         use std::os::unix::fs::symlink;
 
-        let sdk = apple_sdk();
-        let parent = tempfile::tempdir().unwrap();
-        let link = parent.path().join("MacOSX.sdk");
-        symlink(sdk.path(), &link).unwrap();
-        let _restore = EnvRestore::set(APPLE_SDK_ENV, &link);
+        let home = tempfile::tempdir().unwrap();
+        let vendor = home.path().join("vendor/macos");
+        fs::create_dir_all(vendor.parent().unwrap()).unwrap();
+        let real = tempfile::tempdir().unwrap();
+        write_apple_sdk(real.path());
+        symlink(real.path(), &vendor).unwrap();
+        let _restore = EnvRestore::set(home::HOME_ENV, home.path());
         let profile = resolve_target_profile("macos-aarch64").unwrap();
 
-        let error = resolve_external_sysroot(profile).unwrap_err();
-        assert!(error.to_string().contains("symbolic-link leaf"));
+        let error = resolve_external_sysroot(profile, None).unwrap_err();
+        assert!(error.to_string().contains("symbolic-link leaf"), "{error}");
+        let _keep = real;
     }
 
     #[test]
     fn hermetic_profile_has_no_external_sysroot() {
         let profile = resolve_target_profile("linux-x86_64-musl-static").unwrap();
-        assert!(resolve_external_sysroot(profile).unwrap().is_none());
+        assert!(resolve_external_sysroot(profile, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn multiple_vendor_sdks_are_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let vendor = home.path().join("vendor/macos");
+        fs::create_dir_all(vendor.join("a")).unwrap();
+        fs::create_dir_all(vendor.join("b")).unwrap();
+        write_apple_sdk(&vendor.join("a"));
+        write_apple_sdk(&vendor.join("b"));
+        let _restore = EnvRestore::set(home::HOME_ENV, home.path());
+        let profile = resolve_target_profile("macos-aarch64").unwrap();
+        let error = resolve_external_sysroot(profile, None).unwrap_err();
+        assert!(error.to_string().contains("multiple SDKs"), "{error}");
     }
 }

@@ -41,6 +41,7 @@ impl ResolvedView {
 }
 
 pub fn materialize(
+    home_directory: Option<&Path>,
     cache_directory: Option<&Path>,
     external_pack: Option<&Path>,
     allow_external_pack: bool,
@@ -78,7 +79,7 @@ pub fn materialize(
     );
 
     let contract = contracts::resolve(profile, contract_id)?;
-    let external_sysroot = provider::resolve_external_sysroot(profile)?;
+    let external_sysroot = provider::resolve_external_sysroot(profile, home_directory)?;
     let controller_identity =
         ControllerIdentity::new(CONTROLLER_BUILD_SHA256, &controller, engine::BUILD_ID);
     let manifest = build_view_manifest(

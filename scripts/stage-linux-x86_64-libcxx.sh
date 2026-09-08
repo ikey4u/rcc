@@ -221,19 +221,10 @@ done
 # __cxx03 is the pre-C++11 dual tree and is not needed for RCC's C++17 driver.
 if [ ! -f "$shared_headers/vector" ] || [ ! -f "$shared_headers/iostream" ]; then
     mkdir -p "$shared_headers"
-    (
-        cd "$headers"
-        tar -cf - --exclude='__cxx03' --exclude='__config_site' .
-    ) | (
-        cd "$shared_headers"
-        tar -xf -
-    )
-    tar_src=${PIPESTATUS[0]}
-    tar_dst=${PIPESTATUS[1]}
-    if [ "$tar_src" != 0 ] || [ "$tar_dst" != 0 ]; then
-        echo "failed to copy shared linux libc++ headers" >&2
-        exit 65
-    fi
+    header_archive=$(mktemp "${TMPDIR:-/tmp}/rcc-libcxx-headers.XXXXXX")
+    tar -C "$headers" -cf "$header_archive" --exclude='__cxx03' --exclude='__config_site' .
+    tar -C "$shared_headers" -xf "$header_archive"
+    rm -f "$header_archive"
     rm -rf "$shared_headers/__cxx03"
 fi
 rm -rf "$shared_headers/__cxx03"

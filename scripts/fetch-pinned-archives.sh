@@ -53,6 +53,10 @@ fetch \
     https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-macOS-ARM64.tar.xz \
     f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f
 fetch \
+    LLVM-22.1.8-Linux-X64.tar.xz \
+    https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz \
+    df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+fetch \
     llvm-project-22.1.8.src.tar.xz \
     https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/llvm-project-22.1.8.src.tar.xz \
     922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888

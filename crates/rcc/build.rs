@@ -83,10 +83,13 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
     }
 
     let target = env::var("TARGET").expect("Cargo sets TARGET");
-    assert_eq!(
-        target, "aarch64-apple-darwin",
-        "the first static engine build supports only aarch64-apple-darwin"
-    );
+    let host = match target.as_str() {
+        "aarch64-apple-darwin" => EngineHost::MacosAarch64,
+        "x86_64-unknown-linux-gnu" => EngineHost::LinuxX86_64,
+        other => panic!(
+            "static engine builds support aarch64-apple-darwin and x86_64-unknown-linux-gnu; got {other}"
+        ),
+    };
     let build = PathBuf::from(variables[0].1.clone().expect("checked above"));
     let source = PathBuf::from(variables[1].1.clone().expect("checked above"));
     let bootstrap = PathBuf::from(variables[2].1.clone().expect("checked above"));
@@ -101,6 +104,36 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
         "RCC_ENGINE_BUILD_ID must be a non-empty single string"
     );
     validate_static_engine_patch(&source);
+    let macos_sysroot = match host {
+        EngineHost::MacosAarch64 => Some(macos_build_sysroot()),
+        EngineHost::LinuxX86_64 => None,
+    };
+
+    let native_archive = compile_native_entries(
+        manifest_directory,
+        out_dir,
+        &source,
+        &build,
+        &bootstrap,
+        macos_sysroot.as_ref(),
+    );
+    emit_static_links(out_dir, &build, &bootstrap, &native_archive, host);
+    println!("cargo:rustc-cfg=rcc_static_llvm");
+    build_id
+}
+
+#[derive(Clone, Copy)]
+enum EngineHost {
+    MacosAarch64,
+    LinuxX86_64,
+}
+
+struct MacosBuildSysroot {
+    sdk_root: PathBuf,
+    deployment_target: String,
+}
+
+fn macos_build_sysroot() -> MacosBuildSysroot {
     let sdk_root = PathBuf::from(
         env::var_os("SDKROOT")
             .expect("SDKROOT must name the build-time macOS SDK for static engine builds"),
@@ -119,19 +152,10 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
                 .all(|byte| byte.is_ascii_digit() || byte == b'.'),
         "RCC_MACOS_DEPLOYMENT_TARGET must be a numeric dotted version"
     );
-
-    let native_archive = compile_native_entries(
-        manifest_directory,
-        out_dir,
-        &source,
-        &build,
-        &bootstrap,
-        &sdk_root,
-        &deployment_target,
-    );
-    emit_static_links(out_dir, &build, &native_archive);
-    println!("cargo:rustc-cfg=rcc_static_llvm");
-    build_id
+    MacosBuildSysroot {
+        sdk_root,
+        deployment_target,
+    }
 }
 
 fn validate_static_engine_patch(source: &Path) {
@@ -153,8 +177,7 @@ fn compile_native_entries(
     source: &Path,
     build: &Path,
     bootstrap: &Path,
-    sdk_root: &Path,
-    deployment_target: &str,
+    macos: Option<&MacosBuildSysroot>,
 ) -> PathBuf {
     let compiler = bootstrap.join("bin/clang++");
     let archiver = bootstrap.join("bin/llvm-ar");
@@ -214,10 +237,13 @@ fn compile_native_entries(
                 "-D__STDC_CONSTANT_MACROS",
                 "-D__STDC_FORMAT_MACROS",
                 "-D__STDC_LIMIT_MACROS",
-            ])
-            .arg("-isysroot")
-            .arg(sdk_root)
-            .arg(format!("-mmacosx-version-min={deployment_target}"));
+            ]);
+        if let Some(macos) = macos {
+            command
+                .arg("-isysroot")
+                .arg(&macos.sdk_root)
+                .arg(format!("-mmacosx-version-min={}", macos.deployment_target));
+        }
         for directory in &include_directories {
             command.arg("-I").arg(directory);
         }
@@ -232,7 +258,13 @@ fn compile_native_entries(
     archive
 }
 
-fn emit_static_links(out_dir: &Path, build: &Path, native_archive: &Path) {
+fn emit_static_links(
+    out_dir: &Path,
+    build: &Path,
+    bootstrap: &Path,
+    native_archive: &Path,
+    host: EngineHost,
+) {
     require_file(native_archive, "native entry archive");
     let llvm_config = build.join("bin/llvm-config");
     require_file(&llvm_config, "custom llvm-config");
@@ -257,6 +289,9 @@ fn emit_static_links(out_dir: &Path, build: &Path, native_archive: &Path) {
     // Keep the dependency order used by Clang's own statically linked driver.
     // Repeated archives are deliberate: Mach-O archive linking does not group
     // circular Clang dependencies the way an ELF --start-group does.
+    if matches!(host, EngineHost::LinuxX86_64) {
+        println!("cargo:rustc-link-arg=-Wl,--start-group");
+    }
     let clang_libraries = [
         "clangFrontendTool",
         "clangCodeGen",
@@ -336,14 +371,57 @@ fn emit_static_links(out_dir: &Path, build: &Path, native_archive: &Path) {
     command.args(["--link-static", "--libs"]).args(&components);
     let llvm_libraries = command_output(&mut command, "query custom LLVM static libraries");
     emit_link_tokens(&llvm_libraries, &library_directory, true);
+    if matches!(host, EngineHost::LinuxX86_64) {
+        println!("cargo:rustc-link-arg=-Wl,--end-group");
+    }
     let mut command = Command::new(&llvm_config);
     command
         .args(["--link-static", "--system-libs"])
         .args(&components);
     let system_libraries = command_output(&mut command, "query custom LLVM system libraries");
     emit_link_tokens(&system_libraries, &library_directory, false);
-    println!("cargo:rustc-link-lib=c++");
-    println!("cargo:rustc-link-arg=-Wl,-dead_strip");
+    match host {
+        EngineHost::MacosAarch64 => {
+            println!("cargo:rustc-link-lib=c++");
+            println!("cargo:rustc-link-arg=-Wl,-dead_strip");
+        }
+        EngineHost::LinuxX86_64 => {
+            // rustc passes -nodefaultlibs, so clang++ driver flags such as
+            // -static-libstdc++ never pull in the C++ runtime. Link the static
+            // archives explicitly after the LLVM group.
+            let clangxx = bootstrap.join("bin/clang++");
+            let lld = bootstrap.join("bin/ld.lld");
+            if lld.is_file() {
+                println!("cargo:rustc-link-arg=-fuse-ld={}", lld.display());
+            }
+            emit_static_gcc_archive(&clangxx, "libstdc++.a", "stdc++");
+            emit_static_gcc_archive(&clangxx, "libgcc_eh.a", "gcc_eh");
+            emit_static_gcc_archive(&clangxx, "libgcc.a", "gcc");
+            println!("cargo:rustc-link-arg=-Wl,--gc-sections");
+            println!("cargo:rustc-link-lib=pthread");
+            println!("cargo:rustc-link-lib=dl");
+            println!("cargo:rustc-link-lib=m");
+        }
+    }
+}
+
+fn emit_static_gcc_archive(clangxx: &Path, file_name: &str, link_name: &str) {
+    require_file(clangxx, "bootstrap C++ compiler");
+    let printed = command_output(
+        Command::new(clangxx).arg(format!("-print-file-name={file_name}")),
+        &format!("locate {file_name}"),
+    );
+    let path = PathBuf::from(printed.trim());
+    assert!(
+        path.is_file(),
+        "{file_name} is missing (clang++ printed {})",
+        path.display()
+    );
+    let directory = path
+        .parent()
+        .unwrap_or_else(|| panic!("{} has no parent directory", path.display()));
+    println!("cargo:rustc-link-search=native={}", directory.display());
+    println!("cargo:rustc-link-lib=static={link_name}");
 }
 
 fn llvm_components(targets: &str) -> Vec<String> {

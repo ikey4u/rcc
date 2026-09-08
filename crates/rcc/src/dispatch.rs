@@ -321,6 +321,27 @@ fn validate_and_sanitize_linker_binding(
                 output.extend_from_slice(&arguments[index..index + 2]);
                 index += 2;
             }
+            "-macosx_version_min" => {
+                // Linux-hosted Clang still emits the classic ld64 flag. LLD 22
+                // requires -platform_version. Rewrite to the bound profile values.
+                let version = arguments
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .context("-macosx_version_min requires a UTF-8 version")?;
+                let minimum = manifest
+                    .profile
+                    .minimum_os
+                    .as_deref()
+                    .context("profile has no minimum platform version")?;
+                if normalize_version(version) != normalize_version(minimum) {
+                    bail!("linker -macosx_version_min {version} does not match profile {minimum}");
+                }
+                output.push(OsString::from("-platform_version"));
+                output.push(OsString::from("macos"));
+                output.push(OsString::from(minimum));
+                output.push(OsString::from(minimum));
+                index += 2;
+            }
             "-syslibroot" => {
                 let value = arguments
                     .get(index + 1)

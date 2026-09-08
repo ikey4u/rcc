@@ -37,12 +37,12 @@ description = "Build the release rcc-pack utility"
 run = "cargo build --release --locked -p rcc-pack"
 
 [tasks."build:release"]
-description = "Build the static macOS AArch64 release with musl-static and, when RPMs are present, gnu-glibc217"
+description = "Build the static host release (macOS AArch64 or Linux x86_64) with linux/windows sysroots"
 depends = ["fetch"]
 # These are build-host tools only. The resulting rcc binary does not depend on
 # CMake, Ninja, or a system C/C++ compiler at runtime.
 tools = { cmake = "4.4.3", ninja = "1.13.1" }
-run = "./scripts/build-macos-arm64-release.sh"
+run = "./scripts/package-release.sh"
 
 [tasks.release]
 description = "Build cargo-rcc, stage rcc + cargo-rcc into dist/bin, and zip dist/rcc-{os}-{arch}-{version}.zip"
@@ -124,6 +124,10 @@ run = "./scripts/verify-windows.sh windows-x86_64-gnullvm"
 description = "Compile C/C++ and cargo-rcc hello for windows-aarch64-gnullvm and verify PE"
 run = "./scripts/verify-windows.sh windows-aarch64-gnullvm"
 
+[tasks."verify:macos"]
+description = "Compile C/C++ (and cargo-rcc hello) for macos-aarch64; requires RCC_APPLE_SDK_ROOT"
+run = "./scripts/verify-macos.sh macos-aarch64"
+
 [tasks.test]
 description = "Run the workspace test suite"
 run = "cargo test --workspace --locked"
@@ -170,6 +174,9 @@ sh -n scripts/verify-linux-aarch64-musl.sh
 sh -n scripts/verify-linux-aarch64-gnu.sh
 sh -n scripts/verify-windows.sh
 sh -n scripts/ensure-linux-aarch64-guest.sh
+sh -n scripts/build-linux-x86_64-release.sh
+sh -n scripts/stage-apple-sdk.sh
+sh -n scripts/verify-macos.sh
 python3 -m py_compile scripts/extract-embedded-pack.py
 python3 -m json.tool toolchains/mingw-w64-12.0.0.lock.json >/dev/null
 '''
@@ -215,6 +222,9 @@ sh -n scripts/verify-linux-aarch64-musl.sh
 sh -n scripts/verify-linux-aarch64-gnu.sh
 sh -n scripts/verify-windows.sh
 sh -n scripts/ensure-linux-aarch64-guest.sh
+sh -n scripts/build-linux-x86_64-release.sh
+sh -n scripts/stage-apple-sdk.sh
+sh -n scripts/verify-macos.sh
 python3 -m py_compile scripts/extract-embedded-pack.py
 python3 -m json.tool toolchains/mingw-w64-12.0.0.lock.json >/dev/null
 '''

@@ -8,7 +8,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rcc_core::{
-    EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0,
+    EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0, RUSTC_MACOS_V0,
     RUSTC_WINDOWS_V0,
 };
 use std::env;
@@ -35,6 +35,11 @@ const WINDOWS_X64_MSVC: &str = "x86_64-pc-windows-msvc";
 const WINDOWS_X64_MSVC_PROFILE: &str = "windows-x86_64-msvc";
 const HOST_MACOS_AARCH64: &str = "aarch64-apple-darwin";
 const HOST_MACOS_AARCH64_PROFILE: &str = "host-macos-aarch64";
+const HOST_LINUX_X64_GNU: &str = "x86_64-unknown-linux-gnu";
+const HOST_LINUX_X64_GNU_PROFILE: &str = "host-linux-x86_64-gnu-glibc217";
+const MACOS_AARCH64_PROFILE: &str = "macos-aarch64";
+const MACOS_X86_64: &str = "x86_64-apple-darwin";
+const MACOS_X86_64_PROFILE: &str = "macos-x86_64";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -198,10 +203,17 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
     if rust_target == HOST_MACOS_AARCH64 {
         return Ok(TargetPlan {
             rust_target,
-            profile_id: profile_override
-                .unwrap_or(HOST_MACOS_AARCH64_PROFILE)
-                .to_owned(),
-            runtime_contract: NATIVE_RCC_OWNED.to_owned(),
+            profile_id: profile_override.unwrap_or(MACOS_AARCH64_PROFILE).to_owned(),
+            runtime_contract: RUSTC_MACOS_V0.to_owned(),
+            rustflags: Vec::new(),
+        });
+    }
+
+    if rust_target == MACOS_X86_64 {
+        return Ok(TargetPlan {
+            rust_target,
+            profile_id: profile_override.unwrap_or(MACOS_X86_64_PROFILE).to_owned(),
+            runtime_contract: RUSTC_MACOS_V0.to_owned(),
             rustflags: Vec::new(),
         });
     }
@@ -252,7 +264,8 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
     bail!(
         "cargo-rcc currently supports {LINUX_X64_MUSL}, {LINUX_X64_GNU}, \
          {LINUX_AARCH64_MUSL}, {LINUX_AARCH64_GNU}, {WINDOWS_X64_GNU}, \
-         {WINDOWS_X64_GNULLVM}, {WINDOWS_AARCH64_GNULLVM}, and {WINDOWS_X64_MSVC}; got {target}"
+         {WINDOWS_X64_GNULLVM}, {WINDOWS_AARCH64_GNULLVM}, {WINDOWS_X64_MSVC}, \
+         {HOST_MACOS_AARCH64}, and {MACOS_X86_64}; got {target}"
     );
 }
 
@@ -304,6 +317,10 @@ fn canonical_rust_target(target: &str) -> Result<String> {
             return Ok(WINDOWS_AARCH64_GNULLVM.to_owned());
         }
         WINDOWS_X64_MSVC | WINDOWS_X64_MSVC_PROFILE => return Ok(WINDOWS_X64_MSVC.to_owned()),
+        HOST_MACOS_AARCH64 | MACOS_AARCH64_PROFILE | HOST_MACOS_AARCH64_PROFILE => {
+            return Ok(HOST_MACOS_AARCH64.to_owned());
+        }
+        MACOS_X86_64 | MACOS_X86_64_PROFILE => return Ok(MACOS_X86_64.to_owned()),
         _ => {}
     }
 
@@ -544,9 +561,10 @@ fn detect_rustc_host() -> Result<String> {
 fn host_profile_for(host: &str) -> Result<String> {
     match host {
         "aarch64-apple-darwin" => Ok(HOST_MACOS_AARCH64_PROFILE.into()),
+        "x86_64-unknown-linux-gnu" => Ok(HOST_LINUX_X64_GNU_PROFILE.into()),
         other => bail!(
-            "cargo-rcc currently requires an aarch64-apple-darwin host (got {other}); \
-             this matches the first RCC release controller"
+            "cargo-rcc currently requires an aarch64-apple-darwin or \
+             x86_64-unknown-linux-gnu host (got {other})"
         ),
     }
 }
@@ -562,6 +580,13 @@ fn apply_rcc_environment(
     }
     for name in rcc_core::policy::BUILTIN_FORBIDDEN_ENV {
         cargo.env_remove(*name);
+    }
+    // rustc probes the macOS SDK via `xcrun` whenever SDKROOT is unset, including
+    // on Linux. RCC already resolved the SDK into the view sysroot
+    // (`RCC_APPLE_SDK_ROOT` off macOS; `xcrun` only as a macOS fallback).
+    // Clang still strips SDKROOT at driver start.
+    if let Some(sdkroot) = rustc_sdkroot_for_apple_targets(plans, &manifest.target.sysroot) {
+        cargo.env("SDKROOT", sdkroot);
     }
 
     let cc = manifest
@@ -589,8 +614,9 @@ fn apply_rcc_environment(
             rustflags.push(format!("native={}", unwind_dir.display()));
         }
 
-        // Target-only rustflags. Global CARGO_ENCODED_RUSTFLAGS would also apply
-        // crt-static / panic=abort to host build scripts.
+        // Target-only rustflags. Do not put crt-static / panic=abort in the
+        // global CARGO_ENCODED_RUSTFLAGS: those would also apply to host build
+        // scripts.
         let rustflags_key = format!(
             "CARGO_TARGET_{}_RUSTFLAGS",
             plan.rust_target.replace('-', "_").to_ascii_uppercase()
@@ -600,6 +626,16 @@ fn apply_rcc_environment(
     cargo.env_remove("CARGO_ENCODED_RUSTFLAGS");
     cargo.env_remove("RUSTFLAGS");
     Ok(())
+}
+
+fn rustc_sdkroot_for_apple_targets<'a>(
+    plans: &[TargetPlan],
+    target_sysroot: &'a str,
+) -> Option<&'a str> {
+    plans
+        .iter()
+        .any(|plan| plan.rust_target.ends_with("-apple-darwin"))
+        .then_some(target_sysroot)
 }
 
 fn ensure_glibc217_compat(
@@ -821,9 +857,33 @@ mod tests {
     fn plans_host_macos_without_linux_rustflags() {
         let plan = plan_for_rust_target(HOST_MACOS_AARCH64, None).unwrap();
         assert_eq!(plan.rust_target, HOST_MACOS_AARCH64);
-        assert_eq!(plan.profile_id, HOST_MACOS_AARCH64_PROFILE);
-        assert_eq!(plan.runtime_contract, NATIVE_RCC_OWNED);
+        assert_eq!(plan.profile_id, MACOS_AARCH64_PROFILE);
+        assert_eq!(plan.runtime_contract, RUSTC_MACOS_V0);
         assert!(plan.rustflags.is_empty());
+        let x64 = plan_for_rust_target(MACOS_X86_64, None).unwrap();
+        assert_eq!(x64.profile_id, MACOS_X86_64_PROFILE);
+    }
+
+    #[test]
+    fn feeds_rcc_sysroot_to_rustc_for_apple_targets() {
+        let macos = plan_for_rust_target(HOST_MACOS_AARCH64, None).unwrap();
+        assert_eq!(
+            rustc_sdkroot_for_apple_targets(&[macos], "/MacOSX.sdk"),
+            Some("/MacOSX.sdk")
+        );
+        let linux = plan_for_rust_target(LINUX_X64_GNU, None).unwrap();
+        assert_eq!(
+            rustc_sdkroot_for_apple_targets(&[linux], "/MacOSX.sdk"),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_linux_x64_gnu_host() {
+        assert_eq!(
+            host_profile_for(HOST_LINUX_X64_GNU).unwrap(),
+            HOST_LINUX_X64_GNU_PROFILE
+        );
     }
 
     #[test]
