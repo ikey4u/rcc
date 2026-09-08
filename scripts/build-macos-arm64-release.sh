@@ -297,7 +297,7 @@ if [ -f "$aarch64_kernel_rpm" ]; then
     musl_aarch64_in_payload=1
 else
     echo "skipping linux-aarch64-musl-static: aarch64 kernel-headers RPM not present under .cache/ or inner/" >&2
-    echo "run: mise run fetch:archives" >&2
+    echo "run: mise setup" >&2
 fi
 
 gnu_glibc_rpm=${RCC_GLIBC_RUNTIME_RPM:-$(default_archive glibc-2.17-326.el7_9.x86_64.rpm)}
@@ -316,7 +316,7 @@ if [ -f "$gnu_glibc_rpm" ] && [ -f "$gnu_headers_rpm" ] && [ -f "$gnu_devel_rpm"
     gnu_in_payload=1
 else
     echo "skipping linux-x86_64-gnu-glibc217: CentOS 7 RPMs not present under .cache/ or inner/" >&2
-    echo "run: mise run fetch:archives" >&2
+    echo "run: mise setup" >&2
 fi
 
 gnu_aarch64_glibc_rpm=${RCC_GLIBC_AARCH64_RUNTIME_RPM:-$(default_archive glibc-2.17-326.el7_9.aarch64.rpm)}
@@ -338,7 +338,7 @@ if [ "$musl_aarch64_in_payload" -eq 1 ] \
     gnu_aarch64_in_payload=1
 else
     echo "skipping linux-aarch64-gnu-glibc217: aarch64 musl builtins or CentOS 7 altarch RPMs missing" >&2
-    echo "run: mise run fetch:archives" >&2
+    echo "run: mise setup" >&2
 fi
 
 set -- \
@@ -388,7 +388,7 @@ if [ -f "$mingw_archive" ]; then
     windows_gnu_in_payload=1
 else
     echo "skipping windows sysroots: mingw-w64 archive not present under .cache/ or inner/" >&2
-    echo "run: mise run fetch:archives" >&2
+    echo "run: mise setup" >&2
 fi
 if [ "$windows_x64_gnullvm_in_payload" -eq 1 ]; then
     set -- "$@" --profile windows-x86_64-gnullvm

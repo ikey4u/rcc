@@ -12,7 +12,7 @@ use rcc_core::{
     RUSTC_WINDOWS_V0,
 };
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -162,8 +162,8 @@ struct Test {
 
 #[derive(Clone, Debug, Default, Parser)]
 struct RccArgs {
-    /// Path to a release `rcc` executable. Defaults to $RCC, then PATH, then
-    /// a sibling of this cargo-rcc binary.
+    /// Path to a release `rcc` executable. Defaults to $RCC, then a sibling of
+    /// this cargo-rcc binary, then PATH, then $CARGO_HOME/bin (or ~/.cargo/bin).
     #[arg(long, env = "RCC", global = true, help_heading = "RCC Options")]
     rcc: Option<PathBuf>,
 
@@ -520,7 +520,34 @@ fn locate_rcc(explicit: Option<&Path>) -> Result<PathBuf> {
             }
         }
     }
-    which("rcc").context("could not find rcc; pass --rcc, set RCC, or put rcc on PATH")
+    if let Ok(path) = which("rcc") {
+        return Ok(path);
+    }
+    if let Some(path) = cargo_home_rcc() {
+        return Ok(path);
+    }
+    bail!("could not find rcc; pass --rcc, set RCC, put rcc on PATH, or install it to $CARGO_HOME/bin")
+}
+
+fn cargo_home_bin() -> Option<PathBuf> {
+    cargo_home_bin_from(
+        env::var_os("CARGO_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+}
+
+fn cargo_home_bin_from(cargo_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    match cargo_home {
+        Some(value) if !value.is_empty() => Some(PathBuf::from(value).join("bin")),
+        _ => home
+            .filter(|value| !value.is_empty())
+            .map(|value| PathBuf::from(value).join(".cargo").join("bin")),
+    }
+}
+
+fn cargo_home_rcc() -> Option<PathBuf> {
+    let candidate = cargo_home_bin()?.join("rcc");
+    candidate.is_file().then_some(candidate)
 }
 
 fn ensure_executable(path: &Path, label: &str) -> Result<()> {
@@ -884,6 +911,19 @@ mod tests {
             host_profile_for(HOST_LINUX_X64_GNU).unwrap(),
             HOST_LINUX_X64_GNU_PROFILE
         );
+    }
+
+    #[test]
+    fn cargo_home_bin_uses_cargo_home_then_dot_cargo() {
+        assert_eq!(
+            cargo_home_bin_from(Some(OsStr::new("/opt/cargo")), Some(OsStr::new("/home/me"))),
+            Some(PathBuf::from("/opt/cargo/bin"))
+        );
+        assert_eq!(
+            cargo_home_bin_from(None, Some(OsStr::new("/home/me"))),
+            Some(PathBuf::from("/home/me/.cargo/bin"))
+        );
+        assert_eq!(cargo_home_bin_from(Some(OsStr::new("")), None), None);
     }
 
     #[test]

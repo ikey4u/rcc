@@ -2,22 +2,22 @@
 
 本文是当前 RCC release 对 Linux musl-static / gnu-glibc217（x86_64 与 aarch64）以及 Windows gnu/gnullvm 的能力边界、正确性定义和可重复验收入口。设计背景见 `docs/plan/IMPL_RCC_MACOS.md` 与 `docs/plan/IMPL_RCC_MACOS_CROSS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
 
-需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。
+需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。`mise check` 在能找到这份 `rcc` 时会跑下面的验收脚本；没有执行器时跳过运行时而不是失败。
 
 ```sh
 export RCC=/absolute/path/to/dist/rcc-release/rcc
-mise run test:linux-musl
-mise run test:linux-glibc
-mise run verify:linux-aarch64-musl
-mise run verify:linux-aarch64-gnu
-mise run verify:windows-gnu
-mise run verify:windows-gnullvm
-mise run verify:windows-aarch64-gnullvm
+mise check
+# 或单独跑脚本：
+./scripts/verify-linux-x86_64-musl.sh
+./scripts/verify-linux-x86_64-gnu.sh
+./scripts/verify-linux-aarch64-musl.sh
+./scripts/verify-linux-aarch64-gnu.sh
+./scripts/verify-windows.sh windows-x86_64-gnu
+./scripts/verify-windows.sh windows-x86_64-gnullvm
+./scripts/verify-windows.sh windows-aarch64-gnullvm
 ```
 
-`test:linux-glibc` 使用 CentOS 7 Lima `rcc-x64-glibc217`（kernel 3.10 不能 virtiofs，验收脚本会把 ELF scp 到客户机 `/tmp` 再跑），**不要**在 Alpine 上跑 gnu 动态 ELF。
-
-`mise run verify:linux-musl` / `verify:linux-glibc` 只做编译和 ELF 静态检查；没有执行器时跳过运行时而不是失败。
+gnu 运行时使用 CentOS 7 Lima `rcc-x64-glibc217`（kernel 3.10 不能 virtiofs，验收脚本会把 ELF scp 到客户机 `/tmp` 再跑），**不要**在 Alpine 上跑 gnu 动态 ELF。要强制执行产物：先 `mise setup`，再 `RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh`（gnu 用 `verify-linux-x86_64-gnu.sh`）。
 
 ## musl-static
 
@@ -50,8 +50,7 @@ mise run verify:windows-aarch64-gnullvm
 
 ```sh
 brew install qemu lima lima-additional-guestagents
-mise run lima:x64
-mise run lima:glibc217
+mise setup
 ```
 
 ## 现在能编什么
@@ -93,7 +92,7 @@ Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x
 
 ## Linux aarch64
 
-`scripts/verify-linux-aarch64-musl.sh` 与 `verify-linux-aarch64-gnu.sh` 复用 x86_64 的 C/C++/OpenSSL/SQLite 夹具，换成 aarch64 triple。musl 运行时可用 `qemu-aarch64` 或 Lima `rcc-arm64`（`mise run lima:arm64`）。gnu aarch64 需要 glibc ≥ 2.17 的 aarch64 客户机，不要在 Alpine musl 上跑。
+`scripts/verify-linux-aarch64-musl.sh` 与 `verify-linux-aarch64-gnu.sh` 复用 x86_64 的 C/C++/OpenSSL/SQLite 夹具，换成 aarch64 triple。musl 运行时可用 `qemu-aarch64` 或 Lima `rcc-arm64`（`mise setup`）。gnu aarch64 需要 glibc ≥ 2.17 的 aarch64 客户机，不要在 Alpine musl 上跑。
 
 ## Windows PE
 

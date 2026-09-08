@@ -120,7 +120,7 @@ run_guest() {
 
     if [ -z "$runner" ]; then
         echo "skip runtime: no qemu-aarch64 (linux-user) and no running Lima instance $lima_instance" >&2
-        echo "  mise run lima:arm64" >&2
+        echo "  mise setup" >&2
         if [ "${RCC_REQUIRE_RUNTIME:-}" = 1 ]; then
             exit 1
         fi

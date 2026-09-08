@@ -156,7 +156,7 @@ run_guest() {
     if [ -z "$runner" ]; then
         echo "skip runtime: no qemu-x86_64 (linux-user) and no running Lima instance $lima_instance" >&2
         echo "  gnu binaries must not run on Alpine musl (rcc-x64)." >&2
-        echo "  start a glibc 2.17 guest with: mise run lima:glibc217" >&2
+        echo "  start a glibc 2.17 guest with: mise setup" >&2
         if [ "${RCC_REQUIRE_RUNTIME:-}" = 1 ]; then
             exit 1
         fi

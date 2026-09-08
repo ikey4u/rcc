@@ -1,16 +1,16 @@
 #!/bin/sh
 # Start an x86_64 Linux VM with glibc (not musl Alpine) for gnu runtime tests.
-# Default instance: rcc-x64-glibc217.
+# macOS only. Default instance: rcc-x64-glibc217.
 set -eu
+
+if [ "$(uname -s)" != Darwin ]; then
+    echo "linux guest setup is only supported on macOS (this host is $(uname -s))" >&2
+    exit 64
+fi
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 instance=${LIMA_GLIBC_INSTANCE:-rcc-x64-glibc217}
 template=$repository/toolchains/lima/rcc-x64-glibc217.yaml
-
-if command -v qemu-x86_64 >/dev/null 2>&1 || command -v qemu-x86_64-static >/dev/null 2>&1; then
-    echo "linux-user qemu already available; Lima not required"
-    exit 0
-fi
 
 if ! command -v limactl >/dev/null 2>&1; then
     echo "need limactl to run x86_64 glibc ELF on this host" >&2

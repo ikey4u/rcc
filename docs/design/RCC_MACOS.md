@@ -53,7 +53,7 @@ C / C++（预编静态 libc++）和 `cargo rcc`（OpenSSL、SQLite；x86_64 gnu 
 | `windows-aarch64-gnullvm` | `aarch64-pc-windows-gnullvm` | 同上，aarch64 |
 | `windows-x86_64-msvc` | `x86_64-pc-windows-msvc` | clang-cl + `lld-link`；Windows SDK **不分发**，`RCC_WINDOWS_SDK_ROOT` |
 
-gnu / gnullvm 为 pack 内 hermetic sysroot（`mise run fetch:archives` 拉取 mingw-w64 12.0.0）。MSVC 尽最大努力，没有 SDK 就 fail-closed。`rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` 这类会依赖本机 MinGW 的导入。验收：`mise run verify:windows-gnu` / `verify:windows-gnullvm`。不存在 `windows-aarch64-gnu`。
+gnu / gnullvm 为 pack 内 hermetic sysroot（`mise setup` 拉取 mingw-w64 12.0.0）。MSVC 尽最大努力，没有 SDK 就 fail-closed。`rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` 这类会依赖本机 MinGW 的导入。验收：`mise check`（有 release `rcc` 时）或 `./scripts/verify-windows.sh windows-x86_64-gnu` / `windows-x86_64-gnullvm`。不存在 `windows-aarch64-gnu`。
 
 ## 相关文档
 

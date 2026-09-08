@@ -134,7 +134,7 @@ RCC 不带 rustc / rust-std。`cargo-rcc` 只物化 profile、导出环境、exe
 
 1. **工具链身份**：`rcc doctor --profile linux-x86_64-musl-static`，`IN_PAYLOAD=yes`，进程只用 view 内 alias。
 2. **产物闭包**：`rcc verify` 对 musl-static 可执行文件拒绝 `PT_INTERP`、`DT_NEEDED`、字节里的 `GLIBC_`。`.o` 只查 ELF/arch。实现：`ArtifactReport::linux_musl_static_violations()`。
-3. **运行时**：Apple Silicon 不能直接跑 x86_64 Linux ELF。Homebrew qemu 只有 `qemu-system-*`，没有 `qemu-x86_64`。验收走 Lima 实例 `rcc-x64`（QEMU TCG、x86_64 Alpine）。`mise run test:linux-musl` 会启动该 VM 且要求运行时通过。
+3. **运行时**：Apple Silicon 不能直接跑 x86_64 Linux ELF。Homebrew qemu 只有 `qemu-system-*`，没有 `qemu-x86_64`。验收走 Lima 实例 `rcc-x64`（QEMU TCG、x86_64 Alpine）。`mise setup` 后设 `RCC_REQUIRE_RUNTIME=1` 再跑 `scripts/verify-linux-x86_64-musl.sh`，会要求运行时通过。
 
 已跑通的例子：
 
@@ -146,7 +146,8 @@ RCC 不带 rustc / rust-std。`cargo-rcc` 只物化 profile、导出环境、exe
 
 ```sh
 export RCC=/absolute/path/to/dist/rcc-release/rcc
-mise run test:linux-musl
+mise setup
+RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh
 ```
 
 ### 1.6 musl 明确不做
@@ -275,7 +276,7 @@ ARCH §10.2 写过：GNU `libgcc`/`libstdc++` 是一条线，`compiler-rt`/`libc
 
 - 本文 review 通过后，改 ARCH §3.2 / §10.2：glibc hermetic = link-only + symbol-version verifier，不是带实现的 sysroot。
 - 钉输入：glibc 源码版本（编 CRT / 抽头 / 生成 abilists）、kernel UAPI 版本（≥ 3.2，与 Rust gnu 下限一致）、abilists 生成工具版本。
-- 新增 `toolchains/` lock JSON，接入 `scripts/fetch-pinned-archives.sh` 和 `metadata:check`。
+- 新增 `toolchains/` lock JSON，接入 `scripts/fetch-pinned-archives.sh` 和 `mise check`。
 
 ### 5.2 stage 脚本
 
@@ -338,7 +339,7 @@ interpreter 固定 `/lib64/ld-linux-x86-64.so.2`。policy 仍禁止用户改 sys
 
 - `examples/linux-glibc-c/`：多 TU、pthread、`clock_gettime`。
 - **不要**在 Alpine `rcc-x64` 上跑。新增 glibc 客户机（建议实例名与 musl 分开，例如 `rcc-x64-glibc217`）。
-- `mise run test:linux-glibc`：起 2.17 客户机 → 编 → verify → 跑。没有运行时则失败（与 `test:linux-musl` 一样）。
+- `RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-gnu.sh`：起 2.17 客户机之后编 → verify → 跑。没有运行时则失败（与 musl 一样）。先 `mise setup`。
 - 另在一台新 glibc 上冒烟，证明 2.17 产物能向前跑。
 
 没有 2.17 真 loader 的运行，静态检查不能当完成。
@@ -471,7 +472,7 @@ URL：updates 包在 `https://vault.centos.org/7.9.2009/updates/x86_64/Packages/
 
 1. `examples/linux-glibc-c/`：多 TU、pthread、`clock_gettime`、`ar`/`ranlib`。
 2. `scripts/verify-linux-x86_64-gnu.sh` + `scripts/ensure-linux-x86_64-glibc-guest.sh`（**不能**用 Alpine `rcc-x64`）。Lima 模板：`toolchains/lima/rcc-x64-glibc217.yaml`（CentOS 7 kernel 3.10，`mountType: reverse-sshfs`；验收脚本把 ELF scp 到 `/tmp` 再执行）。
-3. `mise run test:linux-glibc`：`RCC_REQUIRE_RUNTIME=1`。`mise run lima:glibc217` 只起 VM。`mise run verify:linux-glibc` 无执行器时跳过运行时。
+3. `RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-gnu.sh`。`mise setup` 会拉归档并尝试起 VM。不设 `RCC_REQUIRE_RUNTIME` 时无执行器会跳过运行时。
 
 ### 8.4 cargo-rcc gnu（纯 C crate）— 已接入验收脚本
 
@@ -495,9 +496,7 @@ URL：updates 包在 `https://vault.centos.org/7.9.2009/updates/x86_64/Packages/
 ### 9.1 每次必跑（不需要 RPM / VM）
 
 ```
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-mise run metadata:check
+mise check
 ```
 
 | 项 | 断言 |
@@ -554,8 +553,10 @@ stdout 约定与 musl 类似：`rcc-c-ok`。
 ### 9.6 回归（每次 gnu 改动后）
 
 ```
-RCC=... mise run test:linux-musl
-RCC=... mise run test:linux-glibc
+RCC=... mise check
+# 强制运行时：
+RCC=... RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh
+RCC=... RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-gnu.sh
 ```
 
 musl 的 hermetic 规则不得被 gnu 分支改坏。
@@ -570,19 +571,16 @@ musl 的 hermetic 规则不得被 gnu 分支改坏。
 ### 9.8 命令速查
 
 ```sh
-mise run fetch:archives
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-mise run metadata:check
+mise setup
+mise check
 
 # 已有 musl stage 时追加 gnu 并重链 rcc（不重编 LLVM）
 RCC_REBUILD=1 ./scripts/repack-linux-x86_64-gnu-glibc217.sh
 
 export RCC=/absolute/path/to/dist/rcc-release/rcc
-mise run verify:linux-glibc          # 编 + verify；无 glibc VM 则跳过运行时
-mise run test:linux-glibc            # 起 CentOS 7 Lima 并要求运行时通过
-mise run lima:glibc217               # 只起 VM
+./scripts/verify-linux-x86_64-gnu.sh   # 编 + verify；无 glibc VM 则跳过运行时
+RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-gnu.sh
 ```
 
-`test:linux-glibc` **禁止**把二进制拷到 musl Alpine `rcc-x64` 上执行。
+gnu 验收 **禁止**把二进制拷到 musl Alpine `rcc-x64` 上执行。
 

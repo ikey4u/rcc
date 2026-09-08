@@ -1,16 +1,15 @@
 #!/bin/sh
 # Ensure an x86_64 Linux guest exists for executing linux-musl binaries.
-# Prefers linux-user qemu when present; otherwise starts Lima instance
-# $LIMA_INSTANCE (default rcc-x64). Homebrew qemu on macOS is qemu-system
-# only, so Apple Silicon uses Lima + QEMU TCG.
+# macOS only: Homebrew qemu is qemu-system, so this starts Lima instance
+# $LIMA_INSTANCE (default rcc-x64) with QEMU TCG.
 set -eu
 
-instance=${LIMA_INSTANCE:-rcc-x64}
-
-if command -v qemu-x86_64 >/dev/null 2>&1 || command -v qemu-x86_64-static >/dev/null 2>&1; then
-    echo "linux-user qemu already available; Lima not required"
-    exit 0
+if [ "$(uname -s)" != Darwin ]; then
+    echo "linux guest setup is only supported on macOS (this host is $(uname -s))" >&2
+    exit 64
 fi
+
+instance=${LIMA_INSTANCE:-rcc-x64}
 
 if ! command -v limactl >/dev/null 2>&1; then
     echo "need limactl to run x86_64 Linux ELF on this host" >&2

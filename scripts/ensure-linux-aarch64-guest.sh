@@ -1,15 +1,14 @@
 #!/bin/sh
 # Ensure an aarch64 Linux guest exists for executing linux-aarch64 binaries
-# on Apple Silicon. Prefers linux-user qemu; otherwise Lima instance
-# $LIMA_INSTANCE (default rcc-arm64) with vz.
+# on macOS. Starts Lima instance $LIMA_INSTANCE (default rcc-arm64).
 set -eu
 
-instance=${LIMA_INSTANCE:-rcc-arm64}
-
-if command -v qemu-aarch64 >/dev/null 2>&1 || command -v qemu-aarch64-static >/dev/null 2>&1; then
-    echo "linux-user qemu already available; Lima not required"
-    exit 0
+if [ "$(uname -s)" != Darwin ]; then
+    echo "linux guest setup is only supported on macOS (this host is $(uname -s))" >&2
+    exit 64
 fi
+
+instance=${LIMA_INSTANCE:-rcc-arm64}
 
 if ! command -v limactl >/dev/null 2>&1; then
     echo "need limactl to run aarch64 Linux ELF on this host" >&2

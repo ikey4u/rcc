@@ -2,7 +2,7 @@
 # Download pinned LLVM bootstrap, LLVM source, musl, CentOS 7 glibc RPMs,
 # and mingw-w64 into .cache/ (override with RCC_ARCHIVE_CACHE). Subsequent
 # release builds reuse these files. Existing matching files under inner/ are
-# hardlinked in so a previous fetch:archives layout is not re-downloaded.
+# hardlinked in so a previous mise setup / .cache layout is not re-downloaded.
 set -eu
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

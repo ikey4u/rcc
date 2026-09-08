@@ -117,6 +117,9 @@ fi
 echo "fetching pinned LLVM, musl, and glibc archives into $archive_cache"
 RCC_ARCHIVE_CACHE=$archive_cache "$script_directory/fetch-pinned-archives.sh"
 
+echo "fetching locked Cargo dependencies"
+cargo fetch --locked --manifest-path "$repository/Cargo.toml"
+
 echo "building cargo-rcc"
 cargo build \
     --manifest-path "$repository/Cargo.toml" \
