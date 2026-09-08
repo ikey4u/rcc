@@ -64,6 +64,10 @@ run = "cargo fmt --all -- --check"
 description = "Start the x86_64 Alpine Lima VM used to execute linux musl binaries on Apple Silicon"
 run = "./scripts/ensure-linux-x86_64-guest.sh"
 
+[tasks."lima:arm64"]
+description = "Start the aarch64 Alpine Lima VM used to execute linux aarch64 binaries on Apple Silicon"
+run = "./scripts/ensure-linux-aarch64-guest.sh"
+
 [tasks."verify:linux-musl"]
 description = "Compile C and cargo-rcc native stacks for linux-x86_64-musl-static and verify hermetic ELF artifacts"
 run = "./scripts/verify-linux-x86_64-musl.sh"
@@ -74,6 +78,18 @@ run = '''
 rustup target add x86_64-unknown-linux-musl
 ./scripts/ensure-linux-x86_64-guest.sh
 RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh
+'''
+
+[tasks."verify:linux-aarch64-musl"]
+description = "Compile C and cargo-rcc native stacks for linux-aarch64-musl-static and verify hermetic ELF artifacts"
+run = "./scripts/verify-linux-aarch64-musl.sh"
+
+[tasks."test:linux-aarch64-musl"]
+description = "Compile, verify, and run linux-aarch64-musl-static binaries (starts Lima on macOS)"
+run = '''
+rustup target add aarch64-unknown-linux-musl
+./scripts/ensure-linux-aarch64-guest.sh
+RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-aarch64-musl.sh
 '''
 
 [tasks."lima:glibc217"]
@@ -92,6 +108,22 @@ rustup target add x86_64-unknown-linux-gnu
 RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-gnu.sh
 '''
 
+[tasks."verify:linux-aarch64-gnu"]
+description = "Compile C and cargo-rcc native stacks for linux-aarch64-gnu-glibc217 and verify GLIBC_ <= 2.17"
+run = "./scripts/verify-linux-aarch64-gnu.sh"
+
+[tasks."verify:windows-gnu"]
+description = "Compile C/C++ and cargo-rcc hello for windows-x86_64-gnu and verify PE"
+run = "./scripts/verify-windows.sh windows-x86_64-gnu"
+
+[tasks."verify:windows-gnullvm"]
+description = "Compile C/C++ and cargo-rcc hello for windows-x86_64-gnullvm and verify PE"
+run = "./scripts/verify-windows.sh windows-x86_64-gnullvm"
+
+[tasks."verify:windows-aarch64-gnullvm"]
+description = "Compile C/C++ and cargo-rcc hello for windows-aarch64-gnullvm and verify PE"
+run = "./scripts/verify-windows.sh windows-aarch64-gnullvm"
+
 [tasks.test]
 description = "Run the workspace test suite"
 run = "cargo test --workspace --locked"
@@ -107,7 +139,9 @@ sh -n scripts/build-macos-arm64-release.sh
 sh -n scripts/package-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
 sh -n scripts/stage-linux-x86_64-libcxx.sh
+sh -n scripts/stage-linux-musl.sh
 sh -n scripts/stage-linux-x86_64-musl.sh
+sh -n scripts/stage-linux-gnu-glibc217.sh
 sh -n scripts/stage-linux-x86_64-gnu-glibc217.sh
 sh -n scripts/fetch-pinned-archives.sh
 sh -n scripts/verify-linux-x86_64-musl.sh
@@ -124,6 +158,20 @@ python3 -m json.tool toolchains/glibc-2.17-centos7-runtime.lock.json >/dev/null
 python3 -m json.tool toolchains/glibc-headers-2.17-centos7.lock.json >/dev/null
 python3 -m json.tool toolchains/glibc-devel-2.17-centos7.lock.json >/dev/null
 python3 -m json.tool toolchains/kernel-headers-3.10-centos7.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-2.17-centos7-aarch64-runtime.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-headers-2.17-centos7-aarch64.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-devel-2.17-centos7-aarch64.lock.json >/dev/null
+python3 -m json.tool toolchains/kernel-headers-4.18-centos7-aarch64.lock.json >/dev/null
+sh -n scripts/repack-macos-cross.sh
+sh -n scripts/stage-mingw-w64-crt.sh
+sh -n scripts/stage-windows-gnullvm.sh
+sh -n scripts/stage-windows-gnu.sh
+sh -n scripts/verify-linux-aarch64-musl.sh
+sh -n scripts/verify-linux-aarch64-gnu.sh
+sh -n scripts/verify-windows.sh
+sh -n scripts/ensure-linux-aarch64-guest.sh
+python3 -m py_compile scripts/extract-embedded-pack.py
+python3 -m json.tool toolchains/mingw-w64-12.0.0.lock.json >/dev/null
 '''
 
 [tasks.check]
@@ -136,7 +184,9 @@ sh -n scripts/build-macos-arm64-release.sh
 sh -n scripts/package-release.sh
 sh -n scripts/stage-llvm-macos-arm64.sh
 sh -n scripts/stage-linux-x86_64-libcxx.sh
+sh -n scripts/stage-linux-musl.sh
 sh -n scripts/stage-linux-x86_64-musl.sh
+sh -n scripts/stage-linux-gnu-glibc217.sh
 sh -n scripts/stage-linux-x86_64-gnu-glibc217.sh
 sh -n scripts/fetch-pinned-archives.sh
 sh -n scripts/verify-linux-x86_64-musl.sh
@@ -153,4 +203,18 @@ python3 -m json.tool toolchains/glibc-2.17-centos7-runtime.lock.json >/dev/null
 python3 -m json.tool toolchains/glibc-headers-2.17-centos7.lock.json >/dev/null
 python3 -m json.tool toolchains/glibc-devel-2.17-centos7.lock.json >/dev/null
 python3 -m json.tool toolchains/kernel-headers-3.10-centos7.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-2.17-centos7-aarch64-runtime.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-headers-2.17-centos7-aarch64.lock.json >/dev/null
+python3 -m json.tool toolchains/glibc-devel-2.17-centos7-aarch64.lock.json >/dev/null
+python3 -m json.tool toolchains/kernel-headers-4.18-centos7-aarch64.lock.json >/dev/null
+sh -n scripts/repack-macos-cross.sh
+sh -n scripts/stage-mingw-w64-crt.sh
+sh -n scripts/stage-windows-gnullvm.sh
+sh -n scripts/stage-windows-gnu.sh
+sh -n scripts/verify-linux-aarch64-musl.sh
+sh -n scripts/verify-linux-aarch64-gnu.sh
+sh -n scripts/verify-windows.sh
+sh -n scripts/ensure-linux-aarch64-guest.sh
+python3 -m py_compile scripts/extract-embedded-pack.py
+python3 -m json.tool toolchains/mingw-w64-12.0.0.lock.json >/dev/null
 '''

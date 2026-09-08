@@ -11,12 +11,14 @@ The macOS AArch64 RCC release statically links selected components built from
 `LLVM-22.1.8-macOS-ARM64.tar.xz` release:
 
 - Clang 22.1.8 C/C++ compiler driver and Clang resource headers;
-- LLD 22.1.8, exposed by RCC as the Mach-O linker `ld64.lld` and the ELF linker
-  `ld.lld`;
+- LLD 22.1.8, exposed by RCC as the Mach-O linker `ld64.lld`, the ELF linker
+  `ld.lld`, and the COFF/MinGW linkers `lld-link` / MinGW `ld.lld`;
 - LLVM `llvm-ar` and `llvm-ranlib` 22.1.8;
 - libc++ 22.1.8 headers (macOS pack root plus linux sysroot copies);
-- linux x86_64 musl and gnu prebuilt `libc++.a` / `libc++abi.a` / `libunwind.a`
+- linux x86_64 and aarch64 musl/gnu prebuilt `libc++.a` / `libc++abi.a` / `libunwind.a`
   compiled from the same pinned LLVM 22.1.8 source against each sysroot;
+- Windows gnu/gnullvm prebuilt `libc++.a` / `libc++abi.a` / `libunwind.a` and
+  compiler-rt builtins for `x86_64` and `aarch64` MinGW targets;
 - compiler-rt 22.1.8 runtime artifacts carried in the Clang resource directory.
 
 Upstream project: <https://github.com/llvm/llvm-project>
@@ -46,10 +48,11 @@ because RCC packs reject symbolic links and bind each payload file to a digest.
 
 ## musl 1.2.5
 
-The macOS AArch64 RCC release also carries a hermetic `linux-x86_64-musl-static`
-sysroot built from the official `musl-1.2.5.tar.gz` release, plus `compiler-rt`
-builtins and CRT objects (`clang_rt.crtbegin` / `clang_rt.crtend`) for
-`x86_64-unknown-linux-musl` built from the same pinned LLVM 22.1.8 source archive.
+The macOS AArch64 RCC release also carries hermetic
+`linux-x86_64-musl-static` and `linux-aarch64-musl-static` sysroots built from
+the official `musl-1.2.5.tar.gz` release, plus `compiler-rt` builtins and CRT
+objects (`clang_rt.crtbegin` / `clang_rt.crtend`) for each musl triple built
+from the same pinned LLVM 22.1.8 source archive.
 
 Upstream project: <https://musl.libc.org/>
 
@@ -66,11 +69,11 @@ payload.
 
 ## CentOS 7 glibc 2.17 (link-time sysroot)
 
-The macOS AArch64 RCC release may also carry a `linux-x86_64-gnu-glibc217`
-sysroot staged from pinned CentOS 7 RPMs (headers, CRT, `libc_nonshared.a`, and
-link-time `libc.so.6`). Produced programs are dynamically linked and require
-**glibc ≥ 2.17** on the target machine; RCC does not ship a runnable glibc
-implementation for execution on the build host.
+The macOS AArch64 RCC release may also carry `linux-x86_64-gnu-glibc217` and
+`linux-aarch64-gnu-glibc217` sysroots staged from pinned CentOS 7 RPMs (headers,
+CRT, `libc_nonshared.a`, and link-time `libc.so.6`). Produced programs are
+dynamically linked and require **glibc ≥ 2.17** on the target machine; RCC does
+not ship a runnable glibc implementation for execution on the build host.
 
 RPMs, URLs and SHA-256 digests are recorded in:
 
@@ -78,10 +81,28 @@ RPMs, URLs and SHA-256 digests are recorded in:
 - `toolchains/glibc-headers-2.17-centos7.lock.json`
 - `toolchains/glibc-devel-2.17-centos7.lock.json`
 - `toolchains/kernel-headers-3.10-centos7.lock.json`
+- `toolchains/glibc-2.17-centos7-aarch64-runtime.lock.json`
+- `toolchains/glibc-headers-2.17-centos7-aarch64.lock.json`
+- `toolchains/glibc-devel-2.17-centos7-aarch64.lock.json`
+- `toolchains/kernel-headers-4.18-centos7-aarch64.lock.json`
 
 License: LGPL-2.1-or-later AND GPL-2.0-or-later (glibc); GPL-2.0-only
 (kernel-headers UAPI). The glibc LGPL notice is copied into the payload at
 `licenses/GLIBC-COPYING.LIB` when the RPMs are staged.
+
+## MinGW-w64 12.0.0
+
+The macOS AArch64 RCC release may also carry hermetic Windows sysroots built
+from `mingw-w64-v12.0.0.tar.bz2`: headers, CRT (UCRT for gnullvm, MSVCRT for
+gnu), and static winpthreads. compiler-rt builtins, libunwind, and libc++ for
+those targets are built from the same pinned LLVM 22.1.8 source. GNU-named
+linker scripts (`libgcc.a`, `libstdc++.a`) in the gnu profile point at those
+LLVM archives; the pack does not include `gcc.exe`.
+
+Source URL, digest and license are recorded in
+`toolchains/mingw-w64-12.0.0.lock.json`.
+
+License: Zlib AND MIT AND public-domain (MinGW-w64).
 
 ## Apple SDK and operating-system components
 

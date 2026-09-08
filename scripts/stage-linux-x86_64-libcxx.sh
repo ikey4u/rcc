@@ -35,8 +35,16 @@ if [ ! -d "$sysroot/usr/include" ]; then
     echo "sysroot is missing C headers: $sysroot/usr/include" >&2
     exit 66
 fi
-if [ ! -f "$resource_dir/lib/linux/libclang_rt.builtins-x86_64.a" ]; then
-    echo "linux compiler-rt builtins are missing under $resource_dir" >&2
+arch=${target_triple%%-*}
+case "$arch" in
+    x86_64|aarch64) ;;
+    *)
+        echo "unsupported linux libc++ architecture in triple $target_triple" >&2
+        exit 64
+        ;;
+esac
+if [ ! -f "$resource_dir/lib/linux/libclang_rt.builtins-$arch.a" ]; then
+    echo "linux compiler-rt builtins are missing under $resource_dir (libclang_rt.builtins-$arch.a)" >&2
     exit 66
 fi
 if [ ! -d "$llvm_source/runtimes" ] || [ ! -d "$llvm_source/libcxx" ]; then
@@ -92,7 +100,7 @@ echo "building LLVM libc++/libc++abi/libunwind for $target_triple ($libc_flavor)
     "-DCMAKE_MAKE_PROGRAM=$ninja_command" \
     -DCMAKE_BUILD_TYPE=MinSizeRel \
     -DCMAKE_SYSTEM_NAME=Linux \
-    -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+        "-DCMAKE_SYSTEM_PROCESSOR=$arch" \
     "-DCMAKE_SYSROOT=$sysroot" \
     "-DCMAKE_C_COMPILER=$clang" \
     "-DCMAKE_CXX_COMPILER=$clangxx" \
@@ -220,6 +228,12 @@ if [ ! -f "$shared_headers/vector" ] || [ ! -f "$shared_headers/iostream" ]; the
         cd "$shared_headers"
         tar -xf -
     )
+    tar_src=${PIPESTATUS[0]}
+    tar_dst=${PIPESTATUS[1]}
+    if [ "$tar_src" != 0 ] || [ "$tar_dst" != 0 ]; then
+        echo "failed to copy shared linux libc++ headers" >&2
+        exit 65
+    fi
     rm -rf "$shared_headers/__cxx03"
 fi
 rm -rf "$shared_headers/__cxx03"

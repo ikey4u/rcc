@@ -2,7 +2,7 @@
 
 RCC 是一个可重定位的原生 C/C++ 工具链提供器。它把经过裁剪的 Clang driver、LLD 与 llvm-ar 作为静态库链接进单个 multicall `rcc`，并把 Clang resource、headers 与 runtime 作为纯资源 pack 内嵌。首次使用只物化资源与 profile 视图；`cc`、`cxx`、flavor-aware linker（当前为 `ld64.lld`）、`ar`、`ranlib` 路径都是同一份 RCC controller 的 cache hardlink alias，不再解包三套上游 executable，也没有独立 `rcc-launcher`。
 
-RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。Cargo 集成由独立的 `cargo-rcc` adapter 完成；当前已注册 `native-rcc-owned`、`rustc-linux-musl-v0` 与 `rustc-linux-gnu-v0` 契约。
+RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：它不替代 Cargo 或 rustc，不编译 Zig 源码，不携带 Zig 标准库，也不提供 Rust 标准库。Cargo 集成由独立的 `cargo-rcc` adapter 完成；当前已注册 `native-rcc-owned`、`rustc-linux-musl-v0`、`rustc-linux-gnu-v0` 与 `rustc-windows-v0` 契约。
 
 详细设计见 [docs/design/ARCH.md](docs/design/ARCH.md)。按 OS 拆开的交叉矩阵与现状：[macOS](docs/design/RCC_MACOS.md)、[Linux](docs/design/RCC_LINUX.md)、[Windows](docs/design/RCC_WINDOWS.md)。
 
@@ -10,7 +10,7 @@ RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：�
 
 交叉编译按 host 拆开，各自只编另外两个 OS（原生编译不进交叉表）：[macOS → Linux / Windows](docs/design/RCC_MACOS.md)、[Linux → macOS / Windows](docs/design/RCC_LINUX.md)、[Windows → Linux / macOS](docs/design/RCC_WINDOWS.md)。
 
-当前唯一能跑的 controller host 是 Apple Silicon macOS（`aarch64-apple-darwin`），已交付 **macOS → Linux x86_64**（musl-static 与 gnu-glibc217）。仓库里的 profile registry 还登记了 linux aarch64、macOS x86_64 和 Windows GNU/GNULLVM/MSVC，但 profile 存在不代表 payload 已包含对应资源。以 `rcc targets` 的 `IN_PAYLOAD` 列为准。
+当前唯一能跑的 controller host 是 Apple Silicon macOS（`aarch64-apple-darwin`），已交付 **macOS → Linux x86_64/aarch64**（musl-static 与 gnu-glibc217）以及 **macOS → Windows**（hermetic gnu x64 与 gnullvm x64/arm64；MSVC 尽最大努力、自备 SDK）。以 `rcc targets` 的 `IN_PAYLOAD` 列为准。
 
 | Controller host | Profile | C/C++/链接/归档 | Sysroot/SDK | 当前状态 |
 | --- | --- | --- | --- | --- |
@@ -18,9 +18,12 @@ RCC 的边界是“提供 C/C++ 编译、链接及 sysroot/runtime 资源”：�
 | `aarch64-apple-darwin` | `host-macos-aarch64` | 同上，供 host 构建上下文使用 | 外部 Apple macOS SDK | 已包含 |
 | `aarch64-apple-darwin` | `linux-x86_64-musl-static` | 静态集成 Clang、ELF LLD、llvm-ar；musl 1.2.5 + compiler-rt + 预编 libc++ | pack 内 hermetic musl sysroot | 已包含（macOS → Linux） |
 | `aarch64-apple-darwin` | `linux-x86_64-gnu-glibc217` | 同上引擎；CentOS 7 glibc 2.17 链接期 sysroot + compiler-rt + 预编 libc++ | pack 内 2.17 头/CRT/`libc.so.6` + `libc++.a`；运行时目标机 glibc ≥ 2.17 | 已包含（macOS → Linux） |
-| 任意 | `linux-aarch64-musl-static` / `linux-aarch64-gnu-glibc217` | — | — | 未包含 |
+| `aarch64-apple-darwin` | `linux-aarch64-musl-static` | 同上引擎；musl 1.2.5 + compiler-rt + 预编 libc++ | pack 内 hermetic musl sysroot | 已包含（需 aarch64 kernel-headers RPM） |
+| `aarch64-apple-darwin` | `linux-aarch64-gnu-glibc217` | 同上引擎；CentOS 7 altarch glibc 2.17 | pack 内 2.17 头/CRT/`libc.so.6` + `libc++.a` | 已包含（需 altarch RPM） |
+| `aarch64-apple-darwin` | `windows-x86_64-gnu` | Clang + MinGW LLD；MSVCRT + compiler-rt/libc++ GNU 名称 | pack 内 MinGW-w64 12.0.0 sysroot | 已包含（需 mingw-w64 归档） |
+| `aarch64-apple-darwin` | `windows-x86_64-gnullvm` / `windows-aarch64-gnullvm` | Clang + MinGW LLD；UCRT + compiler-rt + libc++ | pack 内 hermetic UCRT sysroot | 已包含（需 mingw-w64 归档） |
+| `aarch64-apple-darwin` | `windows-x86_64-msvc` | clang-cl + `lld-link` | 外部 Windows SDK（`RCC_WINDOWS_SDK_ROOT`） | 尽最大努力 |
 | 任意 | `macos-x86_64` | — | — | 未包含 |
-| 任意 | Windows GNU / GNULLVM / MSVC | — | — | 未包含 |
 | Linux / Windows | 任意 | — | — | controller 未交付 |
 
 当前 resource-only payload 内含 libc++ headers、Clang resource headers、Darwin compiler-rt、linux x86_64 musl 1.2.5 sysroot（含预编 libc++）、linux x86_64 gnu glibc 2.17 链接期 sysroot（含预编 libc++）、linux x86_64 compiler-rt builtins/CRT 和 provenance，不含 Clang、LLD、llvm-ar 或 launcher executable。Apple SDK 不随 RCC 分发：运行时通过 `RCC_APPLE_SDK_ROOT` 指定，或在 macOS 上通过 `xcrun --sdk macosx --show-sdk-path` 自动发现。RCC 不调用系统 clang、gcc 或 ld；Apple SDK、操作系统动态库以及 RCC 本身所需的 macOS 运行环境仍是外部依赖。

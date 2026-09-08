@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "name": "glibc-headers-2.17-326.el7_9.aarch64.rpm",
+  "role": "linux_aarch64_glibc217_headers",
+  "source": "https://vault.centos.org/altarch/7.9.2009/updates/aarch64/Packages/glibc-headers-2.17-326.el7_9.aarch64.rpm",
+  "sha256": "7141a99017fd13766ff2b0e2dbbfb6e861758aa1897a314c0c2317cd7025cd5f",
+  "license": "LGPL-2.1-or-later AND GPL-2.0-or-later"
+}

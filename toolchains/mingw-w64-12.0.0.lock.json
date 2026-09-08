@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "name": "mingw-w64-v12.0.0.tar.bz2",
+  "role": "windows_mingw_w64_source",
+  "source": "https://sourceforge.net/projects/mingw-w64/files/mingw-w64/mingw-w64-release/mingw-w64-v12.0.0.tar.bz2/download",
+  "sha256": "cc41898aac4b6e8dd5cffd7331b9d9515b912df4420a3a612b5ea2955bbeed2f",
+  "license": "Zlib AND MIT AND public-domain",
+  "notes": "MinGW-w64 12.0.0 headers/CRT/winpthreads; UCRT is upstream default, RCC gnu profile configures MSVCRT explicitly"
+}

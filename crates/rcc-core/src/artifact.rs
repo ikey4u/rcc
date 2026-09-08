@@ -145,6 +145,42 @@ impl ArtifactReport {
         }
         violations
     }
+
+    /// Windows PE binaries must match the profile architecture (checked by the
+    /// caller) and must not import GNU runtime DLLs that would pull a host
+    /// MinGW install. Relocatable objects have no import table.
+    pub fn windows_pe_violations(&self, libc_family: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        if self.format != ArtifactFormat::Pe {
+            violations.push(format!("expected PE, got {:?}", self.format));
+            return violations;
+        }
+        if self.architecture != "x86_64" && self.architecture != "aarch64" {
+            violations.push(format!("unexpected PE architecture {}", self.architecture));
+        }
+        let forbidden = [
+            "libgcc_s_seh-1.dll",
+            "libgcc_s_dw2-1.dll",
+            "libgcc_s_sjlj-1.dll",
+            "libstdc++-6.dll",
+            "libwinpthread-1.dll",
+        ];
+        for dll in &self.needed_libraries {
+            let lower = dll.to_ascii_lowercase();
+            if forbidden.iter().any(|name| lower == *name) {
+                violations.push(format!("GNU runtime DLL import {dll}"));
+            }
+        }
+        if libc_family == "gnullvm" {
+            for dll in &self.needed_libraries {
+                let lower = dll.to_ascii_lowercase();
+                if lower == "msvcrt.dll" || lower.starts_with("msvcr") {
+                    violations.push(format!("MSVC/MSVCRT import {dll} on gnullvm profile"));
+                }
+            }
+        }
+        violations
+    }
 }
 
 pub fn inspect(path: &Path) -> Result<ArtifactReport> {
@@ -156,6 +192,9 @@ pub fn inspect(path: &Path) -> Result<ArtifactReport> {
 pub fn inspect_from_bytes(bytes: &[u8]) -> Result<ArtifactReport> {
     if bytes.starts_with(b"\x7fELF") {
         return inspect_elf_report(bytes);
+    }
+    if bytes.starts_with(b"MZ") {
+        return inspect_pe_report(bytes);
     }
     let (format, architecture) = inspect_non_elf(bytes)?;
     Ok(ArtifactReport {
@@ -178,7 +217,8 @@ pub fn inspect_bytes(bytes: &[u8]) -> Result<(ArtifactFormat, String)> {
 
 fn inspect_non_elf(bytes: &[u8]) -> Result<(ArtifactFormat, String)> {
     if bytes.starts_with(b"MZ") {
-        return inspect_pe(bytes);
+        let (architecture, _) = inspect_pe(bytes)?;
+        return Ok((ArtifactFormat::Pe, architecture));
     }
     if bytes.len() >= 8 {
         let magic = u32::from_be_bytes(bytes[0..4].try_into().expect("four bytes"));
@@ -407,12 +447,27 @@ fn parse_glibc_version_label(label: &str) -> Option<(u16, u16, u16)> {
     Some((major, minor, patch))
 }
 
-fn inspect_pe(bytes: &[u8]) -> Result<(ArtifactFormat, String)> {
+fn inspect_pe_report(bytes: &[u8]) -> Result<ArtifactReport> {
+    let (architecture, needed_libraries) = inspect_pe(bytes)?;
+    Ok(ArtifactReport {
+        format: ArtifactFormat::Pe,
+        architecture,
+        size: bytes.len() as u64,
+        sha256: bytes_sha256(bytes),
+        elf_file_type: None,
+        interpreter: None,
+        needed_libraries,
+        contains_glibc_versioned_symbols: false,
+        glibc_symbol_versions: Vec::new(),
+    })
+}
+
+fn inspect_pe(bytes: &[u8]) -> Result<(String, Vec<String>)> {
     if bytes.len() < 0x40 {
         bail!("truncated DOS header");
     }
     let offset = u32::from_le_bytes(bytes[0x3c..0x40].try_into().expect("four bytes")) as usize;
-    if offset.checked_add(6).is_none() || offset + 6 > bytes.len() {
+    if offset.checked_add(24).is_none() || offset + 24 > bytes.len() {
         bail!("PE header offset is out of bounds");
     }
     if &bytes[offset..offset + 4] != b"PE\0\0" {
@@ -425,8 +480,133 @@ fn inspect_pe(bytes: &[u8]) -> Result<(ArtifactFormat, String)> {
         0xaa64 => "aarch64",
         0x01c4 => "arm",
         _ => "unknown",
+    }
+    .to_owned();
+    let number_of_sections =
+        u16::from_le_bytes(bytes[offset + 6..offset + 8].try_into().expect("two bytes")) as usize;
+    let size_of_optional = u16::from_le_bytes(
+        bytes[offset + 20..offset + 22]
+            .try_into()
+            .expect("two bytes"),
+    ) as usize;
+    let optional_start = offset + 24;
+    let optional_end = optional_start
+        .checked_add(size_of_optional)
+        .context("PE optional header overflow")?;
+    if optional_end > bytes.len() || size_of_optional < 2 {
+        return Ok((architecture, Vec::new()));
+    }
+    let optional = &bytes[optional_start..optional_end];
+    let magic = u16::from_le_bytes(optional[0..2].try_into().expect("two bytes"));
+    let data_directory_offset = match magic {
+        0x10b => 96usize,
+        0x20b => 112usize,
+        _ => return Ok((architecture, Vec::new())),
     };
-    Ok((ArtifactFormat::Pe, architecture.to_owned()))
+    if optional.len() < data_directory_offset + 16 {
+        return Ok((architecture, Vec::new()));
+    }
+    let import_rva = u32::from_le_bytes(
+        optional[data_directory_offset + 8..data_directory_offset + 12]
+            .try_into()
+            .expect("four bytes"),
+    );
+    let import_size = u32::from_le_bytes(
+        optional[data_directory_offset + 12..data_directory_offset + 16]
+            .try_into()
+            .expect("four bytes"),
+    );
+    if import_rva == 0 || import_size == 0 {
+        return Ok((architecture, Vec::new()));
+    }
+    let sections_start = optional_end;
+    let mut sections = Vec::new();
+    for index in 0..number_of_sections {
+        let start = sections_start
+            .checked_add(index.checked_mul(40).context("PE section overflow")?)
+            .context("PE section overflow")?;
+        let end = start.checked_add(40).context("PE section overflow")?;
+        if end > bytes.len() {
+            break;
+        }
+        let virtual_size =
+            u32::from_le_bytes(bytes[start + 8..start + 12].try_into().expect("four bytes"));
+        let virtual_address = u32::from_le_bytes(
+            bytes[start + 12..start + 16]
+                .try_into()
+                .expect("four bytes"),
+        );
+        let raw_size = u32::from_le_bytes(
+            bytes[start + 16..start + 20]
+                .try_into()
+                .expect("four bytes"),
+        );
+        let raw_ptr = u32::from_le_bytes(
+            bytes[start + 20..start + 24]
+                .try_into()
+                .expect("four bytes"),
+        );
+        let mapped = virtual_size.max(raw_size);
+        sections.push((virtual_address, mapped, raw_ptr, raw_size));
+    }
+    let Some(import_offset) = pe_rva_to_offset(import_rva, &sections) else {
+        return Ok((architecture, Vec::new()));
+    };
+    let mut needed = Vec::new();
+    let mut descriptor = import_offset;
+    for _ in 0..256 {
+        if descriptor
+            .checked_add(20)
+            .is_none_or(|end| end > bytes.len())
+        {
+            break;
+        }
+        let name_rva = u32::from_le_bytes(
+            bytes[descriptor + 12..descriptor + 16]
+                .try_into()
+                .expect("four bytes"),
+        );
+        let first_thunk = u32::from_le_bytes(
+            bytes[descriptor + 16..descriptor + 20]
+                .try_into()
+                .expect("four bytes"),
+        );
+        if name_rva == 0 && first_thunk == 0 {
+            break;
+        }
+        if let Some(name_offset) = pe_rva_to_offset(name_rva, &sections) {
+            if let Some(name) = read_cstring(bytes, name_offset) {
+                needed.push(name);
+            }
+        }
+        descriptor += 20;
+    }
+    Ok((architecture, needed))
+}
+
+fn pe_rva_to_offset(rva: u32, sections: &[(u32, u32, u32, u32)]) -> Option<usize> {
+    for &(virtual_address, mapped, raw_ptr, raw_size) in sections {
+        if rva >= virtual_address && rva < virtual_address.saturating_add(mapped) {
+            let delta = rva - virtual_address;
+            if delta < raw_size {
+                return Some((raw_ptr.saturating_add(delta)) as usize);
+            }
+        }
+    }
+    None
+}
+
+fn read_cstring(bytes: &[u8], offset: usize) -> Option<String> {
+    if offset >= bytes.len() {
+        return None;
+    }
+    let end = bytes[offset..]
+        .iter()
+        .position(|&byte| byte == 0)
+        .map(|relative| offset + relative)?;
+    std::str::from_utf8(&bytes[offset..end])
+        .ok()
+        .map(str::to_owned)
 }
 
 fn inspect_macho(bytes: &[u8], big_endian: bool) -> Result<(ArtifactFormat, String)> {
@@ -610,6 +790,39 @@ mod tests {
             inspect_bytes(&bytes).unwrap(),
             (ArtifactFormat::Pe, "aarch64".to_owned())
         );
+    }
+
+    #[test]
+    fn windows_pe_rejects_gnu_runtime_dlls() {
+        let mut report = inspect_from_bytes(&{
+            let mut bytes = vec![0_u8; 128];
+            bytes[0..2].copy_from_slice(b"MZ");
+            bytes[0x3c..0x40].copy_from_slice(&64_u32.to_le_bytes());
+            bytes[64..68].copy_from_slice(b"PE\0\0");
+            bytes[68..70].copy_from_slice(&0x8664_u16.to_le_bytes());
+            bytes
+        })
+        .unwrap();
+        report.needed_libraries = vec!["KERNEL32.dll".into(), "libstdc++-6.dll".into()];
+        let violations = report.windows_pe_violations("gnullvm");
+        assert!(violations.iter().any(|item| item.contains("libstdc++")));
+    }
+
+    #[test]
+    fn windows_gnullvm_rejects_msvcrt() {
+        let mut report = inspect_from_bytes(&{
+            let mut bytes = vec![0_u8; 128];
+            bytes[0..2].copy_from_slice(b"MZ");
+            bytes[0x3c..0x40].copy_from_slice(&64_u32.to_le_bytes());
+            bytes[64..68].copy_from_slice(b"PE\0\0");
+            bytes[68..70].copy_from_slice(&0x8664_u16.to_le_bytes());
+            bytes
+        })
+        .unwrap();
+        report.needed_libraries = vec!["KERNEL32.dll".into(), "msvcrt.dll".into()];
+        let gnullvm = report.windows_pe_violations("gnullvm");
+        assert!(gnullvm.iter().any(|item| item.contains("msvcrt")));
+        assert!(report.windows_pe_violations("mingw-w64").is_empty());
     }
 
     #[test]

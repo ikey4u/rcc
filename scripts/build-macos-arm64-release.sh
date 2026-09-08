@@ -278,11 +278,27 @@ cargo build \
 stage=$output/stage
 pack=$output/llvm-22.1.8-macos-arm64.rccpack
 "$script_directory/stage-llvm-macos-arm64.sh" "$bootstrap_archive" "$stage"
-"$script_directory/stage-linux-x86_64-musl.sh" \
+"$script_directory/stage-linux-musl.sh" \
+    x86_64 \
     "$musl_archive" \
     "$bootstrap_prefix" \
     "$source_directory" \
     "$stage"
+
+musl_aarch64_in_payload=0
+aarch64_kernel_rpm=${RCC_KERNEL_HEADERS_AARCH64_RPM:-$(default_archive kernel-headers-4.18.0-193.28.1.el7.aarch64.rpm)}
+if [ -f "$aarch64_kernel_rpm" ]; then
+    "$script_directory/stage-linux-musl.sh" \
+        aarch64 \
+        "$musl_archive" \
+        "$bootstrap_prefix" \
+        "$source_directory" \
+        "$stage"
+    musl_aarch64_in_payload=1
+else
+    echo "skipping linux-aarch64-musl-static: aarch64 kernel-headers RPM not present under .cache/ or inner/" >&2
+    echo "run: mise run fetch:archives" >&2
+fi
 
 gnu_glibc_rpm=${RCC_GLIBC_RUNTIME_RPM:-$(default_archive glibc-2.17-326.el7_9.x86_64.rpm)}
 gnu_headers_rpm=${RCC_GLIBC_HEADERS_RPM:-$(default_archive glibc-headers-2.17-326.el7_9.x86_64.rpm)}
@@ -290,7 +306,8 @@ gnu_devel_rpm=${RCC_GLIBC_DEVEL_RPM:-$(default_archive glibc-devel-2.17-326.el7_
 gnu_kernel_rpm=${RCC_KERNEL_HEADERS_RPM:-$(default_archive kernel-headers-3.10.0-1160.el7.x86_64.rpm)}
 gnu_in_payload=0
 if [ -f "$gnu_glibc_rpm" ] && [ -f "$gnu_headers_rpm" ] && [ -f "$gnu_devel_rpm" ] && [ -f "$gnu_kernel_rpm" ]; then
-    "$script_directory/stage-linux-x86_64-gnu-glibc217.sh" \
+    "$script_directory/stage-linux-gnu-glibc217.sh" \
+        x86_64 \
         "$gnu_glibc_rpm" \
         "$gnu_headers_rpm" \
         "$gnu_devel_rpm" \
@@ -302,28 +319,88 @@ else
     echo "run: mise run fetch:archives" >&2
 fi
 
-if [ "$gnu_in_payload" -eq 1 ]; then
-    "$repository/target/release/rcc-pack" create \
-        "$stage" \
-        "$pack" \
-        --pack-id llvm-22.1.8-macos-arm64-static \
-        --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
-        --host aarch64-apple-darwin \
-        --profile macos-aarch64 \
-        --profile host-macos-aarch64 \
-        --profile linux-x86_64-musl-static \
-        --profile linux-x86_64-gnu-glibc217
+gnu_aarch64_glibc_rpm=${RCC_GLIBC_AARCH64_RUNTIME_RPM:-$(default_archive glibc-2.17-326.el7_9.aarch64.rpm)}
+gnu_aarch64_headers_rpm=${RCC_GLIBC_AARCH64_HEADERS_RPM:-$(default_archive glibc-headers-2.17-326.el7_9.aarch64.rpm)}
+gnu_aarch64_devel_rpm=${RCC_GLIBC_AARCH64_DEVEL_RPM:-$(default_archive glibc-devel-2.17-326.el7_9.aarch64.rpm)}
+gnu_aarch64_in_payload=0
+if [ "$musl_aarch64_in_payload" -eq 1 ] \
+    && [ -f "$gnu_aarch64_glibc_rpm" ] \
+    && [ -f "$gnu_aarch64_headers_rpm" ] \
+    && [ -f "$gnu_aarch64_devel_rpm" ] \
+    && [ -f "$aarch64_kernel_rpm" ]; then
+    "$script_directory/stage-linux-gnu-glibc217.sh" \
+        aarch64 \
+        "$gnu_aarch64_glibc_rpm" \
+        "$gnu_aarch64_headers_rpm" \
+        "$gnu_aarch64_devel_rpm" \
+        "$aarch64_kernel_rpm" \
+        "$stage"
+    gnu_aarch64_in_payload=1
 else
-    "$repository/target/release/rcc-pack" create \
-        "$stage" \
-        "$pack" \
-        --pack-id llvm-22.1.8-macos-arm64-static \
-        --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
-        --host aarch64-apple-darwin \
-        --profile macos-aarch64 \
-        --profile host-macos-aarch64 \
-        --profile linux-x86_64-musl-static
+    echo "skipping linux-aarch64-gnu-glibc217: aarch64 musl builtins or CentOS 7 altarch RPMs missing" >&2
+    echo "run: mise run fetch:archives" >&2
 fi
+
+set -- \
+    "$repository/target/release/rcc-pack" create \
+    "$stage" \
+    "$pack" \
+    --pack-id llvm-22.1.8-macos-arm64-static \
+    --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
+    --host aarch64-apple-darwin \
+    --profile macos-aarch64 \
+    --profile host-macos-aarch64 \
+    --profile linux-x86_64-musl-static
+if [ "$musl_aarch64_in_payload" -eq 1 ]; then
+    set -- "$@" --profile linux-aarch64-musl-static
+fi
+if [ "$gnu_in_payload" -eq 1 ]; then
+    set -- "$@" --profile linux-x86_64-gnu-glibc217
+fi
+if [ "$gnu_aarch64_in_payload" -eq 1 ]; then
+    set -- "$@" --profile linux-aarch64-gnu-glibc217
+fi
+
+mingw_archive=${RCC_MINGW_ARCHIVE:-$(default_archive mingw-w64-v12.0.0.tar.bz2)}
+windows_x64_gnullvm_in_payload=0
+windows_aarch64_gnullvm_in_payload=0
+windows_gnu_in_payload=0
+if [ -f "$mingw_archive" ]; then
+    "$script_directory/stage-windows-gnullvm.sh" \
+        x86_64 \
+        "$mingw_archive" \
+        "$bootstrap_prefix" \
+        "$source_directory" \
+        "$stage"
+    windows_x64_gnullvm_in_payload=1
+    "$script_directory/stage-windows-gnullvm.sh" \
+        aarch64 \
+        "$mingw_archive" \
+        "$bootstrap_prefix" \
+        "$source_directory" \
+        "$stage"
+    windows_aarch64_gnullvm_in_payload=1
+    "$script_directory/stage-windows-gnu.sh" \
+        "$mingw_archive" \
+        "$bootstrap_prefix" \
+        "$source_directory" \
+        "$stage"
+    windows_gnu_in_payload=1
+else
+    echo "skipping windows sysroots: mingw-w64 archive not present under .cache/ or inner/" >&2
+    echo "run: mise run fetch:archives" >&2
+fi
+if [ "$windows_x64_gnullvm_in_payload" -eq 1 ]; then
+    set -- "$@" --profile windows-x86_64-gnullvm
+fi
+if [ "$windows_aarch64_gnullvm_in_payload" -eq 1 ]; then
+    set -- "$@" --profile windows-aarch64-gnullvm
+fi
+if [ "$windows_gnu_in_payload" -eq 1 ]; then
+    set -- "$@" --profile windows-x86_64-gnu
+fi
+set -- "$@" --profile windows-x86_64-msvc
+"$@"
 "$repository/target/release/rcc-pack" verify "$pack"
 
 RCC_LLVM_BUILD_DIR="$llvm_build_directory" \

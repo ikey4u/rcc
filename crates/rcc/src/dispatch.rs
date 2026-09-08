@@ -399,9 +399,11 @@ fn validate_and_sanitize_linker_binding(
                 let expected = match (manifest.profile.os.as_str(), manifest.profile.arch.as_str())
                 {
                     ("linux", "x86_64") => "elf_x86_64",
-                    ("linux", "aarch64") => "aarch64elf",
+                    ("linux", "aarch64") => "aarch64linux",
+                    ("windows", "x86_64") => "i386pep",
+                    ("windows", "aarch64") => "arm64pe",
                     (os, arch) => bail!(
-                        "no bound ELF emulation for {os}/{arch}; linker -m {value} is not allowed"
+                        "no bound linker emulation for {os}/{arch}; linker -m {value} is not allowed"
                     ),
                 };
                 if value != expected {

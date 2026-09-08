@@ -9,7 +9,7 @@ pub mod registry;
 pub mod schema;
 pub mod view;
 
-pub use contracts::{NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0};
+pub use contracts::{NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0, RUSTC_WINDOWS_V0};
 pub use environment::{
     EnvironmentContext, EnvironmentError, EnvironmentFormat, EnvironmentManifest, EnvironmentRole,
     EnvironmentTool, ENVIRONMENT_SCHEMA_VERSION,

@@ -15,6 +15,8 @@ int llvm_ar_main(int argc, char **argv,
 
 LLD_HAS_DRIVER(macho)
 LLD_HAS_DRIVER(elf)
+LLD_HAS_DRIVER(coff)
+LLD_HAS_DRIVER(mingw)
 
 namespace {
 
@@ -32,8 +34,8 @@ llvm::StringRef launcher_basename(const char *argv0) {
   return llvm::sys::path::filename(llvm::StringRef(argv0));
 }
 
-bool is_elf_linker_alias(llvm::StringRef basename) {
-  return basename == "ld.lld" || basename == "ld";
+bool is_coff_msvc_alias(llvm::StringRef basename) {
+  return basename == "lld-link" || basename == "lld-link.exe";
 }
 
 } // namespace
@@ -49,13 +51,22 @@ extern "C" int rcc_lld_main(int argc,
   if (!valid_arguments(argc, argv, argv == nullptr ? nullptr : argv[0]))
     return 64;
 
-  const bool elf = is_elf_linker_alias(launcher_basename(argv[0]));
+  const bool coff_msvc = is_coff_msvc_alias(launcher_basename(argv[0]));
   const lld::DriverDef drivers[] = {{lld::Darwin, &lld::macho::link},
-                                    {lld::Gnu, &lld::elf::link}};
+                                    {lld::Gnu, &lld::elf::link},
+                                    {lld::MinGW, &lld::mingw::link},
+                                    {lld::WinLink, &lld::coff::link}};
   std::vector<const char *> arguments(argv, argv + argc);
   // Give LLD its canonical flavor name so dispatch never depends on the
-  // profile-facing `linker` alias.
-  arguments[0] = elf ? "ld.lld" : "ld64.lld";
+  // profile-facing `linker` alias. `ld.lld` still becomes MinGW when Clang
+  // passes a PE emulation such as `-m i386pep` / `-m arm64pe`.
+  if (coff_msvc) {
+    arguments[0] = "lld-link";
+  } else if (launcher_basename(argv[0]) == "ld64.lld") {
+    arguments[0] = "ld64.lld";
+  } else {
+    arguments[0] = "ld.lld";
+  }
   const auto result = lld::lldMain(
       llvm::ArrayRef<const char *>(arguments), llvm::outs(), llvm::errs(),
       drivers);

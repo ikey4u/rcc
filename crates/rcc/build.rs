@@ -284,6 +284,8 @@ fn emit_static_links(out_dir: &Path, build: &Path, native_archive: &Path) {
         "clangOptions",
         "lldMachO",
         "lldELF",
+        "lldMinGW",
+        "lldCOFF",
         "lldCommon",
         "LLVMLibDriver",
         "LLVMDlltoolDriver",
@@ -355,6 +357,7 @@ fn llvm_components(targets: &str) -> Vec<String> {
         "Plugins",
         "LibDriver",
         "DlltoolDriver",
+        "WindowsManifest",
         "TextAPIBinaryReader",
     ]
     .into_iter()
@@ -362,7 +365,7 @@ fn llvm_components(targets: &str) -> Vec<String> {
     .collect::<Vec<_>>();
     components.extend(targets.split_whitespace().map(str::to_owned));
     assert!(
-        components.len() > 9,
+        components.len() > 10,
         "custom LLVM build reports no code-generation targets"
     );
     components

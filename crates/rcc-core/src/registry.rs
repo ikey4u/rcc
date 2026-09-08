@@ -284,12 +284,6 @@ fn windows_gnu_tools() -> &'static [ToolKind] {
         ToolKind::Linker,
         ToolKind::Ar,
         ToolKind::Ranlib,
-        ToolKind::Lib,
-        ToolKind::Rc,
-        ToolKind::Windres,
-        ToolKind::Dlltool,
-        ToolKind::Objcopy,
-        ToolKind::Strip,
     ]
 }
 
@@ -300,9 +294,6 @@ fn windows_msvc_tools() -> &'static [ToolKind] {
         ToolKind::Linker,
         ToolKind::Ar,
         ToolKind::Ranlib,
-        ToolKind::Lib,
-        ToolKind::Rc,
-        ToolKind::Dlltool,
     ]
 }
 

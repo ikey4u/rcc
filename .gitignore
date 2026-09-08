@@ -5,6 +5,7 @@ dist/
 /.rcc-cache/
 *.rccpack
 .DS_Store
+__pycache__/
 examples/openssl-linux/target/
 examples/openssl-linux/Cargo.lock
 examples/linux-musl-c/out/
@@ -16,3 +17,11 @@ examples/native-stack-linux/Cargo.lock
 examples/libcap-ng-linux/target/
 examples/libcap-ng-linux/Cargo.lock
 examples/libcap-ng-linux/out/
+examples/linux-musl-c/out-aarch64/
+examples/linux-musl-cxx/out-aarch64/
+examples/linux-glibc-c/out-aarch64/
+examples/linux-glibc-cxx/out-aarch64/
+examples/windows-c/out-*/
+examples/windows-cxx/out-*/
+examples/windows-hello/target/
+examples/windows-hello/Cargo.lock

@@ -1,8 +1,8 @@
 #!/bin/sh
-# Download pinned LLVM bootstrap, LLVM source, musl, and CentOS 7 glibc RPMs
-# into .cache/ (override with RCC_ARCHIVE_CACHE). Subsequent release builds
-# reuse these files. Existing matching files under inner/ are hardlinked in
-# so a previous fetch:archives layout is not re-downloaded.
+# Download pinned LLVM bootstrap, LLVM source, musl, CentOS 7 glibc RPMs,
+# and mingw-w64 into .cache/ (override with RCC_ARCHIVE_CACHE). Subsequent
+# release builds reuse these files. Existing matching files under inner/ are
+# hardlinked in so a previous fetch:archives layout is not re-downloaded.
 set -eu
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -76,5 +76,25 @@ fetch \
     kernel-headers-3.10.0-1160.el7.x86_64.rpm \
     https://vault.centos.org/7.9.2009/os/x86_64/Packages/kernel-headers-3.10.0-1160.el7.x86_64.rpm \
     81b4e4f401d2402736ceba4627eaafd5b615c2cc45aa4d4f941ea79562045139
+fetch \
+    glibc-2.17-326.el7_9.aarch64.rpm \
+    https://vault.centos.org/altarch/7.9.2009/updates/aarch64/Packages/glibc-2.17-326.el7_9.aarch64.rpm \
+    fed88ce4260ff03a4ff0a32c0abc2fc8cdd9fd6cd2e8da477f000c2442e75d63
+fetch \
+    glibc-headers-2.17-326.el7_9.aarch64.rpm \
+    https://vault.centos.org/altarch/7.9.2009/updates/aarch64/Packages/glibc-headers-2.17-326.el7_9.aarch64.rpm \
+    7141a99017fd13766ff2b0e2dbbfb6e861758aa1897a314c0c2317cd7025cd5f
+fetch \
+    glibc-devel-2.17-326.el7_9.aarch64.rpm \
+    https://vault.centos.org/altarch/7.9.2009/updates/aarch64/Packages/glibc-devel-2.17-326.el7_9.aarch64.rpm \
+    60391fb6b3bd3245aaacfd4ec6ecc13105ff218c86fe3c39d6380b950a09cdcd
+fetch \
+    kernel-headers-4.18.0-193.28.1.el7.aarch64.rpm \
+    https://vault.centos.org/altarch/7.9.2009/os/aarch64/Packages/kernel-headers-4.18.0-193.28.1.el7.aarch64.rpm \
+    56fffc40800cd7c30830009c860f04c8dba1110a6271efd804a0bb01e0bdf8a4
+fetch \
+    mingw-w64-v12.0.0.tar.bz2 \
+    https://sourceforge.net/projects/mingw-w64/files/mingw-w64/mingw-w64-release/mingw-w64-v12.0.0.tar.bz2/download \
+    cc41898aac4b6e8dd5cffd7331b9d9515b912df4420a3a612b5ea2955bbeed2f
 
 echo "pinned archives ready in $archive_cache"

@@ -960,6 +960,16 @@ fn verify_artifact(profile_query: &str, path: &Path, json: bool) -> Result<()> {
             );
         }
     }
+    if profile.os == "windows" {
+        let violations = report.windows_pe_violations(&profile.libc_family);
+        if !violations.is_empty() {
+            bail!(
+                "artifact is not a hermetic windows {} binary: {}",
+                profile.libc_family,
+                violations.join("; ")
+            );
+        }
+    }
 
     let verified = VerifiedArtifact {
         profile_id: &profile.profile_id,

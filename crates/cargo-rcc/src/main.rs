@@ -7,7 +7,10 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use rcc_core::{EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0};
+use rcc_core::{
+    EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0,
+    RUSTC_WINDOWS_V0,
+};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -18,6 +21,18 @@ const LINUX_X64_MUSL: &str = "x86_64-unknown-linux-musl";
 const LINUX_X64_MUSL_PROFILE: &str = "linux-x86_64-musl-static";
 const LINUX_X64_GNU: &str = "x86_64-unknown-linux-gnu";
 const LINUX_X64_GNU_PROFILE: &str = "linux-x86_64-gnu-glibc217";
+const LINUX_AARCH64_MUSL: &str = "aarch64-unknown-linux-musl";
+const LINUX_AARCH64_MUSL_PROFILE: &str = "linux-aarch64-musl-static";
+const LINUX_AARCH64_GNU: &str = "aarch64-unknown-linux-gnu";
+const LINUX_AARCH64_GNU_PROFILE: &str = "linux-aarch64-gnu-glibc217";
+const WINDOWS_X64_GNU: &str = "x86_64-pc-windows-gnu";
+const WINDOWS_X64_GNU_PROFILE: &str = "windows-x86_64-gnu";
+const WINDOWS_X64_GNULLVM: &str = "x86_64-pc-windows-gnullvm";
+const WINDOWS_X64_GNULLVM_PROFILE: &str = "windows-x86_64-gnullvm";
+const WINDOWS_AARCH64_GNULLVM: &str = "aarch64-pc-windows-gnullvm";
+const WINDOWS_AARCH64_GNULLVM_PROFILE: &str = "windows-aarch64-gnullvm";
+const WINDOWS_X64_MSVC: &str = "x86_64-pc-windows-msvc";
+const WINDOWS_X64_MSVC_PROFILE: &str = "windows-x86_64-msvc";
 const HOST_MACOS_AARCH64: &str = "aarch64-apple-darwin";
 const HOST_MACOS_AARCH64_PROFILE: &str = "host-macos-aarch64";
 
@@ -191,38 +206,80 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
         });
     }
 
-    if rust_target == LINUX_X64_GNU {
+    if let Some(profile_id) = linux_gnu_profile(&rust_target) {
         return Ok(TargetPlan {
             rust_target,
-            profile_id: profile_override.unwrap_or(LINUX_X64_GNU_PROFILE).to_owned(),
+            profile_id: profile_override.unwrap_or(profile_id).to_owned(),
             runtime_contract: RUSTC_LINUX_GNU_V0.to_owned(),
             rustflags: vec!["-C".into(), "panic=abort".into()],
         });
     }
 
-    if rust_target != LINUX_X64_MUSL {
-        bail!("cargo-rcc currently supports {LINUX_X64_MUSL} and {LINUX_X64_GNU}; got {target}");
+    if let Some(profile_id) = linux_musl_profile(&rust_target) {
+        return Ok(TargetPlan {
+            rust_target,
+            profile_id: profile_override.unwrap_or(profile_id).to_owned(),
+            runtime_contract: RUSTC_LINUX_MUSL_V0.to_owned(),
+            rustflags: vec![
+                "-C".into(),
+                // Stable rustc only accepts yes/no here. Component-level values
+                // such as `-crto,-libc` are nightly. `no` makes rustc pass
+                // `-lunwind`; cargo-rcc then exposes rust-std's libunwind.a
+                // through an isolated -L path so rustc's musl libc is not used.
+                "link-self-contained=no".into(),
+                "-C".into(),
+                "panic=abort".into(),
+                "-C".into(),
+                "target-feature=+crt-static".into(),
+            ],
+        });
     }
 
-    Ok(TargetPlan {
-        rust_target,
-        profile_id: profile_override
-            .unwrap_or(LINUX_X64_MUSL_PROFILE)
-            .to_owned(),
-        runtime_contract: RUSTC_LINUX_MUSL_V0.to_owned(),
-        rustflags: vec![
-            "-C".into(),
-            // Stable rustc only accepts yes/no here. Component-level values
-            // such as `-crto,-libc` are nightly. `no` makes rustc pass
-            // `-lunwind`; cargo-rcc then exposes rust-std's libunwind.a
-            // through an isolated -L path so rustc's musl libc is not used.
-            "link-self-contained=no".into(),
-            "-C".into(),
-            "panic=abort".into(),
-            "-C".into(),
-            "target-feature=+crt-static".into(),
-        ],
-    })
+    if let Some(profile_id) = windows_profile(&rust_target) {
+        let runtime_contract = if rust_target == WINDOWS_X64_MSVC {
+            NATIVE_RCC_OWNED
+        } else {
+            RUSTC_WINDOWS_V0
+        };
+        return Ok(TargetPlan {
+            rust_target,
+            profile_id: profile_override.unwrap_or(profile_id).to_owned(),
+            runtime_contract: runtime_contract.to_owned(),
+            rustflags: vec!["-C".into(), "panic=abort".into()],
+        });
+    }
+
+    bail!(
+        "cargo-rcc currently supports {LINUX_X64_MUSL}, {LINUX_X64_GNU}, \
+         {LINUX_AARCH64_MUSL}, {LINUX_AARCH64_GNU}, {WINDOWS_X64_GNU}, \
+         {WINDOWS_X64_GNULLVM}, {WINDOWS_AARCH64_GNULLVM}, and {WINDOWS_X64_MSVC}; got {target}"
+    );
+}
+
+fn linux_gnu_profile(rust_target: &str) -> Option<&'static str> {
+    match rust_target {
+        LINUX_X64_GNU => Some(LINUX_X64_GNU_PROFILE),
+        LINUX_AARCH64_GNU => Some(LINUX_AARCH64_GNU_PROFILE),
+        _ => None,
+    }
+}
+
+fn linux_musl_profile(rust_target: &str) -> Option<&'static str> {
+    match rust_target {
+        LINUX_X64_MUSL => Some(LINUX_X64_MUSL_PROFILE),
+        LINUX_AARCH64_MUSL => Some(LINUX_AARCH64_MUSL_PROFILE),
+        _ => None,
+    }
+}
+
+fn windows_profile(rust_target: &str) -> Option<&'static str> {
+    match rust_target {
+        WINDOWS_X64_GNU => Some(WINDOWS_X64_GNU_PROFILE),
+        WINDOWS_X64_GNULLVM => Some(WINDOWS_X64_GNULLVM_PROFILE),
+        WINDOWS_AARCH64_GNULLVM => Some(WINDOWS_AARCH64_GNULLVM_PROFILE),
+        WINDOWS_X64_MSVC => Some(WINDOWS_X64_MSVC_PROFILE),
+        _ => None,
+    }
 }
 
 fn canonical_rust_target(target: &str) -> Result<String> {
@@ -233,15 +290,31 @@ fn canonical_rust_target(target: &str) -> Result<String> {
         "linux-x86_64" | "linux-x64" | LINUX_X64_MUSL | LINUX_X64_MUSL_PROFILE => {
             return Ok(LINUX_X64_MUSL.to_owned());
         }
+        "linux-aarch64-gnu" | "linux-arm64-gnu" | LINUX_AARCH64_GNU | LINUX_AARCH64_GNU_PROFILE => {
+            return Ok(LINUX_AARCH64_GNU.to_owned());
+        }
+        "linux-aarch64" | "linux-arm64" | LINUX_AARCH64_MUSL | LINUX_AARCH64_MUSL_PROFILE => {
+            return Ok(LINUX_AARCH64_MUSL.to_owned());
+        }
+        WINDOWS_X64_GNU | WINDOWS_X64_GNU_PROFILE => return Ok(WINDOWS_X64_GNU.to_owned()),
+        WINDOWS_X64_GNULLVM | WINDOWS_X64_GNULLVM_PROFILE => {
+            return Ok(WINDOWS_X64_GNULLVM.to_owned());
+        }
+        WINDOWS_AARCH64_GNULLVM | WINDOWS_AARCH64_GNULLVM_PROFILE => {
+            return Ok(WINDOWS_AARCH64_GNULLVM.to_owned());
+        }
+        WINDOWS_X64_MSVC | WINDOWS_X64_MSVC_PROFILE => return Ok(WINDOWS_X64_MSVC.to_owned()),
         _ => {}
     }
 
-    if target.strip_prefix("x86_64-unknown-linux-gnu.").is_some() {
+    if target.strip_prefix("x86_64-unknown-linux-gnu.").is_some()
+        || target.strip_prefix("aarch64-unknown-linux-gnu.").is_some()
+    {
         // Zig cargo-zigbuild uses *.gnu.2.17 / *.gnu.2.28 as a glibc floor.
         // That is not a rustc triple. RCC's gnu profile is always 2.17.
         bail!(
             "cargo-rcc uses rustc triples, not Zig glibc suffixes; \
-             got {target}, use {LINUX_X64_GNU}"
+             got {target}, use {LINUX_X64_GNU} or {LINUX_AARCH64_GNU}"
         );
     }
 
@@ -506,8 +579,8 @@ fn apply_rcc_environment(
 
         let unwind_dir = isolate_rustc_unwind(&plan.rust_target, cache_dir)?;
         let mut rustflags = plan.rustflags.clone();
-        if plan.rust_target == LINUX_X64_GNU {
-            let compat_obj = ensure_glibc217_compat(cache_dir, cc)?;
+        if plan.runtime_contract == RUSTC_LINUX_GNU_V0 {
+            let compat_obj = ensure_glibc217_compat(cache_dir, cc, &plan.rust_target)?;
             rustflags.push("-C".into());
             rustflags.push(format!("link-arg={}", compat_obj.display()));
         }
@@ -529,17 +602,18 @@ fn apply_rcc_environment(
     Ok(())
 }
 
-fn ensure_glibc217_compat(cache_dir: Option<&Path>, cc: &str) -> Result<PathBuf> {
+fn ensure_glibc217_compat(
+    cache_dir: Option<&Path>,
+    cc: &str,
+    rust_target: &str,
+) -> Result<PathBuf> {
     const VERSION: &str = "1";
     let source = include_str!("../compat/glibc217_compat.c");
     let root = cache_dir
         .map(Path::to_path_buf)
         .or_else(|| env::var_os("RCC_CACHE_DIR").map(PathBuf::from))
         .unwrap_or_else(|| env::temp_dir().join("rcc-glibc217-compat"));
-    let dir = root
-        .join("glibc217-compat")
-        .join(VERSION)
-        .join(LINUX_X64_GNU);
+    let dir = root.join("glibc217-compat").join(VERSION).join(rust_target);
     fs::create_dir_all(&dir).with_context(|| {
         format!(
             "failed to create glibc 2.17 compat directory {}",
@@ -584,7 +658,7 @@ fn isolate_rustc_unwind(rust_target: &str, cache_dir: Option<&Path>) -> Result<O
     if !libunwind.is_file() {
         // Official gnu rust-std does not ship a self-contained libunwind.a;
         // unwind lives in rustc rlibs. Host and gnu builds skip isolation.
-        if rust_target == LINUX_X64_MUSL {
+        if rust_target.contains("-linux-musl") {
             bail!(
                 "rust-std for {rust_target} is missing {}; run `rustup target add {rust_target}`",
                 libunwind.display()
@@ -705,6 +779,45 @@ mod tests {
     }
 
     #[test]
+    fn maps_linux_aarch64_aliases() {
+        for query in [
+            LINUX_AARCH64_MUSL,
+            LINUX_AARCH64_MUSL_PROFILE,
+            "linux-aarch64",
+            "linux-arm64",
+        ] {
+            let plan = plan_for_rust_target(query, None).unwrap();
+            assert_eq!(plan.rust_target, LINUX_AARCH64_MUSL, "{query}");
+            assert_eq!(plan.profile_id, LINUX_AARCH64_MUSL_PROFILE, "{query}");
+            assert_eq!(plan.runtime_contract, RUSTC_LINUX_MUSL_V0, "{query}");
+        }
+        for query in [
+            LINUX_AARCH64_GNU,
+            LINUX_AARCH64_GNU_PROFILE,
+            "linux-aarch64-gnu",
+            "linux-arm64-gnu",
+        ] {
+            let plan = plan_for_rust_target(query, None).unwrap();
+            assert_eq!(plan.rust_target, LINUX_AARCH64_GNU, "{query}");
+            assert_eq!(plan.profile_id, LINUX_AARCH64_GNU_PROFILE, "{query}");
+            assert_eq!(plan.runtime_contract, RUSTC_LINUX_GNU_V0, "{query}");
+        }
+    }
+
+    #[test]
+    fn plans_windows_triples() {
+        let gnu = plan_for_rust_target(WINDOWS_X64_GNU, None).unwrap();
+        assert_eq!(gnu.profile_id, WINDOWS_X64_GNU_PROFILE);
+        assert_eq!(gnu.runtime_contract, RUSTC_WINDOWS_V0);
+        let gnullvm = plan_for_rust_target(WINDOWS_AARCH64_GNULLVM, None).unwrap();
+        assert_eq!(gnullvm.profile_id, WINDOWS_AARCH64_GNULLVM_PROFILE);
+        assert_eq!(gnullvm.runtime_contract, RUSTC_WINDOWS_V0);
+        let msvc = plan_for_rust_target(WINDOWS_X64_MSVC, None).unwrap();
+        assert_eq!(msvc.profile_id, WINDOWS_X64_MSVC_PROFILE);
+        assert_eq!(msvc.runtime_contract, NATIVE_RCC_OWNED);
+    }
+
+    #[test]
     fn plans_host_macos_without_linux_rustflags() {
         let plan = plan_for_rust_target(HOST_MACOS_AARCH64, None).unwrap();
         assert_eq!(plan.rust_target, HOST_MACOS_AARCH64);
@@ -719,6 +832,7 @@ mod tests {
             "x86_64-unknown-linux-gnu.2.17",
             "x86_64-unknown-linux-gnu.2.28",
             "x86_64-unknown-linux-gnu.2.12",
+            "aarch64-unknown-linux-gnu.2.17",
         ] {
             let error = plan_for_rust_target(query, None).unwrap_err();
             assert!(

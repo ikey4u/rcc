@@ -8,7 +8,7 @@
 
 | Host → Target | Linux | Windows |
 | --- | --- | --- |
-| **macOS** | **已交付** `x86_64` musl-static + gnu-glibc217（C / C++ / `cargo-rcc`）；`aarch64` 未包含 | **未交付** |
+| **macOS** | **已交付** `x86_64` 与 `aarch64` 的 musl-static + gnu-glibc217（C / C++ / `cargo-rcc`） | **已交付** hermetic `windows-x86_64-gnu` / `windows-*-gnullvm`（C / C++ / `cargo-rcc`）；MSVC 尽最大努力（自备 SDK） |
 
 当前唯一能跑的 controller 是 Apple Silicon 上的 Mach-O `rcc`（`aarch64-apple-darwin`）。`rcc targets` 的 `IN_PAYLOAD` 才表示 pack 里真有资源。原生 `macos-aarch64` 是本机编译，不进上表。
 
@@ -19,7 +19,7 @@
 约束：
 
 - `crates/rcc/build.rs` 只接受 `TARGET=aarch64-apple-darwin` 的静态引擎。
-- LLVM 在 macOS 上用 Apple linker 编；引擎含 **AArch64 + X86** backend，LLD 挂了 **Mach-O + ELF**（`bridge.cpp`：`LLD_HAS_DRIVER(macho)` / `elf`），**没有 COFF**。
+- LLVM 在 macOS 上用 Apple linker 编；引擎含 **AArch64 + X86** backend，LLD 挂了 **Mach-O + ELF + COFF/MinGW**（`bridge.cpp`：`LLD_HAS_DRIVER(macho)` / `elf` / `coff` / `mingw`）。
 - 运行时只动态依赖 macOS 的 `libSystem` / `libc++` / `libiconv`，不调用系统 clang、ld、LLVM dylib。
 - Apple SDK **不分发**。`RCC_APPLE_SDK_ROOT` 或本机 `xcrun --sdk macosx --show-sdk-path`。
 - `cargo-rcc` 拒绝非 `aarch64-apple-darwin` host。
@@ -30,10 +30,10 @@
 | --- | --- | --- |
 | `linux-x86_64-musl-static` | `x86_64-unknown-linux-musl` | 静态 PIE；无 `PT_INTERP` / `DT_NEEDED` / `GLIBC_` |
 | `linux-x86_64-gnu-glibc217` | `x86_64-unknown-linux-gnu` | 动态；解释器 CentOS 7；最高 `GLIBC_` ≤ 2.17 |
+| `linux-aarch64-musl-static` | `aarch64-unknown-linux-musl` | 同上 musl 合同 |
+| `linux-aarch64-gnu-glibc217` | `aarch64-unknown-linux-gnu` | 动态；`PT_INTERP=/lib/ld-linux-aarch64.so.1`；最高 `GLIBC_` ≤ 2.17 |
 
-C / C++（预编静态 libc++）和 `cargo rcc`（OpenSSL、SQLite、fat LTO + `-lcap-ng`）已验收。不接受 Zig 的 `.gnu.2.17` 后缀。细节与命令见 [../VERIFY.md](../VERIFY.md) 与 [../plan/IMPL_RCC_MACOS.md](../plan/IMPL_RCC_MACOS.md)。
-
-`linux-aarch64-musl-static` / `linux-aarch64-gnu-glibc217` 只在 registry，payload 无。
+C / C++（预编静态 libc++）和 `cargo rcc`（OpenSSL、SQLite；x86_64 gnu 另有 fat LTO + `-lcap-ng`）已接线。不接受 Zig 的 `.gnu.2.17` 后缀。细节与命令见 [../VERIFY.md](../VERIFY.md)、[../plan/IMPL_RCC_MACOS.md](../plan/IMPL_RCC_MACOS.md)、[../plan/IMPL_RCC_MACOS_CROSS.md](../plan/IMPL_RCC_MACOS_CROSS.md)。以 `rcc targets` 的 `IN_PAYLOAD` 为准。
 
 ### macOS → macOS（部分交付）
 
@@ -44,9 +44,16 @@ C / C++（预编静态 libc++）和 `cargo rcc`（OpenSSL、SQLite、fat LTO + `
 
 引擎已有 X86 backend，缺的是 x86_64 Darwin sysroot/SDK fixture 与验收，不是 CPU backend。
 
-### macOS → Windows（未交付）
+### macOS → Windows（已交付 hermetic gnu / gnullvm）
 
-registry 已有 `windows-x86_64-gnu`、`windows-x86_64-gnullvm`、`windows-aarch64-gnullvm`、`windows-x86_64-msvc`。当前 LLD 未挂 COFF，pack 无 MinGW/UCRT/MSVC 资源。计划：gnu/gnullvm 走 hermetic sysroot；MSVC 尽最大努力，调用方准备 Windows SDK 与 headers/libs（见 [RCC_WINDOWS.md](RCC_WINDOWS.md)）。
+| Profile | Rust triple | 策略 |
+| --- | --- | --- |
+| `windows-x86_64-gnu` | `x86_64-pc-windows-gnu` | MinGW-w64 MSVCRT（C / rustc）+ compiler-rt/libc++ 以 GNU 名称（`libgcc` / `libstdc++`）暴露；C++ 另链 `-lucrt` |
+| `windows-x86_64-gnullvm` | `x86_64-pc-windows-gnullvm` | UCRT + compiler-rt + libunwind + libc++ |
+| `windows-aarch64-gnullvm` | `aarch64-pc-windows-gnullvm` | 同上，aarch64 |
+| `windows-x86_64-msvc` | `x86_64-pc-windows-msvc` | clang-cl + `lld-link`；Windows SDK **不分发**，`RCC_WINDOWS_SDK_ROOT` |
+
+gnu / gnullvm 为 pack 内 hermetic sysroot（`mise run fetch:archives` 拉取 mingw-w64 12.0.0）。MSVC 尽最大努力，没有 SDK 就 fail-closed。`rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` 这类会依赖本机 MinGW 的导入。验收：`mise run verify:windows-gnu` / `verify:windows-gnullvm`。不存在 `windows-aarch64-gnu`。
 
 ## 相关文档
 

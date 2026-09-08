@@ -232,7 +232,8 @@ pub fn prepare_invocation_with_forbidden(
 }
 
 /// cc-rs and OpenSSL restate `--target=` that the profile already injects.
-/// Matching restatements are dropped; a different target remains forbidden.
+/// rustc windows-gnullvm restates `--unwindlib=` / `-rtlib=`. Matching
+/// restatements are dropped; a different value remains forbidden.
 fn strip_user_flags_that_restate_injected(
     user_arguments: &[OsString],
     injected_arguments: &[String],
@@ -245,7 +246,15 @@ fn strip_user_flags_that_restate_injected(
                 .or_else(|| argument.strip_prefix("-target="))
         })
         .collect();
-    if injected_targets.is_empty() {
+    let injected_unwindlib: HashSet<&str> = injected_arguments
+        .iter()
+        .filter_map(|argument| unwindlib_value(argument))
+        .collect();
+    let injected_rtlib: HashSet<&str> = injected_arguments
+        .iter()
+        .filter_map(|argument| rtlib_value(argument))
+        .collect();
+    if injected_targets.is_empty() && injected_unwindlib.is_empty() && injected_rtlib.is_empty() {
         return user_arguments.to_vec();
     }
 
@@ -271,10 +280,34 @@ fn strip_user_flags_that_restate_injected(
                 }
             }
         }
+        if let Some(value) = unwindlib_value(text) {
+            if injected_unwindlib.contains(value) {
+                index += 1;
+                continue;
+            }
+        }
+        if let Some(value) = rtlib_value(text) {
+            if injected_rtlib.contains(value) {
+                index += 1;
+                continue;
+            }
+        }
         stripped.push(current.clone());
         index += 1;
     }
     stripped
+}
+
+fn unwindlib_value(argument: &str) -> Option<&str> {
+    argument
+        .strip_prefix("-unwindlib=")
+        .or_else(|| argument.strip_prefix("--unwindlib="))
+}
+
+fn rtlib_value(argument: &str) -> Option<&str> {
+    argument
+        .strip_prefix("-rtlib=")
+        .or_else(|| argument.strip_prefix("--rtlib="))
 }
 
 pub fn validate_manifest_forbidden_arguments(
@@ -1248,6 +1281,34 @@ mod tests {
         assert!(prepare_invocation(
             &os(&["--target=aarch64-unknown-linux-musl", "-c", "source.c"]),
             &["--target=x86_64-unknown-linux-musl".into()],
+            Path::new("."),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn drops_user_unwindlib_flags_that_match_the_injected_value() {
+        let prepared = prepare_invocation(
+            &os(&["--unwindlib=none", "-c", "source.c"]),
+            &[
+                "--target=x86_64-w64-windows-gnu".into(),
+                "-unwindlib=none".into(),
+            ],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.arguments,
+            os(&[
+                "--target=x86_64-w64-windows-gnu",
+                "-unwindlib=none",
+                "-c",
+                "source.c"
+            ])
+        );
+        assert!(prepare_invocation(
+            &os(&["--unwindlib=libgcc", "-c", "source.c"]),
+            &["-unwindlib=none".into()],
             Path::new("."),
         )
         .is_err());
