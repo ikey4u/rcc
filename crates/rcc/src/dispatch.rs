@@ -1,5 +1,6 @@
 use crate::engine;
 use anyhow::{bail, Context, Result};
+use rcc_core::cross_bin::{tool_kind_from_multicall_name, CROSS_BIN_DIR};
 use rcc_core::digest::file_sha256;
 use rcc_core::layout::{launcher_path as bound_launcher_path, validate_view_binding};
 use rcc_core::policy::{
@@ -25,9 +26,7 @@ pub fn try_run_from_environment() -> Option<Result<i32>> {
     let mut arguments = env::args_os();
     let argv0 = arguments.next()?;
     let path = PathBuf::from(&argv0);
-    if !path.is_absolute()
-        || path.parent().and_then(Path::file_name) != Some(OsStr::new("launchers"))
-    {
+    if !path.is_absolute() || !is_bound_launcher_directory(path.parent()) {
         return None;
     }
     Some(execute_bound_launcher(
@@ -59,7 +58,7 @@ fn execute_bound_launcher(launcher_path: &Path, user_arguments: &[OsString]) -> 
 }
 
 fn set_hermetic_path(root: &Path) -> Result<()> {
-    let safe_path = env::join_paths([root.join("launchers")])
+    let safe_path = env::join_paths([root.join(CROSS_BIN_DIR), root.join("launchers")])
         .context("failed to construct hermetic static-engine PATH")?;
     env::set_var("PATH", safe_path);
     Ok(())
@@ -82,23 +81,24 @@ fn tool_kind_from_launcher(path: &Path) -> Result<ToolKind> {
     } else {
         file_name
     };
-    match file_name.to_ascii_lowercase().as_str() {
-        "cc" | "clang" => Ok(ToolKind::Cc),
-        "c++" | "cxx" | "clang++" => Ok(ToolKind::Cxx),
-        "linker" | "ld" | "ld.lld" | "ld64.lld" | "lld-link" | "link" => Ok(ToolKind::Linker),
-        "ar" | "llvm-ar" => Ok(ToolKind::Ar),
-        "ranlib" | "llvm-ranlib" => Ok(ToolKind::Ranlib),
-        _ => bail!("unsupported static multicall name {file_name}"),
-    }
+    tool_kind_from_multicall_name(file_name)
+        .ok_or_else(|| anyhow::anyhow!("unsupported static multicall name {file_name}"))
+}
+
+fn is_bound_launcher_directory(parent: Option<&Path>) -> bool {
+    matches!(
+        parent.and_then(Path::file_name).and_then(OsStr::to_str),
+        Some("launchers" | "cross-bin")
+    )
 }
 
 fn load_bound_manifest(launcher_path: &Path) -> Result<(ViewManifest, PathBuf)> {
     let launcher_directory = launcher_path
         .parent()
         .with_context(|| format!("launcher has no parent: {}", launcher_path.display()))?;
-    if launcher_directory.file_name() != Some(OsStr::new("launchers")) {
+    if !is_bound_launcher_directory(Some(launcher_directory)) {
         bail!(
-            "launcher must be inside a launchers directory: {}",
+            "launcher must be inside a launchers or cross-bin directory: {}",
             launcher_path.display()
         );
     }
@@ -171,11 +171,18 @@ fn validate_bound_entry(
         .with_context(|| format!("failed to resolve launcher {}", launcher_path.display()))?;
     let declared = fs::canonicalize(declared)
         .with_context(|| format!("failed to resolve bound tool {}", declared.display()))?;
-    if actual != declared || !actual.starts_with(root) {
+    if !actual.starts_with(root) {
         bail!(
-            "launcher {} does not match its manifest binding {}",
+            "launcher {} is outside view root {}",
             actual.display(),
-            declared.display()
+            root.display()
+        );
+    }
+    if !declared.starts_with(root) {
+        bail!(
+            "bound tool {} is outside view root {}",
+            declared.display(),
+            root.display()
         );
     }
     let metadata = fs::symlink_metadata(&actual)?;
@@ -183,8 +190,10 @@ fn validate_bound_entry(
         bail!("bound launcher is not a regular file: {}", actual.display());
     }
     let actual_digest = file_sha256(&actual)?;
+    let declared_digest = file_sha256(&declared)?;
     if !actual_digest.eq_ignore_ascii_case(&tool.sha256)
         || !actual_digest.eq_ignore_ascii_case(&manifest.controller_sha256)
+        || !declared_digest.eq_ignore_ascii_case(&manifest.controller_sha256)
     {
         bail!(
             "controller digest mismatch for {}: expected {}, got {}",
@@ -588,14 +597,8 @@ fn tool_kind_from_program_query(name: &str) -> Result<ToolKind> {
         .and_then(OsStr::to_str)
         .context("queried program name must be UTF-8")?;
     let base = base.strip_suffix(".exe").unwrap_or(base);
-    match base {
-        "cc" | "gcc" | "clang" => Ok(ToolKind::Cc),
-        "c++" | "g++" | "clang++" | "cxx" => Ok(ToolKind::Cxx),
-        "ld" | "ld.lld" | "ld64.lld" | "lld" | "lld-link" | "link" => Ok(ToolKind::Linker),
-        "ar" | "llvm-ar" => Ok(ToolKind::Ar),
-        "ranlib" | "llvm-ranlib" => Ok(ToolKind::Ranlib),
-        _ => bail!("unsupported program query {name}"),
-    }
+    tool_kind_from_multicall_name(base)
+        .ok_or_else(|| anyhow::anyhow!("unsupported program query {name}"))
 }
 
 fn resolve_query_file(manifest: &ViewManifest, root: &Path, name: &str) -> Result<PathBuf> {
@@ -661,7 +664,33 @@ mod tests {
             tool_kind_from_launcher(Path::new("/view/launchers/ld64.lld")).unwrap(),
             ToolKind::Linker
         );
-        assert!(tool_kind_from_launcher(Path::new("/view/launchers/objcopy")).is_err());
+        assert_eq!(
+            tool_kind_from_launcher(Path::new("/view/cross-bin/x86_64-unknown-linux-gnu-gcc"))
+                .unwrap(),
+            ToolKind::Cc
+        );
+        assert_eq!(
+            tool_kind_from_launcher(Path::new("/view/cross-bin/ranlib")).unwrap(),
+            ToolKind::Ranlib
+        );
+        assert_eq!(
+            tool_kind_from_launcher(Path::new("/view/cross-bin/x86_64-linux-gnu-as")).unwrap(),
+            ToolKind::Cc
+        );
+        assert_eq!(
+            tool_kind_from_launcher(Path::new("/view/launchers/objcopy")).unwrap(),
+            ToolKind::Objcopy
+        );
+        assert!(tool_kind_from_launcher(Path::new("/view/launchers/unknown-tool")).is_err());
+        assert!(is_bound_launcher_directory(Some(Path::new(
+            "/view/cross-bin"
+        ))));
+        assert!(is_bound_launcher_directory(Some(Path::new(
+            "/view/launchers"
+        ))));
+        assert!(!is_bound_launcher_directory(Some(Path::new(
+            "/opt/rcc/bin"
+        ))));
     }
 
     #[test]
@@ -670,6 +699,10 @@ mod tests {
         assert_ne!(
             path.parent().and_then(Path::file_name),
             Some(OsStr::new("launchers"))
+        );
+        assert_ne!(
+            path.parent().and_then(Path::file_name),
+            Some(OsStr::new(CROSS_BIN_DIR))
         );
     }
 

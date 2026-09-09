@@ -559,6 +559,15 @@ fn verify_directory_contents(
         }
         verify_executable(&metadata, file.executable, &file.path)?;
     }
+    for path in extra_files {
+        let full = root.join(path_from_archive(path));
+        let metadata = fs::symlink_metadata(&full)
+            .with_context(|| format!("view is missing extra file {path}"))?;
+        ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "view extra entry is not a regular file: {path}"
+        );
+    }
     Ok(())
 }
 

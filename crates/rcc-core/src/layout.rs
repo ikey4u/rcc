@@ -448,6 +448,8 @@ fn ensure_resource_only_pack(files: &[PackFile]) -> Result<()> {
                 && !file.path.starts_with("bin/")
                 && file.path != "launchers"
                 && !file.path.starts_with("launchers/")
+                && file.path != crate::CROSS_BIN_DIR
+                && !file.path.starts_with(&format!("{}/", crate::CROSS_BIN_DIR))
                 && file.path != "view.json"
                 && !file.path.starts_with("view.json/")
                 && file.path != "toolchain.cmake"

@@ -652,7 +652,26 @@ fn apply_rcc_environment(
     }
     cargo.env_remove("CARGO_ENCODED_RUSTFLAGS");
     cargo.env_remove("RUSTFLAGS");
+    if let Some(cross_bin) = manifest.variables.get("RCC_TARGET_CROSS_BIN") {
+        prepend_dir_to_path(cargo, cross_bin);
+    }
     Ok(())
+}
+
+fn prepend_dir_to_path(cargo: &mut Command, directory: &str) {
+    cargo.env(
+        "PATH",
+        join_path_prepend(directory, env::var_os("PATH").as_deref()),
+    );
+}
+
+fn join_path_prepend(directory: &str, existing: Option<&OsStr>) -> OsString {
+    let mut joined = OsString::from(directory);
+    joined.push(if cfg!(windows) { ";" } else { ":" });
+    if let Some(existing) = existing {
+        joined.push(existing);
+    }
+    joined
 }
 
 fn rustc_sdkroot_for_apple_targets<'a>(
@@ -959,6 +978,17 @@ mod tests {
             joined[0],
             OsString::from(format!("--target={LINUX_X64_GNU}"))
         );
+    }
+
+    #[test]
+    fn prepends_cross_bin_ahead_of_existing_path() {
+        let joined = join_path_prepend("/view/cross-bin", Some(OsStr::new("/usr/bin")));
+        let expected = if cfg!(windows) {
+            OsString::from("/view/cross-bin;/usr/bin")
+        } else {
+            OsString::from("/view/cross-bin:/usr/bin")
+        };
+        assert_eq!(joined, expected);
     }
 
     #[test]

@@ -340,6 +340,10 @@ impl EnvironmentManifest {
                 writeln!(output, "export {name}={}", quote_sh(value)).expect("writing to String");
             }
         }
+        if let Some(cross_bin) = self.variables.get("RCC_TARGET_CROSS_BIN") {
+            writeln!(output, "export PATH={}:\"$PATH\"", quote_sh(cross_bin))
+                .expect("writing to String");
+        }
         Ok(output)
     }
 
@@ -360,6 +364,14 @@ impl EnvironmentManifest {
                 "[System.Environment]::SetEnvironmentVariable({}, {}, [System.EnvironmentVariableTarget]::Process)",
                 quote_pwsh(name),
                 quote_pwsh(value)
+            )
+            .expect("writing to String");
+        }
+        if let Some(cross_bin) = self.variables.get("RCC_TARGET_CROSS_BIN") {
+            writeln!(
+                output,
+                "$env:Path = {} + [IO.Path]::PathSeparator + $env:Path",
+                quote_pwsh(cross_bin)
             )
             .expect("writing to String");
         }
@@ -613,6 +625,9 @@ fn insert_context_variables(
         ("CXX", ToolKind::Cxx),
         ("AR", ToolKind::Ar),
         ("RANLIB", ToolKind::Ranlib),
+        ("NM", ToolKind::Nm),
+        ("STRIP", ToolKind::Strip),
+        ("OBJCOPY", ToolKind::Objcopy),
     ] {
         let Some(tool) = context.tool(kind) else {
             continue;
@@ -631,6 +646,27 @@ fn insert_context_variables(
             variables,
             format!("{role_name}_{prefix}"),
             tool.path.clone(),
+        )?;
+        // Autotools, CMake, and Make read unprefixed CC/AR/RANLIB. Host vs
+        // target stay distinct via HOST_* / TARGET_* ; only the target fills
+        // the unprefixed names used by `./configure --host=`.
+        if role_name == "TARGET" {
+            insert_variable(variables, prefix.to_string(), tool.path.clone())?;
+        }
+    }
+    if role_name == "TARGET" {
+        insert_variable(
+            variables,
+            "RCC_TARGET_CROSS_BIN".into(),
+            join_path(&context.root, crate::CROSS_BIN_DIR),
+        )?;
+        insert_variable(
+            variables,
+            "CROSS_COMPILE".into(),
+            format!(
+                "{}-",
+                crate::cross_bin::primary_gnu_prefix(&context.target_triple, &context.clang_target)
+            ),
         )?;
     }
     if let Some(linker) = context.tool(ToolKind::Linker) {
@@ -1059,6 +1095,23 @@ mod tests {
             manifest.variables["CMAKE_TOOLCHAIN_FILE"],
             join_path(&target.root, CMAKE_TOOLCHAIN_FILE_NAME)
         );
+        assert_eq!(
+            manifest.variables["AR"],
+            join_path(&target.root, "launchers/ar")
+        );
+        assert_eq!(
+            manifest.variables["RANLIB"],
+            join_path(&target.root, "launchers/ranlib")
+        );
+        assert_eq!(
+            manifest.variables["RCC_TARGET_CROSS_BIN"],
+            join_path(&target.root, crate::CROSS_BIN_DIR)
+        );
+        assert_eq!(
+            manifest.variables["CC"],
+            join_path(&target.root, "launchers/cc")
+        );
+        assert_eq!(manifest.variables["CROSS_COMPILE"], "aarch64-linux-gnu-");
     }
 
     #[test]
@@ -1146,6 +1199,11 @@ mod tests {
         assert!(!sh.contains("export CC_aarch64-unknown-linux-gnu="));
         assert!(sh.contains("unset CPATH"));
         assert!(sh.contains("unset LIBRARY_PATH"));
+        assert!(sh.contains(&format!(
+            "export PATH={}:\"$PATH\"",
+            quote_sh(&join_path(&target.root, crate::CROSS_BIN_DIR))
+        )));
+        assert!(sh.contains("export CROSS_COMPILE='aarch64-linux-gnu-'"));
         let pwsh = manifest.render_pwsh().unwrap();
         assert!(pwsh.contains("'CC_aarch64-unknown-linux-gnu'"));
         assert!(pwsh.contains(&quote_pwsh(&join_path(&target.root, "launchers/cc"))));

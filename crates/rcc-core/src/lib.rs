@@ -1,5 +1,6 @@
 pub mod artifact;
 pub mod contracts;
+pub mod cross_bin;
 pub mod digest;
 pub mod environment;
 pub mod layout;
@@ -12,6 +13,7 @@ pub mod view;
 pub use contracts::{
     NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0, RUSTC_MACOS_V0, RUSTC_WINDOWS_V0,
 };
+pub use cross_bin::CROSS_BIN_DIR;
 pub use environment::{
     EnvironmentContext, EnvironmentError, EnvironmentFormat, EnvironmentManifest, EnvironmentRole,
     EnvironmentTool, CMAKE_TOOLCHAIN_FILE_NAME, ENVIRONMENT_SCHEMA_VERSION,

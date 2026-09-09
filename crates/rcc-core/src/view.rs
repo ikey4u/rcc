@@ -454,6 +454,7 @@ impl ViewMaterializer {
             "pack changed while the view was being materialized"
         );
         create_launcher_aliases(&temporary, controller, view_manifest)?;
+        create_cross_bin_aliases(&temporary, controller, view_manifest)?;
         write_view_manifest(&temporary, view_manifest)?;
         write_cmake_toolchain(&temporary, view_manifest)?;
         validate_materialized_view(&temporary, &pack.manifest, controller, view_manifest)?;
@@ -523,6 +524,8 @@ fn ensure_resource_pack_paths(files: &[crate::schema::PackFile]) -> Result<()> {
                 && !file.path.starts_with("bin/")
                 && file.path != "launchers"
                 && !file.path.starts_with("launchers/")
+                && file.path != crate::CROSS_BIN_DIR
+                && !file.path.starts_with(&format!("{}/", crate::CROSS_BIN_DIR))
                 && file.path != VIEW_MANIFEST_FILE
                 && !file.path.starts_with(&format!("{VIEW_MANIFEST_FILE}/"))
                 && file.path != CMAKE_TOOLCHAIN_FILE_NAME
@@ -590,6 +593,39 @@ fn create_launcher_aliases(
         })?;
         let metadata = fs::symlink_metadata(&alias)
             .with_context(|| format!("failed to inspect launcher alias {}", alias.display()))?;
+        ensure_cached_executable_mode(&metadata, &alias)?;
+        verify_controller_alias(&alias, controller)?;
+    }
+    Ok(())
+}
+
+fn create_cross_bin_aliases(
+    root: &Path,
+    controller: &ControllerExecutable,
+    view: &ViewManifest,
+) -> Result<()> {
+    let paths = crate::cross_bin::relative_paths(view);
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let directory = root.join(crate::CROSS_BIN_DIR);
+    fs::create_dir(&directory).with_context(|| {
+        format!(
+            "failed to create cross-bin directory {}",
+            directory.display()
+        )
+    })?;
+    for relative in paths {
+        let alias = root.join(&relative);
+        fs::hard_link(&controller.path, &alias).with_context(|| {
+            format!(
+                "failed to hardlink controller {} as {}",
+                controller.path.display(),
+                alias.display()
+            )
+        })?;
+        let metadata = fs::symlink_metadata(&alias)
+            .with_context(|| format!("failed to inspect cross-bin alias {}", alias.display()))?;
         ensure_cached_executable_mode(&metadata, &alias)?;
         verify_controller_alias(&alias, controller)?;
     }
@@ -744,6 +780,7 @@ fn validate_materialized_view(
         CMAKE_TOOLCHAIN_FILE_NAME.to_owned(),
     ];
     extra_files.extend(launcher_relative_paths(expected_view)?);
+    extra_files.extend(crate::cross_bin::relative_paths(expected_view));
     let extra_file_refs = extra_files.iter().map(String::as_str).collect::<Vec<_>>();
     verify_directory_metadata_with_extras(pack_manifest, actual_root, &extra_file_refs)?;
     let manifest_path = actual_root.join(VIEW_MANIFEST_FILE);
@@ -1133,6 +1170,13 @@ mod tests {
             .unwrap();
         assert!(!first.reused);
         assert!(first.manifest_path.is_file());
+        for relative in crate::cross_bin::relative_paths(&fixture.view) {
+            assert!(
+                first.root.join(&relative).is_file(),
+                "missing GNU cross alias {relative}"
+            );
+        }
+        assert!(!first.root.join("cross-bin/gcc").exists());
         assert_eq!(
             fs::read_to_string(first.root.join(CMAKE_TOOLCHAIN_FILE_NAME)).unwrap(),
             EnvironmentManifest::render_view_cmake(&fixture.view).unwrap()
