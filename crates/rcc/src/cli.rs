@@ -755,7 +755,10 @@ fn verify_cached_view(cache_root: &Path, manifest_path: &Path) -> Result<()> {
 }
 
 fn generated_view_files(manifest: &ViewManifest) -> Vec<String> {
-    let mut files = vec!["view.json".to_owned()];
+    let mut files = vec![
+        "view.json".to_owned(),
+        rcc_core::environment::CMAKE_TOOLCHAIN_FILE_NAME.to_owned(),
+    ];
     let root = Path::new(&manifest.root);
     files.extend(manifest.tools.values().map(|tool| {
         Path::new(&tool.path)

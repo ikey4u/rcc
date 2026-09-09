@@ -219,6 +219,7 @@ pub fn prepare_invocation_with_forbidden(
         });
     }
 
+    let expanded = strip_profile_owned_driver_flags(&expanded);
     let expanded = strip_user_flags_that_restate_injected(&expanded, injected_arguments);
     // rustc 1.90+ on GNU hosts injects `-B rustlib/.../gcc-ld -fuse-ld=lld`.
     // RCC already binds LLD; drop the rustc self-contained linker prefix.
@@ -232,6 +233,31 @@ pub fn prepare_invocation_with_forbidden(
         arguments,
         query: None,
     })
+}
+
+/// Architecture and Apple SDK sysroot are profile-owned. The launcher injects
+/// `--target` / `--sysroot`; user `-arch` and `-isysroot` (CMake, cc-rs, and
+/// Darwin host defaults) are never forwarded.
+fn strip_profile_owned_driver_flags(user_arguments: &[OsString]) -> Vec<OsString> {
+    let mut stripped = Vec::with_capacity(user_arguments.len());
+    let mut index = 0usize;
+    while index < user_arguments.len() {
+        let text = user_arguments[index].to_str().unwrap_or("");
+        if text == "-arch" || text == "-isysroot" {
+            index += 1;
+            if index < user_arguments.len() {
+                index += 1;
+            }
+            continue;
+        }
+        if text.starts_with("-arch=") || text.starts_with("-isysroot") {
+            index += 1;
+            continue;
+        }
+        stripped.push(user_arguments[index].clone());
+        index += 1;
+    }
+    stripped
 }
 
 /// cc-rs and OpenSSL restate `--target=` that the profile already injects.
@@ -262,10 +288,6 @@ fn strip_user_flags_that_restate_injected(
         .filter_map(|argument| argument.strip_prefix("-mmacosx-version-min="))
         .map(normalize_dotted_version)
         .collect();
-    let injected_darwin_arch: HashSet<&str> = injected_arguments
-        .iter()
-        .filter_map(|argument| darwin_arch_from_target(argument))
-        .collect();
     let injected_sysroots: HashSet<String> = injected_arguments
         .iter()
         .filter_map(|argument| sysroot_value(argument))
@@ -275,7 +297,6 @@ fn strip_user_flags_that_restate_injected(
         && injected_unwindlib.is_empty()
         && injected_rtlib.is_empty()
         && injected_macos_min.is_empty()
-        && injected_darwin_arch.is_empty()
         && injected_sysroots.is_empty()
     {
         return user_arguments.to_vec();
@@ -320,17 +341,6 @@ fn strip_user_flags_that_restate_injected(
             // restates 10.7; that must not override or fail the profile floor.
             index += 1;
             continue;
-        }
-        if text == "-arch" {
-            if let Some(arch) = user_arguments
-                .get(index + 1)
-                .and_then(|argument| argument.to_str())
-            {
-                if injected_darwin_arch.contains(arch) {
-                    index += 2;
-                    continue;
-                }
-            }
         }
         if let Some(sysroot) = sysroot_value(text) {
             if injected_sysroots.contains(&normalize_sysroot_path(sysroot)) {
@@ -415,19 +425,6 @@ fn darwin_clang_target_family(target: &str) -> Option<(&'static str, &'static st
         }
     }
     None
-}
-
-fn darwin_arch_from_target(argument: &str) -> Option<&'static str> {
-    let target = argument
-        .strip_prefix("--target=")
-        .or_else(|| argument.strip_prefix("-target="))?;
-    if target.starts_with("aarch64-apple-") {
-        Some("arm64")
-    } else if target.starts_with("x86_64-apple-") {
-        Some("x86_64")
-    } else {
-        None
-    }
 }
 
 fn normalize_dotted_version(value: &str) -> String {
@@ -522,6 +519,24 @@ pub fn validate_manifest_forbidden_arguments(
             index += 1;
             continue;
         }
+        if argument == "-Xclang" {
+            let forwarded = arguments
+                .get(index + 1)
+                .context("-Xclang requires an argument")?;
+            reject_if_manifest_forbidden(option_text(forwarded)?, forbidden_arguments)?;
+            index += 2;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Xclang=") {
+            reject_if_manifest_forbidden(forwarded, forbidden_arguments)?;
+            index += 1;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Xclang ") {
+            reject_if_manifest_forbidden(forwarded, forbidden_arguments)?;
+            index += 1;
+            continue;
+        }
         if linker_mode {
             reject_if_manifest_forbidden(argument, forbidden_arguments)?;
         } else if let Some(clang_argument) = strip_ascii_case_prefix(argument, "/clang:") {
@@ -566,6 +581,25 @@ pub fn validate_forbidden_path_arguments(
         if argument.eq_ignore_ascii_case("/link") {
             linker_mode = true;
             index += 1;
+            continue;
+        }
+        if let Some((payload, after)) = take_clang_forward(arguments, index)? {
+            let next_payload = match take_clang_forward(arguments, after)? {
+                Some((payload, _)) => Some(payload),
+                None => None,
+            };
+            if let Some((path, uses_next)) = include_path_option(payload, next_payload)? {
+                reject_forbidden_path(&path, forbidden_roots, working_directory)?;
+                index = if uses_next {
+                    take_clang_forward(arguments, after)?
+                        .map(|(_, end)| end)
+                        .context("forwarded Clang include path is missing its value")?
+                } else {
+                    after
+                };
+            } else {
+                index = after;
+            }
             continue;
         }
         if argument == "-Xlinker" {
@@ -639,21 +673,61 @@ fn forwarded_path_needs_value(argument: &str) -> bool {
     matches!(argument, "-L" | "--library-path")
 }
 
-fn driver_search_path(argument: &str, next: Option<&OsString>) -> Result<Option<(String, bool)>> {
-    for option in [
-        "-I",
-        "-L",
-        "-F",
-        "-isystem",
-        "-iquote",
-        "-idirafter",
-        "-iframework",
-    ] {
-        if argument == option {
-            let value = next
-                .context("search-path option requires an argument")?
-                .to_str()
-                .context("search paths must be valid UTF-8")?;
+/// Longest-first include/library path options, including cc1 aliases of
+/// driver `-I` / `-isystem`.
+const INCLUDE_PATH_OPTIONS: &[&str] = &[
+    "-internal-externc-isystem",
+    "-internal-isystem",
+    "-iframeworkwithsysroot",
+    "-iwithprefixbefore",
+    "-iwithprefix",
+    "-iwithsysroot",
+    "-isystem-after",
+    "-idirafter",
+    "-iframework",
+    "-isystem",
+    "-iquote",
+    "-include-pch",
+    "-chain-include",
+    "-imacros",
+    "-include",
+    "-iprefix",
+    "--library-path",
+    "-I",
+    "-L",
+    "-F",
+];
+
+fn take_clang_forward<'a>(
+    arguments: &'a [OsString],
+    index: usize,
+) -> Result<Option<(&'a str, usize)>> {
+    if index >= arguments.len() {
+        return Ok(None);
+    }
+    let argument = option_text(&arguments[index])?;
+    if argument == "-Xclang" {
+        let payload = arguments
+            .get(index + 1)
+            .context("-Xclang requires an argument")?;
+        return Ok(Some((option_text(payload)?, index + 2)));
+    }
+    if let Some(payload) = argument.strip_prefix("-Xclang=") {
+        return Ok(Some((payload, index + 1)));
+    }
+    if let Some(payload) = argument.strip_prefix("-Xclang ") {
+        return Ok(Some((payload, index + 1)));
+    }
+    if let Some(payload) = strip_ascii_case_prefix(argument, "/clang:") {
+        return Ok(Some((payload, index + 1)));
+    }
+    Ok(None)
+}
+
+fn include_path_option(argument: &str, next: Option<&str>) -> Result<Option<(String, bool)>> {
+    for option in INCLUDE_PATH_OPTIONS {
+        if argument == *option {
+            let value = next.context("include path option requires an argument")?;
             return Ok(Some((value.to_owned(), true)));
         }
         if let Some(value) = argument
@@ -663,18 +737,19 @@ fn driver_search_path(argument: &str, next: Option<&OsString>) -> Result<Option<
             return Ok(Some((value.to_owned(), false)));
         }
     }
-    if argument == "--library-path" {
-        let value = next
-            .context("--library-path requires an argument")?
-            .to_str()
-            .context("search paths must be valid UTF-8")?;
-        return Ok(Some((value.to_owned(), true)));
+    Ok(None)
+}
+
+fn driver_search_path(argument: &str, next: Option<&OsString>) -> Result<Option<(String, bool)>> {
+    let next = match next {
+        Some(value) => Some(option_text(value)?),
+        None => None,
+    };
+    if let Some(found) = include_path_option(argument, next)? {
+        return Ok(Some(found));
     }
     if argument.eq_ignore_ascii_case("/I") {
-        let value = next
-            .context("/I requires an argument")?
-            .to_str()
-            .context("search paths must be valid UTF-8")?;
+        let value = next.context("/I requires an argument")?;
         return Ok(Some((value.to_owned(), true)));
     }
     if let Some(value) = strip_ascii_case_prefix(argument, "/external:I") {
@@ -924,6 +999,16 @@ fn reject_forwarded_response_files(arguments: &[OsString]) -> Result<()> {
                 .is_some_and(|values| values.split(',').any(|value| value.starts_with('@')))
             || strip_ascii_case_prefix(argument, "/clang:")
                 .is_some_and(|value| value.starts_with('@'))
+            || argument
+                .strip_prefix("-Xclang=")
+                .is_some_and(|value| value.starts_with('@'))
+            || argument
+                .strip_prefix("-Xclang ")
+                .is_some_and(|value| value.starts_with('@'))
+            || (argument == "-Xclang"
+                && arguments
+                    .get(index + 1)
+                    .is_some_and(|value| value.to_string_lossy().starts_with('@')))
         {
             bail!("nested linker response files must not bypass RCC response-file validation");
         }
@@ -1033,21 +1118,27 @@ pub fn validate_user_arguments(arguments: &[OsString]) -> Result<()> {
             index += 1;
             continue;
         }
+        if argument == "-Xclang" {
+            let forwarded = arguments
+                .get(index + 1)
+                .context("-Xclang requires an argument")?;
+            validate_forwarded_clang_argument(option_text(forwarded)?)?;
+            index += 2;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Xclang=") {
+            validate_forwarded_clang_argument(forwarded)?;
+            index += 1;
+            continue;
+        }
+        if let Some(forwarded) = argument.strip_prefix("-Xclang ") {
+            // CMake `SHELL:-Xclang <flag>` may arrive as one argv token.
+            validate_forwarded_clang_argument(forwarded)?;
+            index += 1;
+            continue;
+        }
         if let Some(clang_argument) = strip_ascii_case_prefix(argument, "/clang:") {
-            if clang_argument == "-Xlinker"
-                || clang_argument.starts_with("-Xlinker=")
-                || clang_argument.starts_with("-Wl,")
-            {
-                bail!(
-                    "linker forwarding through /clang: is unsupported; use validated /link arguments"
-                );
-            }
-            if is_driver_search_option(clang_argument) {
-                bail!(
-                    "search-path forwarding through /clang: is unsupported; use a directly validated include or library option"
-                );
-            }
-            validate_single_driver_argument(clang_argument)?;
+            validate_forwarded_clang_argument(clang_argument)?;
             index += 1;
             continue;
         }
@@ -1058,19 +1149,59 @@ pub fn validate_user_arguments(arguments: &[OsString]) -> Result<()> {
     Ok(())
 }
 
-fn is_driver_search_option(argument: &str) -> bool {
-    [
-        "-I",
-        "-L",
-        "-F",
-        "-isystem",
-        "-iquote",
-        "-idirafter",
-        "-iframework",
-        "--library-path",
-    ]
-    .iter()
-    .any(|option| argument == *option || argument.starts_with(option))
+/// `-Xclang` and `/clang:` are frontend/driver forwarding prefixes. Codegen and
+/// warning flags pass through; sysroot, plugin, and toolchain overrides still
+/// fail closed. Include-search flags are quoted argv and go through the same
+/// forbidden-root checks as driver `-I`.
+fn validate_forwarded_clang_argument(clang_argument: &str) -> Result<()> {
+    if clang_argument == "-Xlinker"
+        || clang_argument.starts_with("-Xlinker=")
+        || clang_argument.starts_with("-Wl,")
+    {
+        bail!(
+            "linker forwarding through Clang frontend options is unsupported; use validated linker arguments"
+        );
+    }
+    if is_cc1_toolchain_escape(clang_argument) {
+        bail!(
+            "toolchain, plugin, or extra-input forwarding through Clang frontend options is unsupported"
+        );
+    }
+    validate_single_driver_argument(clang_argument)
+}
+
+/// cc1 spellings of driver-forbidden toolchain categories. Include-search
+/// flags (`-I`, `-isystem`, `-internal-isystem`, …) are not listed: they use
+/// the same forbidden-root checks as driver `-I`.
+fn is_cc1_toolchain_escape(argument: &str) -> bool {
+    const TARGET: &[&str] = &[
+        "-triple",
+        "-aux-triple",
+        "-darwin-target-variant-triple",
+        "-target-abi",
+    ];
+    const PLUGIN: &[&str] = &["-load", "-load-plugin", "-add-plugin", "-plugin"];
+    const EXTRA_INPUT: &[&str] = &[
+        "-ivfsoverlay",
+        "-fmodules-cache-path",
+        "-mlink-bitcode-file",
+        "-mlink-builtin-bitcode",
+    ];
+    TARGET
+        .iter()
+        .chain(PLUGIN.iter())
+        .any(|name| option_matches(argument, name))
+        || EXTRA_INPUT.iter().any(|name| argument.starts_with(name))
+        || argument.starts_with("-plugin-arg-")
+        || argument.starts_with("-fmodule-map-file")
+        || argument.starts_with("-fmodule-file")
+}
+
+fn option_matches(argument: &str, name: &str) -> bool {
+    argument == name
+        || argument
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('='))
 }
 
 fn option_text(argument: &OsStr) -> Result<&str> {
@@ -1326,7 +1457,14 @@ mod tests {
             os(&["/clang:-Xlinker=--plugin=/tmp/evil.so"]),
             os(&["-Wp,-I/usr/include"]),
             os(&["-Xpreprocessor", "-I/usr/include"]),
-            os(&["/clang:-I/usr/include"]),
+            os(&["-Xclang", "--sysroot=/host"]),
+            os(&["-Xclang", "-load"]),
+            os(&["-Xclang", "-triple=x86_64-unknown-linux-gnu"]),
+            os(&["-Xclang", "-aux-triple=x86_64-unknown-linux-gnu"]),
+            os(&["-Xclang", "-mlink-bitcode-file"]),
+            os(&["-Xclang", "-fmodules-cache-path=/tmp/modules"]),
+            os(&["-Xclang", "-ivfsoverlay"]),
+            os(&["-Xclang=--target=evil"]),
             os(&["/link", "/machine:arm64"]),
             os(&["-stdlib=libstdc++"]),
             os(&["-rtlib=libgcc"]),
@@ -1369,6 +1507,8 @@ mod tests {
             os(&["-Xlinker", "-nostdlib"]),
             os(&["/link", "-nostdlib"]),
             os(&["/clang:-nostdlib"]),
+            os(&["-Xclang", "-nostdlib"]),
+            os(&["-Xclang=-nostdlib"]),
         ] {
             assert!(
                 validate_manifest_forbidden_arguments(&arguments, &forbidden).is_err(),
@@ -1385,11 +1525,14 @@ mod tests {
         fs::create_dir_all(host_root.join("lib")).unwrap();
         let forbidden = vec![host_root.to_string_lossy().into_owned()];
         let include = format!("-I{}", host_root.join("include").display());
+        let host_include = host_root.join("include").to_string_lossy().into_owned();
         let library = host_root.join("lib").to_string_lossy().into_owned();
         let joined_library = format!("-L{library}");
         let forwarded_library = format!("-Wl,-L,{library}");
         let xlinker_library = format!("-Xlinker={library}");
         let msvc_library = format!("/libpath:{library}");
+        let xclang_joined = format!("-Xclang=-I{host_include}");
+        let clang_joined = format!("/clang:-I{host_include}");
 
         for arguments in [
             os(&[&include]),
@@ -1399,6 +1542,11 @@ mod tests {
             os(&["-Xlinker", "-L", "-Xlinker", &library]),
             os(&["-Xlinker=-L", &xlinker_library]),
             os(&["/link", &msvc_library]),
+            os(&["-Xclang", &include]),
+            os(&[&xclang_joined]),
+            os(&[&clang_joined]),
+            os(&["-Xclang", "-I", "-Xclang", &host_include]),
+            os(&["-Xclang", "-internal-isystem", "-Xclang", &host_include]),
         ] {
             assert!(
                 validate_forbidden_path_arguments(&arguments, &forbidden, directory.path())
@@ -1408,7 +1556,14 @@ mod tests {
         }
 
         validate_forbidden_path_arguments(
-            &os(&["-Iworkspace/include", "-Lworkspace/lib"]),
+            &os(&[
+                "-Iworkspace/include",
+                "-Lworkspace/lib",
+                "-Xclang",
+                "-Iworkspace/include",
+                "-Xclang",
+                "-mrelax-all",
+            ]),
             &forbidden,
             directory.path(),
         )
@@ -1429,6 +1584,45 @@ mod tests {
             "output.o",
         ]))
         .unwrap();
+    }
+
+    #[test]
+    fn permits_xclang_codegen_flags() {
+        validate_user_arguments(&os(&[
+            "-c",
+            "source.cc",
+            "-Xclang",
+            "-mrelax-all",
+            "-Xclang",
+            "-mconstructor-aliases",
+            "-Xclang=-fno-pch-timestamp",
+            "-Xclang -mrelax-all",
+            "-Xclang -mconstructor-aliases",
+        ]))
+        .unwrap();
+    }
+
+    #[test]
+    fn permits_xclang_include_search_options() {
+        validate_user_arguments(&os(&[
+            "-c",
+            "source.cc",
+            "-Xclang",
+            "-I/usr/include",
+            "-Xclang",
+            "-Iworkspace/include",
+            "-Xclang",
+            "-internal-isystem",
+            "-Xclang",
+            "workspace/include",
+            "/clang:-I/usr/include",
+        ]))
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_xclang_without_an_argument() {
+        assert!(validate_user_arguments(&os(&["-c", "source.cc", "-Xclang"])).is_err());
     }
 
     #[test]
@@ -1516,12 +1710,63 @@ mod tests {
                 "source.c",
             ])
         );
-        assert!(prepare_invocation(
+        let mismatched_arch = prepare_invocation(
             &os(&["-arch", "x86_64", "-c", "source.c"]),
             &["--target=aarch64-apple-macosx11.0".into()],
             Path::new("."),
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(
+            mismatched_arch.arguments,
+            os(&["--target=aarch64-apple-macosx11.0", "-c", "source.c"])
+        );
+    }
+
+    #[test]
+    fn strips_arch_and_isysroot_because_the_profile_owns_them() {
+        let linux = prepare_invocation(
+            &os(&[
+                "-arch",
+                "arm64",
+                "-isysroot",
+                "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+                "-c",
+                "source.c",
+            ]),
+            &[
+                "--target=x86_64-unknown-linux-gnu".into(),
+                "--sysroot=/trusted".into(),
+            ],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            linux.arguments,
+            os(&[
+                "--target=x86_64-unknown-linux-gnu",
+                "--sysroot=/trusted",
+                "-c",
+                "source.c",
+            ])
+        );
+        let darwin = prepare_invocation(
+            &os(&["-arch", "arm64", "-isysroot", "/trusted", "-c", "source.c"]),
+            &[
+                "--target=aarch64-apple-macosx11.0".into(),
+                "--sysroot=/trusted".into(),
+            ],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            darwin.arguments,
+            os(&[
+                "--target=aarch64-apple-macosx11.0",
+                "--sysroot=/trusted",
+                "-c",
+                "source.c",
+            ])
+        );
     }
 
     #[test]
@@ -1606,8 +1851,18 @@ mod tests {
             joined.arguments,
             os(&["--sysroot=/MacOSX.sdk", "-c", "source.c"])
         );
-        assert!(prepare_invocation(
+        let mismatched_isysroot = prepare_invocation(
             &os(&["-isysroot", "/other.sdk", "-c", "source.c"]),
+            &["--sysroot=/MacOSX.sdk".into()],
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            mismatched_isysroot.arguments,
+            os(&["--sysroot=/MacOSX.sdk", "-c", "source.c"])
+        );
+        assert!(prepare_invocation(
+            &os(&["--sysroot=/other.sdk", "-c", "source.c"]),
             &["--sysroot=/MacOSX.sdk".into()],
             Path::new("."),
         )

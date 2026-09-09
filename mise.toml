@@ -12,6 +12,7 @@
 #     -> product verify scripts when a release rcc is present
 #   mise release
 #     -> fetches archives into .cache/
+#     -> always rebuilds cargo-rcc and rcc (LLVM engine reused if present)
 #     -> dist/bin/{cargo-rcc,rcc}
 #     -> dist/rcc-{os}-{arch}-{version}.zip
 #   mise run release:install
@@ -39,16 +40,16 @@ description = "Build the development workspace (not the distributable static-eng
 run = "cargo build --workspace --locked"
 
 [tasks."build:release"]
-description = "Build the static host release (macOS AArch64 or Linux x86_64) with linux/windows sysroots"
+description = "Same as mise release: rebuild cargo-rcc and rcc into dist/bin"
 # These are build-host tools only. The resulting rcc binary does not depend on
 # CMake, Ninja, or a system C/C++ compiler at runtime.
 tools = { cmake = "4.4.3", ninja = "1.13.1" }
 run = "./scripts/package-release.sh"
 
 [tasks.release]
-description = "Build cargo-rcc, stage rcc + cargo-rcc into dist/bin, and zip dist/rcc-{os}-{arch}-{version}.zip"
-# cmake/ninja are only used if dist/rcc-release/rcc is missing and this task
-# falls back to build-macos-arm64-release.sh.
+description = "Rebuild cargo-rcc and rcc, stage them into dist/bin, and zip dist/rcc-{os}-{arch}-{version}.zip"
+# Always relinks rcc. cmake/ninja are only used if the LLVM engine work tree
+# is missing and this task falls back to build-macos-arm64-release.sh.
 tools = { cmake = "4.4.3", ninja = "1.13.1" }
 run = "./scripts/package-release.sh"
 

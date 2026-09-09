@@ -449,7 +449,9 @@ fn ensure_resource_only_pack(files: &[PackFile]) -> Result<()> {
                 && file.path != "launchers"
                 && !file.path.starts_with("launchers/")
                 && file.path != "view.json"
-                && !file.path.starts_with("view.json/"),
+                && !file.path.starts_with("view.json/")
+                && file.path != "toolchain.cmake"
+                && !file.path.starts_with("toolchain.cmake/"),
             "resource pack contains reserved executable/view path {}",
             file.path
         );

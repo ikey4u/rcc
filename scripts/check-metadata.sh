@@ -7,6 +7,7 @@ cd "$repository"
 
 sh -n scripts/build-macos-arm64-release.sh
 sh -n scripts/package-release.sh
+sh -n scripts/relink-rcc.sh
 sh -n scripts/install.sh
 sh -n scripts/setup.sh
 sh -n scripts/check.sh

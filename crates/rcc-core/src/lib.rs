@@ -14,7 +14,7 @@ pub use contracts::{
 };
 pub use environment::{
     EnvironmentContext, EnvironmentError, EnvironmentFormat, EnvironmentManifest, EnvironmentRole,
-    EnvironmentTool, ENVIRONMENT_SCHEMA_VERSION,
+    EnvironmentTool, CMAKE_TOOLCHAIN_FILE_NAME, ENVIRONMENT_SCHEMA_VERSION,
 };
 pub use schema::{
     launcher_name, DriverKind, PackManifest, Profile, RuntimeContract, RuntimeOwnership, ToolKind,

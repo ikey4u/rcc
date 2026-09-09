@@ -2,10 +2,9 @@
 # Stage cargo-rcc and the release rcc into dist/bin and zip them as
 # dist/rcc-{os}-{arch}-{version}.zip.
 #
-# cargo-rcc is always rebuilt. Pinned LLVM bootstrap, LLVM source, musl, and
-# CentOS 7 glibc RPMs are downloaded into .cache/ first. rcc must be a
-# static-engine release ($RCC or dist/rcc-release/rcc); if it is missing,
-# this script builds it from the .cache archives into dist/rcc-release.
+# cargo-rcc and rcc are always rebuilt. LLVM objects under inner/ are reused
+# when present; a missing engine falls back to the full host release script.
+# An existing dist/rcc-release/rcc is only a pack source, never the product.
 set -eu
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -40,25 +39,7 @@ host_label() {
     esac
 }
 
-build_rcc_if_missing() {
-    if [ -n "${RCC:-}" ] && [ -x "$RCC" ]; then
-        rcc=$RCC
-        return 0
-    fi
-    if [ -x "$rcc_release_dir/rcc" ]; then
-        rcc=$rcc_release_dir/rcc
-        return 0
-    fi
-    if [ -e "$rcc_release_dir" ]; then
-        echo "dist/rcc-release exists but does not contain a release rcc" >&2
-        echo "remove it, or build with: mise run build:release -- \\" >&2
-        echo "  $archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz \\" >&2
-        echo "  $archive_cache/llvm-project-22.1.8.src.tar.xz \\" >&2
-        echo "  $archive_cache/musl-1.2.5.tar.gz \\" >&2
-        echo "  $rcc_release_dir" >&2
-        exit 66
-    fi
-
+build_full_rcc() {
     bootstrap_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
     source_archive=$archive_cache/llvm-project-22.1.8.src.tar.xz
     musl_archive=$archive_cache/musl-1.2.5.tar.gz
@@ -98,6 +79,19 @@ build_rcc_if_missing() {
             exit 64
             ;;
     esac
+}
+
+rebuild_rcc() {
+    relink_status=0
+    "$script_directory/relink-rcc.sh" || relink_status=$?
+    if [ "$relink_status" -eq 0 ]; then
+        rcc=$rcc_release_dir/rcc
+        return 0
+    fi
+    if [ "$relink_status" -ne 69 ]; then
+        exit "$relink_status"
+    fi
+    build_full_rcc
     rcc=$rcc_release_dir/rcc
 }
 
@@ -134,7 +128,7 @@ if [ ! -x "$cargo_rcc" ]; then
     exit 65
 fi
 
-build_rcc_if_missing
+rebuild_rcc
 if [ ! -x "$rcc" ]; then
     echo "release rcc is not an executable: $rcc" >&2
     exit 65

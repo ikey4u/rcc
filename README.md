@@ -42,7 +42,7 @@ build-time host linker.
 
 ```sh
 mise setup              # cargo fetch, pinned archives; Lima guests on macOS
-mise release            # dist/bin/{rcc,cargo-rcc} and dist/rcc-{os}-{arch}-{version}.zip
+mise release            # rebuild cargo-rcc and rcc; zip dist/rcc-{os}-{arch}-{version}.zip
 mise run release:install
 ```
 

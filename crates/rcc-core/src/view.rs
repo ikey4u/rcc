@@ -1,4 +1,5 @@
 use crate::digest::file_sha256;
+use crate::environment::{EnvironmentManifest, CMAKE_TOOLCHAIN_FILE_NAME};
 use crate::pack::{
     create_unique_dir, extract_pack_into, inspect_embedded_pack_bytes, inspect_pack_bytes,
     verify_directory_metadata_with_extras, verify_pack, DirectoryCleanup, PackInspection,
@@ -454,6 +455,7 @@ impl ViewMaterializer {
         );
         create_launcher_aliases(&temporary, controller, view_manifest)?;
         write_view_manifest(&temporary, view_manifest)?;
+        write_cmake_toolchain(&temporary, view_manifest)?;
         validate_materialized_view(&temporary, &pack.manifest, controller, view_manifest)?;
         // Seal every member before publication. macOS refuses to rename a
         // directory whose root itself is mode 0555, so the root stays writable
@@ -522,7 +524,11 @@ fn ensure_resource_pack_paths(files: &[crate::schema::PackFile]) -> Result<()> {
                 && file.path != "launchers"
                 && !file.path.starts_with("launchers/")
                 && file.path != VIEW_MANIFEST_FILE
-                && !file.path.starts_with(&format!("{VIEW_MANIFEST_FILE}/")),
+                && !file.path.starts_with(&format!("{VIEW_MANIFEST_FILE}/"))
+                && file.path != CMAKE_TOOLCHAIN_FILE_NAME
+                && !file
+                    .path
+                    .starts_with(&format!("{CMAKE_TOOLCHAIN_FILE_NAME}/")),
             "resource pack contains reserved executable/view path {}",
             file.path
         );
@@ -712,13 +718,31 @@ fn write_view_manifest(root: &Path, manifest: &ViewManifest) -> Result<()> {
         .with_context(|| format!("failed to sync view manifest {}", path.display()))
 }
 
+fn write_cmake_toolchain(root: &Path, view: &ViewManifest) -> Result<()> {
+    let contents = EnvironmentManifest::render_view_cmake(view)
+        .map_err(|error| anyhow::anyhow!("failed to render CMake toolchain: {error}"))?;
+    let path = root.join(CMAKE_TOOLCHAIN_FILE_NAME);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("failed to create CMake toolchain {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write CMake toolchain {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync CMake toolchain {}", path.display()))
+}
+
 fn validate_materialized_view(
     actual_root: &Path,
     pack_manifest: &crate::schema::PackManifest,
     controller: &ControllerExecutable,
     expected_view: &ViewManifest,
 ) -> Result<()> {
-    let mut extra_files = vec![VIEW_MANIFEST_FILE.to_owned()];
+    let mut extra_files = vec![
+        VIEW_MANIFEST_FILE.to_owned(),
+        CMAKE_TOOLCHAIN_FILE_NAME.to_owned(),
+    ];
     extra_files.extend(launcher_relative_paths(expected_view)?);
     let extra_file_refs = extra_files.iter().map(String::as_str).collect::<Vec<_>>();
     verify_directory_metadata_with_extras(pack_manifest, actual_root, &extra_file_refs)?;
@@ -733,6 +757,15 @@ fn validate_materialized_view(
     ensure!(
         &actual == expected_view,
         "materialized view manifest does not match the requested view"
+    );
+    let expected_cmake = EnvironmentManifest::render_view_cmake(expected_view)
+        .map_err(|error| anyhow::anyhow!("failed to render CMake toolchain: {error}"))?;
+    let cmake_path = actual_root.join(CMAKE_TOOLCHAIN_FILE_NAME);
+    let actual_cmake = fs::read_to_string(&cmake_path)
+        .with_context(|| format!("failed to read CMake toolchain {}", cmake_path.display()))?;
+    ensure!(
+        actual_cmake == expected_cmake,
+        "materialized CMake toolchain does not match the view"
     );
 
     for file in pack_manifest.files.iter().filter(|file| file.executable) {
@@ -815,6 +848,7 @@ fn seal_view_contents(root: &Path, pack_manifest: &crate::schema::PackManifest) 
         set_file_read_only(&root.join(&file.path), file.executable)?;
     }
     set_file_read_only(&root.join(VIEW_MANIFEST_FILE), false)?;
+    set_file_read_only(&root.join(CMAKE_TOOLCHAIN_FILE_NAME), false)?;
 
     let mut directories = WalkDir::new(root)
         .follow_links(false)
@@ -1099,6 +1133,10 @@ mod tests {
             .unwrap();
         assert!(!first.reused);
         assert!(first.manifest_path.is_file());
+        assert_eq!(
+            fs::read_to_string(first.root.join(CMAKE_TOOLCHAIN_FILE_NAME)).unwrap(),
+            EnvironmentManifest::render_view_cmake(&fixture.view).unwrap()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
