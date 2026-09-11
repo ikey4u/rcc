@@ -37,6 +37,8 @@ const HOST_MACOS_AARCH64: &str = "aarch64-apple-darwin";
 const HOST_MACOS_AARCH64_PROFILE: &str = "host-macos-aarch64";
 const HOST_LINUX_X64_GNU: &str = "x86_64-unknown-linux-gnu";
 const HOST_LINUX_X64_GNU_PROFILE: &str = "host-linux-x86_64-gnu-glibc217";
+const HOST_WINDOWS_X64_MSVC_PROFILE: &str = "host-windows-x86_64-msvc";
+const HOST_WINDOWS_X64_GNU_PROFILE: &str = "host-windows-x86_64-gnu";
 const MACOS_AARCH64_PROFILE: &str = "macos-aarch64";
 const MACOS_X86_64: &str = "x86_64-apple-darwin";
 const MACOS_X86_64_PROFILE: &str = "macos-x86_64";
@@ -589,9 +591,12 @@ fn host_profile_for(host: &str) -> Result<String> {
     match host {
         "aarch64-apple-darwin" => Ok(HOST_MACOS_AARCH64_PROFILE.into()),
         "x86_64-unknown-linux-gnu" => Ok(HOST_LINUX_X64_GNU_PROFILE.into()),
+        "x86_64-pc-windows-msvc" => Ok(HOST_WINDOWS_X64_MSVC_PROFILE.into()),
+        "x86_64-pc-windows-gnu" => Ok(HOST_WINDOWS_X64_GNU_PROFILE.into()),
         other => bail!(
-            "cargo-rcc currently requires an aarch64-apple-darwin or \
-             x86_64-unknown-linux-gnu host (got {other})"
+            "cargo-rcc currently requires an aarch64-apple-darwin, \
+             x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, or \
+             x86_64-pc-windows-gnu host (got {other})"
         ),
     }
 }
@@ -929,6 +934,18 @@ mod tests {
         assert_eq!(
             host_profile_for(HOST_LINUX_X64_GNU).unwrap(),
             HOST_LINUX_X64_GNU_PROFILE
+        );
+    }
+
+    #[test]
+    fn accepts_windows_msvc_and_gnu_hosts() {
+        assert_eq!(
+            host_profile_for(WINDOWS_X64_MSVC).unwrap(),
+            HOST_WINDOWS_X64_MSVC_PROFILE
+        );
+        assert_eq!(
+            host_profile_for(WINDOWS_X64_GNU).unwrap(),
+            HOST_WINDOWS_X64_GNU_PROFILE
         );
     }
 

@@ -92,7 +92,7 @@ License: LGPL-2.1-or-later AND GPL-2.0-or-later (glibc); GPL-2.0-only
 
 ## MinGW-w64 12.0.0
 
-The macOS AArch64 RCC release may also carry hermetic Windows sysroots built
+The macOS, Linux, and Windows RCC releases may also carry hermetic Windows sysroots built
 from `mingw-w64-v12.0.0.tar.bz2`: headers, CRT (UCRT for gnullvm, MSVCRT for
 gnu), and static winpthreads. compiler-rt builtins, libunwind, and libc++ for
 those targets are built from the same pinned LLVM 22.1.8 source. GNU-named
@@ -106,11 +106,23 @@ License: Zlib AND MIT AND public-domain (MinGW-w64).
 
 ## Apple SDK and operating-system components
 
-The Apple macOS SDK is an external, user-provided dependency. It is discovered through
-`RCC_APPLE_SDK_ROOT` or, on macOS, through `xcrun --sdk macosx --show-sdk-path`; no Apple SDK file is
-embedded in or distributed with RCC. Apple SDK and operating-system components remain subject to
-Apple's applicable license terms. Produced programs may link against Apple-provided system
-libraries such as libSystem and the operating-system libc++ runtime.
+The Apple macOS SDK is an external, user-provided dependency. RCC discovers it
+through `RCC_APPLE_SDK_ROOT`, `$RCC_HOME_DIR/vendor/macos`, or, on macOS only,
+`xcrun --sdk macosx --show-sdk-path`. `scripts/setup-env.sh` (also invoked by
+`mise setup` off macOS) downloads the pinned phracker MacOSX11.3.sdk tarball
+into `.cache/` and stages it under `vendor/macos`; that archive is never
+embedded in or redistributed with an RCC pack. Apple SDK and operating-system
+components remain subject to Apple's applicable license terms. Produced
+programs may link against Apple-provided system libraries such as libSystem and
+the operating-system libc++ runtime.
+
+The Windows SDK and MSVC toolset are external, user-provided dependencies.
+RCC discovers a Windows Kits 10 tree through `RCC_WINDOWS_SDK_ROOT` or
+`$RCC_HOME_DIR/vendor/windows`, and an MSVC toolset through
+`RCC_MSVC_TOOLS_ROOT` or `$RCC_HOME_DIR/vendor/msvc`. On Windows it also
+searches an installed Kits tree and Visual Studio. Junctions and symlink
+leaves at those roots are rejected. Produced programs may import UCRT and
+vcruntime DLLs.
 
 RCC does not embed or redistribute the Xcode Clang compiler, Apple linker, Windows SDK, MSVC
 Toolset, or a Zig installation.

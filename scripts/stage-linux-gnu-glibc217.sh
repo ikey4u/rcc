@@ -9,6 +9,10 @@
 #     <existing-stage-dir>
 set -eu
 
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=lib/posix.sh
+. "$script_directory/lib/posix.sh"
+
 if [ "$#" -ne 6 ]; then
     echo "usage: $0 <x86_64|aarch64> <glibc.rpm> <glibc-headers.rpm> <glibc-devel.rpm> <kernel-headers.rpm> <stage-dir>" >&2
     exit 64
@@ -92,18 +96,7 @@ check_rpm "$devel_rpm" "$devel_sha256"
 check_rpm "$kernel_rpm" "$kernel_sha256"
 
 extract_rpm() {
-    archive=$1
-    destination=$2
-    mkdir -p "$destination"
-    if tar -xf "$archive" -C "$destination" 2>/dev/null; then
-        return 0
-    fi
-    if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
-        (cd "$destination" && rpm2cpio "$archive" | cpio -idm --quiet)
-        return 0
-    fi
-    echo "unable to extract RPM $archive; need bsdtar/libarchive or rpm2cpio+cpio" >&2
-    exit 69
+    extract_rpm_archive "$1" "$2"
 }
 
 copy_regular_files() {

@@ -1227,8 +1227,7 @@ fn validate_single_driver_argument(argument: &str) -> Result<()> {
             .any(|prefix| argument.starts_with(prefix))
         || argument.starts_with("-isysroot")
         || argument.starts_with("-B")
-        || strip_ascii_case_prefix(argument, "/winsysroot:").is_some()
-        || argument.eq_ignore_ascii_case("/winsysroot")
+        || is_forbidden_msvc_root_option(argument)
         || strip_ascii_case_prefix(argument, "/arch:").is_some()
         || strip_ascii_case_prefix(argument, "/B1").is_some()
         || strip_ascii_case_prefix(argument, "/B2").is_some()
@@ -1245,12 +1244,27 @@ fn validate_linker_argument(argument: &str) -> Result<()> {
             .any(|prefix| argument.starts_with(prefix))
         || argument.eq_ignore_ascii_case("/machine")
         || strip_ascii_case_prefix(argument, "/machine:").is_some()
-        || argument.eq_ignore_ascii_case("/winsysroot")
-        || strip_ascii_case_prefix(argument, "/winsysroot:").is_some()
+        || is_forbidden_msvc_root_option(argument)
     {
         bail!("forbidden hermetic linker option: {argument}");
     }
     Ok(())
+}
+
+fn is_forbidden_msvc_root_option(argument: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "/winsysroot",
+        "/winsdkdir",
+        "/vctoolsdir",
+        "-winsysroot",
+        "-winsdkdir",
+        "-vctoolsdir",
+    ];
+    NAMES.iter().any(|name| {
+        argument.eq_ignore_ascii_case(name)
+            || strip_ascii_case_prefix(argument, name)
+                .is_some_and(|rest| rest.starts_with(':') || rest.starts_with('='))
+    })
 }
 
 fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
@@ -1475,6 +1489,9 @@ mod tests {
             os(&["-m32"]),
             os(&["-mabi=ilp32"]),
             os(&["/arch:AVX2"]),
+            os(&["/winsysroot:C:\\sysroot"]),
+            os(&["/winsdkdir:C:\\Kits\\10"]),
+            os(&["/vctoolsdir:C:\\VC\\Tools\\MSVC\\14.44"]),
         ] {
             assert!(
                 validate_user_arguments(&arguments).is_err(),

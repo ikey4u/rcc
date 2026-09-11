@@ -1,11 +1,11 @@
 # RCC 可移植 C/C++ 工具链与 Sysroot 架构设计
 
 > [!NOTE] 文档状态
-> 本文记录 RCC 的目标架构、已采纳决策、资源布局、平台策略和验收门槛。当前 Apple Silicon macOS 实现采用静态 LLVM multicall 架构；其余 host/profile 仍按路线图交付。按 OS 拆开的交叉矩阵与**当前实现**见 [RCC_MACOS.md](RCC_MACOS.md)、[RCC_LINUX.md](RCC_LINUX.md)、[RCC_WINDOWS.md](RCC_WINDOWS.md)。
+> 本文记录 RCC 的目标架构、已采纳决策、资源布局、平台策略和验收门槛。Apple Silicon macOS、Linux x86_64 与 Windows x86_64-msvc 三份 controller 已落地；交叉矩阵与**当前实现**以 [RCC_MACOS.md](RCC_MACOS.md)、[RCC_LINUX.md](RCC_LINUX.md)、[RCC_WINDOWS.md](RCC_WINDOWS.md) 为准。其余 host/profile 仍按路线图。
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted；macOS AArch64 MVP 实现中 |
+| 状态 | Accepted；macOS AArch64 / Linux x86_64 / Windows x86_64-msvc controller 已实现 |
 | 目标版本 | MVP |
 | 实现语言 | Rust 控制层；静态链接经过裁剪的 LLVM/Clang/LLD/llvm-ar 组件；C++ C ABI bridge |
 | 产品定位 | 可重定位的 C/C++ 编译、归档、链接及 target sysroot/runtime provider |
@@ -129,9 +129,9 @@ RCC 不负责：
 | windows-x86_64-gnu | x86_64-pc-windows-gnu | MinGW-w64 + 固定 GNU runtime 闭包 | Hermetic | MVP | 所有正式 host |
 | windows-x86_64-gnullvm | x86_64-pc-windows-gnullvm | LLVM-MinGW/UCRT/compiler-rt/libunwind | Hermetic | Phase 2 | 所有正式 host |
 | windows-aarch64-gnullvm | aarch64-pc-windows-gnullvm | LLVM-MinGW/UCRT/compiler-rt/libunwind | Hermetic | Phase 2 | 所有正式 host |
-| macos-x86_64 | x86_64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host |
-| macos-aarch64 | aarch64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host |
-| windows-x86_64-msvc | x86_64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | Phase 3 | 正式支持限 Windows host |
+| macos-x86_64 | x86_64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host；Linux/Windows 交叉为尽最大努力（自备 SDK） |
+| macos-aarch64 | aarch64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host；Linux/Windows 交叉为尽最大努力（自备 SDK） |
+| windows-x86_64-msvc | x86_64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | 已交付 | Windows host 可发现已装 VS/Kits；其它 host 自备两棵树 |
 
 glibc 2.17 是候选 baseline，必须在 Phase 0 完成来源、补丁、许可证和真实发行环境验证后冻结。musl、MinGW、GCC runtime、LLVM 和 libc++ 均必须固定到精确版本，不能只写 1.2.x 或 latest。
 
@@ -142,7 +142,7 @@ glibc 2.17 是候选 baseline，必须在 Phase 0 完成来源、补丁、许可
 | Host | 发行物 | 说明 |
 |---|---|---|
 | Linux x86_64 | rcc-linux-x86_64 | 第一优先级 |
-| Windows x86_64 | rcc-windows-x86_64.exe | 不能假设已安装 VS Build Tools |
+| Windows x86_64 | rcc-windows-x86_64.exe | 已交付：MSVC 宿主编 PE（需 VS 编 controller）；gnu/gnullvm **目标**不要求最终用户装 VS |
 | macOS AArch64 | rcc-macos-aarch64 | Apple Silicon 主路径 |
 | Linux AArch64 | rcc-linux-aarch64 | Phase 2 前补齐 |
 | macOS x86_64 | rcc-macos-x86_64 | Phase 2 前补齐 |
@@ -160,7 +160,7 @@ HostNativeProfile 面向消费者生成的 host 原生代码，不等同于“RC
 | host-linux-aarch64-gnu-glibc217 | aarch64-unknown-linux-gnu | RCC glibc/GNU runtime closure | 无 | Phase 2 |
 | host-windows-x86_64-gnu | x86_64-pc-windows-gnu | RCC MinGW/GNU runtime closure | 无 | MVP |
 | host-windows-x86_64-gnullvm | x86_64-pc-windows-gnullvm | RCC LLVM-MinGW runtime closure | 无 | Phase 2 |
-| host-windows-x86_64-msvc | x86_64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | Phase 3 |
+| host-windows-x86_64-msvc | x86_64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | 已交付（Windows host） |
 | host-macos-aarch64 | aarch64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | MVP |
 | host-macos-x86_64 | x86_64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | Phase 2 |
 
@@ -762,6 +762,8 @@ Windows profile 必须拆分三条 ABI 路线：
 3. **windows-msvc**：clang-cl/lld-link + Windows SDK Provider + MSVC Toolset Provider。
 
 Windows SDK 只提供 UCRT/UM/shared 等部分，不能替代 MSVC Toolset 的 STL、vcruntime、CRT headers/libraries。两个 provider 必须独立建模、独立校验。
+
+当前实现：Windows SDK（Kits 10）与 MSVC toolset 分开发现、一起进入 view 身份。clang-cl 注入 `/winsdkdir`、`/vctoolsdir` 和视图内 `lld-link`。用法见 [RCC_WINDOWS.md](RCC_WINDOWS.md)。
 
 不同 CRT、exception model、C++ ABI 或 library format 不得混用。PE verifier 需要检查 machine、subsystem、imports、runtime DLL、API-set/import symbol baseline 和路径泄漏；只检查 DLL 名称不够。
 

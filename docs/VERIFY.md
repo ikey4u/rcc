@@ -1,11 +1,11 @@
-# Linux x86_64 / aarch64 与 Windows：大型项目能力与正确性验收
+# Linux / Windows / macOS：大型项目能力与正确性验收
 
-本文是当前 RCC release 对 Linux musl-static / gnu-glibc217（x86_64 与 aarch64）以及 Windows gnu/gnullvm 的能力边界、正确性定义和可重复验收入口。设计背景见 `docs/plan/IMPL_RCC_MACOS.md` 与 `docs/plan/IMPL_RCC_MACOS_CROSS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
+本文是当前 RCC release 对 Linux musl-static / gnu-glibc217（x86_64 与 aarch64）、Windows gnu/gnullvm，以及 macOS Mach-O 的能力边界、正确性定义和可重复验收入口。设计背景见 `docs/plan/IMPL_RCC_MACOS.md` 与 `docs/plan/IMPL_RCC_MACOS_CROSS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
 
 需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。`mise check` 在能找到这份 `rcc` 时会跑下面的验收脚本；没有执行器时跳过运行时而不是失败。
 
 ```sh
-export RCC=/absolute/path/to/dist/rcc-release/rcc
+export RCC=/absolute/path/to/dist/rcc-release/rcc   # Windows: .../rcc.exe
 mise check
 # 或单独跑脚本：
 ./scripts/verify-linux-x86_64-musl.sh
@@ -15,6 +15,8 @@ mise check
 ./scripts/verify-windows.sh windows-x86_64-gnu
 ./scripts/verify-windows.sh windows-x86_64-gnullvm
 ./scripts/verify-windows.sh windows-aarch64-gnullvm
+./scripts/verify-macos.sh macos-aarch64
+./scripts/verify-macos.sh macos-x86_64
 ```
 
 gnu 运行时使用 CentOS 7 Lima `rcc-x64-glibc217`（kernel 3.10 不能 virtiofs，验收脚本会把 ELF scp 到客户机 `/tmp` 再跑），**不要**在 Alpine 上跑 gnu 动态 ELF。要强制执行产物：先 `mise setup`，再 `RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh`（gnu 用 `verify-linux-x86_64-gnu.sh`）。
@@ -80,12 +82,12 @@ musl-static 可执行文件拒绝 interpreter、`DT_NEEDED`、`GLIBC_`。gnu 可
 
 ### 3. 运行时冒烟
 
-Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x86_64`。musl 走 Alpine VM；gnu 走 CentOS 7（恰好 glibc 2.17）。新 glibc 发行版上的向前兼容是加分项，不能替代 2.17 基线。
+Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x86_64`。musl 走 Alpine VM；gnu 走 CentOS 7（恰好 glibc 2.17）。新 glibc 发行版上的向前兼容是加分项，不能替代 2.17 基线。Windows host 上只做编译 + `rcc verify`，不执行 ELF。
 
 ## 已知限制（验收失败时先看这里）
 
 - 必须使用 **release `rcc`**。
-- `cargo-rcc` 要求 host `aarch64-apple-darwin` 或 `x86_64-unknown-linux-gnu`。
+- `cargo-rcc` 要求 rustc host 为 `aarch64-apple-darwin`、`x86_64-unknown-linux-gnu`、`x86_64-pc-windows-msvc` 或 `x86_64-pc-windows-gnu`。
 - 稳定 rustc 不能按组件关闭 `link-self-contained`；adapter 使用 `=no`，并把 rust-std 的 `libunwind.a` 放到隔离 `-L`。
 - 上游若强行 `--sysroot=/usr` 或冲突 `--target`，RCC 会 fail-closed。
 - gnu 产物在 musl Alpine 上会因动态 loader 失败，这不是 bug。
@@ -96,11 +98,15 @@ Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x
 
 ## Windows PE
 
-`scripts/verify-windows.sh <profile>` 编 `examples/windows-c`、`examples/windows-cxx` 和 `examples/windows-hello`，然后 `rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`。x86_64 在装了 `wine64` 时可跑 native C。MSVC 需要调用方的 Windows SDK，本脚本不覆盖。
+`scripts/verify-windows.sh <profile>` 编 `examples/windows-c`、`examples/windows-cxx` 和 `examples/windows-hello`，然后 `rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`。x86_64 gnu/gnullvm 在装了 `wine64` 时可跑 native C。profile：`windows-x86_64-gnu`、`windows-x86_64-gnullvm`、`windows-aarch64-gnullvm`、`windows-x86_64-msvc`。
 
-## macOS Mach-O（Linux host）
+`windows-x86_64-msvc` 在 Windows host 上可直接用已装的 VS / Kits；从其它 host 交叉需 `RCC_WINDOWS_SDK_ROOT` 与 `RCC_MSVC_TOOLS_ROOT`（或 `vendor/windows` 与 `vendor/msvc`）。clang-cl 注入 `/winsdkdir`、`/vctoolsdir` 和视图里的 `lld-link`。C++ 默认 `/EHsc`。验收：`./scripts/verify-windows.sh windows-x86_64-msvc`（不进默认 `mise check`）。细节：[RCC_WINDOWS.md](design/RCC_WINDOWS.md)。从 **Windows host** 链 gnu/gnullvm 的状态见同一文档。
 
-`scripts/verify-macos.sh` 编 `examples/macos-c` / `macos-cxx` / `macos-hello`，然后 `rcc verify` 检查 Mach-O 架构。需要 `RCC_APPLE_SDK_ROOT`（`scripts/stage-apple-sdk.sh` 摊平 phracker MacOSX11.3.sdk）。不在 Linux 上执行产物。
+## macOS Mach-O
+
+`scripts/verify-macos.sh` 编 `examples/macos-c` / `macos-cxx` / `macos-hello`，然后 `rcc verify` 检查 Mach-O 架构。Apple SDK 发现顺序：`RCC_APPLE_SDK_ROOT`、`$RCC_HOME_DIR/vendor/macos`，仅 macOS 上再回落到 `xcrun`。Linux / Windows 上先 `./scripts/setup-env.sh`（或 `mise setup`）。
+
+不在 Linux 或 Windows 上执行 Mach-O。Windows 上编完后拷到 Mac 再跑（需要时 `codesign --sign -`；x86_64 用 Rosetta）。
 
 ## 扩展下一批大型项目时怎么加
 

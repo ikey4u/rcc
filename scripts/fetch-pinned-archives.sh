@@ -35,8 +35,14 @@ fetch() {
         fi
     fi
     echo "fetching $name"
-    curl -L --fail --retry 3 --retry-delay 2 -C - -o "$destination" "$url"
+    curl -L --fail --ssl-no-revoke --retry 20 --retry-delay 3 --retry-all-errors --speed-limit 1000 --speed-time 30 -C - -o "$destination" "$url"
     actual=$(shasum -a 256 "$destination" | awk '{print $1}')
+    if [ "$actual" != "$expected" ]; then
+        echo "resume left a digest mismatch for $name; downloading from scratch"
+        rm -f "$destination"
+        curl -L --fail --ssl-no-revoke --retry 20 --retry-delay 3 --retry-all-errors --speed-limit 1000 --speed-time 30 -o "$destination" "$url"
+        actual=$(shasum -a 256 "$destination" | awk '{print $1}')
+    fi
     if [ "$actual" != "$expected" ]; then
         echo "$name digest mismatch: expected $expected, got $actual" >&2
         exit 65
@@ -52,10 +58,17 @@ fetch \
     LLVM-22.1.8-macOS-ARM64.tar.xz \
     https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-macOS-ARM64.tar.xz \
     f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f
-fetch \
-    LLVM-22.1.8-Linux-X64.tar.xz \
-    https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz \
-    df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        echo "skipping Linux LLVM bootstrap on Windows"
+        ;;
+    *)
+        fetch \
+            LLVM-22.1.8-Linux-X64.tar.xz \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz \
+            df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        ;;
+esac
 fetch \
     llvm-project-22.1.8.src.tar.xz \
     https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/llvm-project-22.1.8.src.tar.xz \
@@ -100,5 +113,9 @@ fetch \
     mingw-w64-v12.0.0.tar.bz2 \
     https://sourceforge.net/projects/mingw-w64/files/mingw-w64/mingw-w64-release/mingw-w64-v12.0.0.tar.bz2/download \
     cc41898aac4b6e8dd5cffd7331b9d9515b912df4420a3a612b5ea2955bbeed2f
+fetch \
+    clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz \
+    https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz \
+    d96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234
 
 echo "pinned archives ready in $archive_cache"

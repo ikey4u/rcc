@@ -18,8 +18,8 @@ out_dir=$repository/examples/macos-c/out-$profile
 cxx_out_dir=$repository/examples/macos-cxx/out-$profile
 
 if [ -z "${RCC_APPLE_SDK_ROOT:-}" ]; then
-    echo "set RCC_APPLE_SDK_ROOT to a flattened MacOSX.sdk (see scripts/stage-apple-sdk.sh)" >&2
-    exit 69
+    echo "RCC_APPLE_SDK_ROOT unset; rcc will use \$RCC_HOME_DIR/vendor/macos or xcrun"
+    echo "run scripts/setup-env.sh if doctor cannot find an Apple SDK"
 fi
 
 if [ -z "${RCC:-}" ]; then
@@ -40,7 +40,9 @@ fi
 mkdir -p "$cache_dir" "$out_dir" "$cxx_out_dir"
 export RCC
 export RCC_CACHE_DIR=$cache_dir
-export RCC_APPLE_SDK_ROOT
+if [ -n "${RCC_APPLE_SDK_ROOT:-}" ]; then
+    export RCC_APPLE_SDK_ROOT
+fi
 
 echo "==> rcc doctor ($profile)"
 "$RCC" --cache-dir "$cache_dir" doctor --profile "$profile"

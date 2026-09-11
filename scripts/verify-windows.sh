@@ -3,17 +3,17 @@
 # Runtime is optional (wine64 for x86_64).
 #
 # usage:
-#   verify-windows.sh <windows-x86_64-gnu|windows-x86_64-gnullvm|windows-aarch64-gnullvm>
+#   verify-windows.sh <windows-x86_64-gnu|windows-x86_64-gnullvm|windows-aarch64-gnullvm|windows-x86_64-msvc>
 set -eu
 
 if [ "$#" -ne 1 ]; then
-    echo "usage: $0 <windows-x86_64-gnu|windows-x86_64-gnullvm|windows-aarch64-gnullvm>" >&2
+    echo "usage: $0 <windows-x86_64-gnu|windows-x86_64-gnullvm|windows-aarch64-gnullvm|windows-x86_64-msvc>" >&2
     exit 64
 fi
 
 profile=$1
 case "$profile" in
-    windows-x86_64-gnu|windows-x86_64-gnullvm|windows-aarch64-gnullvm) ;;
+    windows-x86_64-gnu|windows-x86_64-gnullvm|windows-aarch64-gnullvm|windows-x86_64-msvc) ;;
     *)
         echo "unsupported windows profile: $profile" >&2
         exit 64
@@ -75,6 +75,7 @@ case "$profile" in
     windows-x86_64-gnu) rust_target=x86_64-pc-windows-gnu ;;
     windows-x86_64-gnullvm) rust_target=x86_64-pc-windows-gnullvm ;;
     windows-aarch64-gnullvm) rust_target=aarch64-pc-windows-gnullvm ;;
+    windows-x86_64-msvc) rust_target=x86_64-pc-windows-msvc ;;
 esac
 
 if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ] && [ -n "$rust_target" ]; then

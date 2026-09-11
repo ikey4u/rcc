@@ -54,7 +54,7 @@ if resolve_rcc; then
     if [ -n "${RCC_APPLE_SDK_ROOT:-}" ]; then
         "$repository/scripts/verify-macos.sh" macos-aarch64
     else
-        echo "skipping macos verify (set RCC_APPLE_SDK_ROOT)"
+        echo "skipping macos verify (set RCC_APPLE_SDK_ROOT or run scripts/setup-env.sh)"
     fi
 else
     echo "skipping product verify (no release rcc; set RCC or mise release)"

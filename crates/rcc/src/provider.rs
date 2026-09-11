@@ -4,11 +4,12 @@ use rcc_core::layout::ExternalSysroot;
 use rcc_core::registry::{APPLE_DEVELOPER_PROVIDER, WINDOWS_MSVC_PROVIDER};
 use rcc_core::Profile;
 use sha2::{Digest, Sha256};
+use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 
 const MAX_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
@@ -34,22 +35,21 @@ pub fn resolve_external_sysroot(
         APPLE_DEVELOPER_PROVIDER => match discover_apple_sdk_candidate(&home)? {
             Some(candidate) => candidate,
             None => bail!(
-                "profile {} requires an Apple SDK; place one at {}",
+                "profile {} requires an Apple SDK; run scripts/setup-env.sh, set {}, or place one at {}",
                 profile.profile_id,
+                home::APPLE_SDK_ROOT_ENV,
                 home::vendor_dir(&home, "macos").display()
             ),
         },
-        WINDOWS_MSVC_PROVIDER => {
-            let vendor = home::vendor_dir(&home, "windows");
-            match discover_vendor_sdk(&vendor, looks_like_windows_sdk)? {
-                Some(path) => (path, true),
-                None => bail!(
-                    "profile {} requires a Windows SDK; place one at {}",
-                    profile.profile_id,
-                    vendor.display()
-                ),
-            }
-        }
+        WINDOWS_MSVC_PROVIDER => match discover_windows_sdk_candidate(&home)? {
+            Some(path) => (path, true),
+            None => bail!(
+                "profile {} requires a Windows SDK; set {} or place one at {}",
+                profile.profile_id,
+                home::WINDOWS_SDK_ROOT_ENV,
+                home::vendor_dir(&home, "windows").display()
+            ),
+        },
         other => bail!(
             "profile {} names unsupported SDK provider {other}",
             profile.profile_id
@@ -79,13 +79,30 @@ pub fn resolve_external_sysroot(
         WINDOWS_MSVC_PROVIDER => fingerprint_windows_sdk(&canonical)?,
         _ => unreachable!("provider was checked above"),
     };
+    let msvc_toolset = if provider == WINDOWS_MSVC_PROVIDER {
+        Some(resolve_msvc_toolset(&home)?)
+    } else {
+        None
+    };
+    let identity = match &msvc_toolset {
+        Some(toolset) => {
+            combine_windows_msvc_identity(&identity, &fingerprint_msvc_toolset(toolset)?)
+        }
+        None => identity,
+    };
     Ok(Some(ExternalSysroot {
         path: canonical,
         identity,
+        msvc_toolset,
     }))
 }
 
 fn discover_apple_sdk_candidate(home: &Path) -> Result<Option<(PathBuf, bool)>> {
+    if let Some(path) =
+        explicit_sdk_from_env(home::APPLE_SDK_ROOT_ENV, looks_like_apple_sdk, "Apple")?
+    {
+        return Ok(Some((path, true)));
+    }
     let vendor = home::vendor_dir(home, "macos");
     if vendor.exists() {
         return Ok(discover_vendor_sdk(&vendor, looks_like_apple_sdk)?.map(|path| (path, true)));
@@ -98,6 +115,106 @@ fn discover_apple_sdk_candidate(home: &Path) -> Result<Option<(PathBuf, bool)>> 
     {
         let _ = vendor;
         Ok(None)
+    }
+}
+
+fn discover_windows_sdk_candidate(home: &Path) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit_sdk_from_env(
+        home::WINDOWS_SDK_ROOT_ENV,
+        looks_like_windows_sdk,
+        "Windows",
+    )? {
+        return Ok(Some(path));
+    }
+    if let Some(path) =
+        discover_vendor_sdk(&home::vendor_dir(home, "windows"), looks_like_windows_sdk)?
+    {
+        return Ok(Some(path));
+    }
+    #[cfg(windows)]
+    {
+        return Ok(discover_installed_windows_sdk());
+    }
+    #[cfg(not(windows))]
+    Ok(None)
+}
+
+fn resolve_msvc_toolset(home: &Path) -> Result<PathBuf> {
+    match discover_msvc_toolset_candidate(home)? {
+        Some(path) => canonicalize_external_root(path, "MSVC toolset"),
+        None => bail!(
+            "profile requires an MSVC toolset; set {} or place one at {}",
+            home::MSVC_TOOLS_ROOT_ENV,
+            home::vendor_dir(home, "msvc").display()
+        ),
+    }
+}
+
+fn discover_msvc_toolset_candidate(home: &Path) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit_sdk_from_env(
+        home::MSVC_TOOLS_ROOT_ENV,
+        looks_like_msvc_toolset,
+        "MSVC toolset",
+    )? {
+        return Ok(Some(path));
+    }
+    if let Some(path) =
+        discover_vendor_sdk(&home::vendor_dir(home, "msvc"), looks_like_msvc_toolset)?
+    {
+        return Ok(Some(path));
+    }
+    #[cfg(windows)]
+    {
+        return discover_installed_msvc_toolset();
+    }
+    #[cfg(not(windows))]
+    Ok(None)
+}
+
+fn canonicalize_external_root(path: PathBuf, label: &str) -> Result<PathBuf> {
+    reject_symlink_leaf(&path, label)?;
+    let canonical = fs::canonicalize(&path)
+        .with_context(|| format!("failed to resolve {label} {}", path.display()))?;
+    let metadata = fs::symlink_metadata(&canonical)
+        .with_context(|| format!("failed to inspect {label} {}", canonical.display()))?;
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "{label} {} has a symbolic-link leaf",
+        canonical.display()
+    );
+    ensure!(
+        metadata.is_dir(),
+        "{label} {} is not a directory",
+        canonical.display()
+    );
+    Ok(canonical)
+}
+
+fn combine_windows_msvc_identity(sdk: &str, toolset: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rcc-windows-msvc-identity-v1");
+    hasher.update(sdk.as_bytes());
+    hasher.update(toolset.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn explicit_sdk_from_env(
+    var: &str,
+    looks_like: fn(&Path) -> bool,
+    label: &str,
+) -> Result<Option<PathBuf>> {
+    match env::var_os(var) {
+        None => Ok(None),
+        Some(value) => {
+            ensure!(!value.is_empty(), "{var} is set but empty");
+            let path = PathBuf::from(value);
+            ensure!(
+                looks_like(&path),
+                "{var} does not look like a {label} SDK: {}",
+                path.display()
+            );
+            Ok(Some(path))
+        }
     }
 }
 
@@ -173,6 +290,122 @@ fn looks_like_windows_sdk(root: &Path) -> bool {
     is_real_directory(root)
         && is_real_directory(&root.join("Include"))
         && is_real_directory(&root.join("Lib"))
+}
+
+fn looks_like_msvc_toolset(root: &Path) -> bool {
+    is_real_directory(root)
+        && is_real_directory(&root.join("include"))
+        && (is_real_directory(&root.join("lib/x64")) || is_real_directory(&root.join("lib/amd64")))
+}
+
+#[cfg(windows)]
+fn discover_installed_windows_sdk() -> Option<PathBuf> {
+    windows_program_files_roots()
+        .into_iter()
+        .map(|root| root.join("Windows Kits").join("10"))
+        .find(|path| looks_like_windows_sdk(path))
+}
+
+#[cfg(windows)]
+fn discover_installed_msvc_toolset() -> Result<Option<PathBuf>> {
+    if let Some(path) = msvc_toolset_from_vswhere()? {
+        return Ok(Some(path));
+    }
+    Ok(newest_msvc_toolset(
+        windows_vs_msvc_roots()
+            .into_iter()
+            .flat_map(|root| msvc_toolset_versions(&root)),
+    ))
+}
+
+#[cfg(windows)]
+fn msvc_toolset_from_vswhere() -> Result<Option<PathBuf>> {
+    let vswhere = windows_program_files_roots()
+        .into_iter()
+        .map(|root| {
+            root.join("Microsoft Visual Studio")
+                .join("Installer")
+                .join("vswhere.exe")
+        })
+        .find(|path| path.is_file());
+    let Some(vswhere) = vswhere else {
+        return Ok(None);
+    };
+    let output = Command::new(vswhere)
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+        .context("failed to execute vswhere for MSVC toolset discovery")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8(output.stdout).context("vswhere returned non-UTF-8 output")?;
+    let install = stdout.lines().map(str::trim).find(|line| !line.is_empty());
+    let Some(install) = install else {
+        return Ok(None);
+    };
+    Ok(newest_msvc_toolset(msvc_toolset_versions(
+        &PathBuf::from(install).join("VC").join("Tools").join("MSVC"),
+    )))
+}
+
+#[cfg(windows)]
+fn windows_vs_msvc_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for program_files in windows_program_files_roots() {
+        for year in ["2022", "2019"] {
+            for edition in ["BuildTools", "Community", "Professional", "Enterprise"] {
+                roots.push(
+                    program_files
+                        .join("Microsoft Visual Studio")
+                        .join(year)
+                        .join(edition)
+                        .join("VC")
+                        .join("Tools")
+                        .join("MSVC"),
+                );
+            }
+        }
+    }
+    roots
+}
+
+#[cfg(windows)]
+fn windows_program_files_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for var in ["ProgramFiles(x86)", "ProgramFiles"] {
+        if let Some(value) = env::var_os(var) {
+            if !value.is_empty() {
+                roots.push(PathBuf::from(value));
+            }
+        }
+    }
+    roots
+}
+
+#[cfg(windows)]
+fn msvc_toolset_versions(msvc_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(msvc_root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| looks_like_msvc_toolset(path))
+        .collect()
+}
+
+#[cfg(windows)]
+fn newest_msvc_toolset(mut candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates.sort_by(|left, right| os_bytes(left.as_os_str()).cmp(&os_bytes(right.as_os_str())));
+    candidates.pop()
 }
 
 #[cfg(target_os = "macos")]
@@ -256,6 +489,31 @@ fn fingerprint_windows_sdk(root: &Path) -> Result<String> {
             identity.add_directory(root, &relative)?;
         }
     }
+    Ok(identity.finish())
+}
+
+fn fingerprint_msvc_toolset(root: &Path) -> Result<String> {
+    require_real_directory(&root.join("include"), "include")?;
+    let lib_arch = if is_real_directory(&root.join("lib/x64")) {
+        "lib/x64"
+    } else if is_real_directory(&root.join("lib/amd64")) {
+        "lib/amd64"
+    } else {
+        bail!(
+            "MSVC toolset {} has neither lib/x64 nor lib/amd64",
+            root.display()
+        );
+    };
+    require_real_directory(&root.join("lib"), "lib")?;
+    require_real_directory(&root.join(lib_arch), lib_arch)?;
+
+    let mut identity = IdentityHasher::new("windows-msvc-toolset", root);
+    for relative in existing_regular_files(root, &["include/vcruntime.h"])? {
+        identity.add_descriptor(root, relative)?;
+    }
+    identity.add_directory(root, Path::new("include"))?;
+    identity.add_directory(root, Path::new("lib"))?;
+    identity.add_directory(root, Path::new(lib_arch))?;
     Ok(identity.finish())
 }
 
@@ -530,29 +788,35 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvRestore {
-        name: &'static str,
-        previous: Option<OsString>,
+        previous: Vec<(&'static str, Option<OsString>)>,
         _lock: MutexGuard<'static, ()>,
     }
 
     impl EnvRestore {
         fn set(name: &'static str, value: &Path) -> Self {
             let lock = ENV_LOCK.lock().expect("environment test lock poisoned");
-            let previous = env::var_os(name);
+            let previous = vec![(name, env::var_os(name))];
             env::set_var(name, value);
             Self {
-                name,
                 previous,
                 _lock: lock,
             }
+        }
+
+        fn and(mut self, name: &'static str, value: &Path) -> Self {
+            self.previous.push((name, env::var_os(name)));
+            env::set_var(name, value);
+            self
         }
     }
 
     impl Drop for EnvRestore {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => env::set_var(self.name, value),
-                None => env::remove_var(self.name),
+            for (name, previous) in self.previous.iter().rev() {
+                match previous {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
             }
         }
     }
@@ -587,6 +851,24 @@ mod tests {
         .unwrap();
     }
 
+    fn write_msvc_toolset(root: &Path) {
+        fs::create_dir_all(root.join("include")).unwrap();
+        fs::create_dir_all(root.join("lib/x64")).unwrap();
+        fs::write(root.join("include/vcruntime.h"), b"#pragma once\n").unwrap();
+    }
+
+    fn home_with_windows_sdk_and_toolset() -> (TempDir, EnvRestore) {
+        let home = tempfile::tempdir().unwrap();
+        let sdk = home.path().join("vendor/windows/sdk");
+        fs::create_dir_all(&sdk).unwrap();
+        write_windows_sdk(&sdk);
+        let tools = home.path().join("vendor/msvc");
+        fs::create_dir_all(&tools).unwrap();
+        write_msvc_toolset(&tools);
+        let restore = EnvRestore::set(home::HOME_ENV, home.path());
+        (home, restore)
+    }
+
     fn home_with_vendor_sdk(os: &str, write_sdk: fn(&Path)) -> (TempDir, EnvRestore) {
         let home = tempfile::tempdir().unwrap();
         let sdk = home.path().join("vendor").join(os).join("sdk");
@@ -594,6 +876,28 @@ mod tests {
         write_sdk(&sdk);
         let restore = EnvRestore::set(home::HOME_ENV, home.path());
         (home, restore)
+    }
+
+    #[test]
+    fn apple_sdk_env_overrides_vendor_directory() {
+        let vendor_home = tempfile::tempdir().unwrap();
+        let vendor_sdk = vendor_home.path().join("vendor/macos/sdk");
+        fs::create_dir_all(&vendor_sdk).unwrap();
+        write_apple_sdk(&vendor_sdk);
+
+        let env_sdk = tempfile::tempdir().unwrap();
+        write_apple_sdk(env_sdk.path());
+        fs::write(
+            env_sdk.path().join("SDKSettings.json"),
+            br#"{"Version":"env","CanonicalName":"macosx-env"}"#,
+        )
+        .unwrap();
+
+        let _restore = EnvRestore::set(home::HOME_ENV, vendor_home.path())
+            .and(home::APPLE_SDK_ROOT_ENV, env_sdk.path());
+        let profile = resolve_target_profile("macos-aarch64").unwrap();
+        let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        assert_eq!(resolved.path, env_sdk.path().canonicalize().unwrap());
     }
 
     #[test]
@@ -632,12 +936,54 @@ mod tests {
 
     #[test]
     fn explicit_windows_sdk_requires_matching_include_and_lib_shape() {
-        let (_home, _restore) = home_with_vendor_sdk("windows", write_windows_sdk);
+        let (_home, _restore) = home_with_windows_sdk_and_toolset();
         let profile = resolve_target_profile("windows-x86_64-msvc").unwrap();
 
         let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
         assert!(resolved.path.ends_with("vendor/windows/sdk"));
+        assert!(resolved
+            .msvc_toolset
+            .as_ref()
+            .unwrap()
+            .ends_with("vendor/msvc"));
         assert_eq!(resolved.identity.len(), 64);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_msvc_requires_toolset_as_well_as_sdk() {
+        let (_home, _restore) = home_with_vendor_sdk("windows", write_windows_sdk);
+        let profile = resolve_target_profile("windows-x86_64-msvc").unwrap();
+        let error = resolve_external_sysroot(profile, None).unwrap_err();
+        assert!(error.to_string().contains("MSVC toolset"), "{error}");
+    }
+
+    #[test]
+    fn explicit_msvc_toolset_env_overrides_vendor_directory() {
+        let vendor_home = tempfile::tempdir().unwrap();
+        let vendor_sdk = vendor_home.path().join("vendor/windows/sdk");
+        fs::create_dir_all(&vendor_sdk).unwrap();
+        write_windows_sdk(&vendor_sdk);
+        let vendor_tools = vendor_home.path().join("vendor/msvc");
+        fs::create_dir_all(&vendor_tools).unwrap();
+        write_msvc_toolset(&vendor_tools);
+
+        let env_tools = tempfile::tempdir().unwrap();
+        write_msvc_toolset(env_tools.path());
+        fs::write(
+            env_tools.path().join("include/vcruntime.h"),
+            b"env-toolset\n",
+        )
+        .unwrap();
+
+        let _restore = EnvRestore::set(home::HOME_ENV, vendor_home.path())
+            .and(home::MSVC_TOOLS_ROOT_ENV, env_tools.path());
+        let profile = resolve_target_profile("windows-x86_64-msvc").unwrap();
+        let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        assert_eq!(
+            resolved.msvc_toolset.unwrap(),
+            env_tools.path().canonicalize().unwrap()
+        );
     }
 
     #[test]

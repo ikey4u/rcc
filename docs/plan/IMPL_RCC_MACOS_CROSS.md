@@ -2,7 +2,7 @@
 
 > 本文是 [RCC_MACOS.md](../design/RCC_MACOS.md) 里「macOS → Linux aarch64」「macOS → Windows」的实现计划。  
 > Linux x86_64 已交付，做法见 [IMPL_RCC_MACOS.md](IMPL_RCC_MACOS.md)。  
-> 不讨论 RCC 自己跑在 Linux/Windows 上。
+> **状态：** 本计划的 macOS→Linux aarch64 与 Windows gnu/gnullvm 已交付。RCC 自己跑在 Linux/Windows 上见 [RCC_LINUX.md](../design/RCC_LINUX.md)、[RCC_WINDOWS.md](../design/RCC_WINDOWS.md)。
 
 ## 0. 交付物
 
@@ -13,7 +13,7 @@
 | `windows-x86_64-gnu` | MinGW-w64 + GNU runtime，hermetic | MVP；pack 内 sysroot；Clang + MinGW LLD |
 | `windows-x86_64-gnullvm` | UCRT + compiler-rt + libunwind + libc++ | Phase 2，但和 arm64 同一套构建 |
 | `windows-aarch64-gnullvm` | 同上，aarch64 | registry 里 Windows arm64 只有这一条 |
-| `windows-x86_64-msvc` | clang-cl + `lld-link` + 自备 SDK | 尽最大努力；RCC 不分发 Microsoft 文件 |
+| `windows-x86_64-msvc` | clang-cl + 自备 SDK；正式支持限 Windows host | 接线完成；交叉（macOS→MSVC）未接 `/winsysroot`，见 [RCC_WINDOWS.md](../design/RCC_WINDOWS.md) |
 
 引擎现状：LLVM 已编 **AArch64 + X86**，LLD 库里已有 `liblldCOFF.a` / `liblldMinGW.a`，只是 `bridge.cpp` 没挂。Windows **不需要重编 LLVM**，只要改 bridge、把 COFF/MinGW 链进 `rcc`、再打 sysroot。
 
@@ -47,7 +47,7 @@ CentOS 7 aarch64 运行时库仍在 `lib64/`，解释器文件同时出现在 `l
 
 - **gnu x64**：MinGW-w64 CRT（Clang 现编）+ 钉死的 GCC runtime（`libgcc` / `libstdc++` / `libgcc_eh`）。不把 `gcc.exe` 打进 pack。
 - **gnullvm x64/arm64**：同一份 mingw-w64 源，`--with-default-msvcrt=ucrt`，再对着 sysroot 预编 compiler-rt / libunwind / libc++。
-- **msvc**：只接线；没有 Windows SDK 就 fail-closed。
+- **msvc**：Windows SDK 与 MSVC toolset 分开发现；clang-cl 注入 `/winsdkdir` / `/vctoolsdir` / 视图 `lld-link`。
 
 ### 5. cargo-rcc / verify / 文档
 

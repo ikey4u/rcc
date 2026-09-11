@@ -7,7 +7,7 @@ use crate::pack::{
 use crate::schema::ViewManifest;
 use anyhow::{ensure, Context, Result};
 use fs2::FileExt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -55,9 +55,9 @@ impl ViewMaterializer {
     /// Creates a materializer rooted at an absolute, canonical cache path.
     pub fn new(cache_root: &Path) -> Result<Self> {
         prepare_directory(cache_root, "cache root")?;
-        let cache_root = cache_root.canonicalize().with_context(|| {
+        let cache_root = strip_verbatim_prefix(cache_root.canonicalize().with_context(|| {
             format!("failed to canonicalize cache root {}", cache_root.display())
-        })?;
+        })?);
         for child in ["blobs", "controllers", "locks", "tmp", "views"] {
             prepare_directory(&cache_root.join(child), "cache directory")?;
         }
@@ -259,10 +259,15 @@ impl ViewMaterializer {
                 file_sha256(&staged)? == digest,
                 "controller executable changed while being persisted"
             );
-            set_file_read_only(&staged, true)?;
-            File::open(&staged)?
+            // Windows FlushFileBuffers requires GENERIC_WRITE; File::open is
+            // read-only and fails with Access Denied after the copy.
+            OpenOptions::new()
+                .write(true)
+                .open(&staged)
+                .context("failed to reopen staged controller for sync")?
                 .sync_all()
                 .context("failed to sync staged controller executable")?;
+            set_file_read_only(&staged, true)?;
             ensure!(
                 !path_exists(&target_directory),
                 "controller cache entry appeared while publishing"
@@ -900,6 +905,20 @@ fn seal_view_contents(root: &Path, pack_manifest: &crate::schema::PackManifest) 
         set_directory_read_only(&directory)?;
     }
     Ok(())
+}
+
+pub(crate) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let owned = path.to_string_lossy().into_owned();
+        if let Some(rest) = owned.strip_prefix(r#"\\?\"#) {
+            if let Some(unc) = rest.strip_prefix(r#"UNC\"#) {
+                return PathBuf::from(format!(r#"\\{unc}"#));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 fn set_file_read_only(path: &Path, executable: bool) -> Result<()> {

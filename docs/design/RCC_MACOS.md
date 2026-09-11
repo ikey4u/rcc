@@ -8,9 +8,9 @@
 
 | Host → Target | Linux | Windows |
 | --- | --- | --- |
-| **macOS** | **已交付** `x86_64` 与 `aarch64` 的 musl-static + gnu-glibc217（C / C++ / `cargo-rcc`） | **已交付** hermetic `windows-x86_64-gnu` / `windows-*-gnullvm`（C / C++ / `cargo-rcc`）；MSVC 尽最大努力（自备 SDK） |
+| **macOS** | **已交付** `x86_64` 与 `aarch64` 的 musl-static + gnu-glibc217（C / C++ / `cargo-rcc`） | **已交付** hermetic `windows-x86_64-gnu` / `windows-*-gnullvm`（C / C++ / `cargo-rcc`）；MSVC 见 [RCC_WINDOWS.md](RCC_WINDOWS.md) |
 
-当前唯一能跑的 controller 是 Apple Silicon 上的 Mach-O `rcc`（`aarch64-apple-darwin`）。`rcc targets` 的 `IN_PAYLOAD` 才表示 pack 里真有资源。原生 `macos-aarch64` 是本机编译，不进上表。
+Apple Silicon 上的 Mach-O `rcc`（`aarch64-apple-darwin`）是 macOS host 发行物。另有 Linux x86_64 与 Windows x86_64-msvc controller，见 [RCC_LINUX.md](RCC_LINUX.md)、[RCC_WINDOWS.md](RCC_WINDOWS.md)。`rcc targets` 的 `IN_PAYLOAD` 才表示 **这份** pack 里真有资源。原生 `macos-aarch64` 是本机编译，不进上表。
 
 ## macOS 作为 host（已交付）
 
@@ -18,11 +18,11 @@
 
 约束：
 
-- `crates/rcc/build.rs` 只接受 `TARGET=aarch64-apple-darwin` 的静态引擎。
+- macOS 上的静态引擎：`TARGET=aarch64-apple-darwin`。Linux / Windows host 各有自己的 `build.rs` 分支，不能混链 Darwin `.a`。
 - LLVM 在 macOS 上用 Apple linker 编；引擎含 **AArch64 + X86** backend，LLD 挂了 **Mach-O + ELF + COFF/MinGW**（`bridge.cpp`：`LLD_HAS_DRIVER(macho)` / `elf` / `coff` / `mingw`）。
 - 运行时只动态依赖 macOS 的 `libSystem` / `libc++` / `libiconv`，不调用系统 clang、ld、LLVM dylib。
-- Apple SDK **不分发**。`RCC_APPLE_SDK_ROOT` 或本机 `xcrun --sdk macosx --show-sdk-path`。
-- `cargo-rcc` 拒绝非 `aarch64-apple-darwin` host。
+- Apple SDK **不分发**。发现顺序：`RCC_APPLE_SDK_ROOT`，`$RCC_HOME_DIR/vendor/macos`，否则本机 `xcrun --sdk macosx --show-sdk-path`。
+- `cargo-rcc` 在 macOS 上要求 host `aarch64-apple-darwin`。Linux / Windows 发行另接受对应 rustc host。
 
 ### macOS → Linux（已交付）
 
@@ -40,9 +40,9 @@ C / C++（预编静态 libc++）和 `cargo rcc`（OpenSSL、SQLite；x86_64 gnu 
 | Profile | 状态 |
 | --- | --- |
 | `macos-aarch64` / `host-macos-aarch64` | 已包含：Clang + `ld64.lld` + 外部 Apple SDK |
-| `macos-x86_64` / `host-macos-x86_64` | registry 有，payload 无 |
+| `macos-x86_64` / `host-macos-x86_64` | Linux / Windows 的 release pack 会打进；Apple Silicon 本机 pack 以 `rcc targets` 为准 |
 
-引擎已有 X86 backend，缺的是 x86_64 Darwin sysroot/SDK fixture 与验收，不是 CPU backend。
+Darwin compiler-rt 仍从官方 macOS ARM64 LLVM 归档抽取。`macos-x86_64` 链接时可能提示 `libclang_rt.osx.a` 只有 arm64。
 
 ### macOS → Windows（已交付 hermetic gnu / gnullvm）
 
@@ -51,12 +51,12 @@ C / C++（预编静态 libc++）和 `cargo rcc`（OpenSSL、SQLite；x86_64 gnu 
 | `windows-x86_64-gnu` | `x86_64-pc-windows-gnu` | MinGW-w64 MSVCRT（C / rustc）+ compiler-rt/libc++ 以 GNU 名称（`libgcc` / `libstdc++`）暴露；C++ 另链 `-lucrt` |
 | `windows-x86_64-gnullvm` | `x86_64-pc-windows-gnullvm` | UCRT + compiler-rt + libunwind + libc++ |
 | `windows-aarch64-gnullvm` | `aarch64-pc-windows-gnullvm` | 同上，aarch64 |
-| `windows-x86_64-msvc` | `x86_64-pc-windows-msvc` | clang-cl + `lld-link`；Windows SDK **不分发**，`RCC_WINDOWS_SDK_ROOT` |
+| `windows-x86_64-msvc` | `x86_64-pc-windows-msvc` | clang-cl + `lld-link`；Windows SDK / MSVC toolset **不分发**。交叉需 `RCC_WINDOWS_SDK_ROOT` 与 `RCC_MSVC_TOOLS_ROOT` |
 
-gnu / gnullvm 为 pack 内 hermetic sysroot（`mise setup` 拉取 mingw-w64 12.0.0）。MSVC 尽最大努力，没有 SDK 就 fail-closed。`rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` 这类会依赖本机 MinGW 的导入。验收：`mise check`（有 release `rcc` 时）或 `./scripts/verify-windows.sh windows-x86_64-gnu` / `windows-x86_64-gnullvm`。不存在 `windows-aarch64-gnu`。
+gnu / gnullvm 为 pack 内 hermetic sysroot（`mise setup` 拉取 mingw-w64 12.0.0）。MSVC 见 [RCC_WINDOWS.md](RCC_WINDOWS.md)。`rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` 这类会依赖本机 MinGW 的导入。验收：`mise check`（有 release `rcc` 时）或 `./scripts/verify-windows.sh windows-x86_64-gnu` / `windows-x86_64-gnullvm`。MSVC：`./scripts/verify-windows.sh windows-x86_64-msvc`。不存在 `windows-aarch64-gnu`。
 
 ## 相关文档
 
 - [RCC_LINUX.md](RCC_LINUX.md) — Linux host：编向 macOS / Windows
-- [RCC_WINDOWS.md](RCC_WINDOWS.md) — Windows host：编向 Linux / macOS
+- [RCC_WINDOWS.md](RCC_WINDOWS.md) — Windows host：编向 Linux / macOS / Windows
 - [ARCH.md](ARCH.md) — 产品边界与 profile registry

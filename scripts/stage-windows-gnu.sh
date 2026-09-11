@@ -55,15 +55,18 @@ if [ ! -f "$builtins" ] || [ ! -f "$gnullvm_lib/libc++.a" ] || [ ! -f "$gnullvm_
 fi
 
 sysroot_destination=$stage/$profile_sysroot
-rm -rf "$sysroot_destination"
 mkdir -p "$sysroot_destination"
 
-"$script_directory/stage-mingw-w64-crt.sh" \
-    "$arch" \
-    msvcrt \
-    "$mingw_archive" \
-    "$bootstrap_prefix" \
-    "$sysroot_destination"
+if [ -f "$sysroot_destination/lib/libmingwex.a" ]; then
+    echo "reusing mingw-w64 msvcrt CRT at $sysroot_destination"
+else
+    "$script_directory/stage-mingw-w64-crt.sh" \
+        "$arch" \
+        msvcrt \
+        "$mingw_archive" \
+        "$bootstrap_prefix" \
+        "$sysroot_destination"
+fi
 
 # libc++ is built against UCRT (see stage-windows-gnullvm.sh). The gnu C++
 # driver injects -lucrt so those UCRT symbols resolve; C stays on MSVCRT.

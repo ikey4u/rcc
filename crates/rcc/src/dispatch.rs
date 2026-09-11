@@ -525,6 +525,7 @@ fn normalize_version(value: &str) -> Vec<u64> {
 
 fn is_link_only_injected_argument(argument: &str) -> bool {
     argument.starts_with("--ld-path=")
+        || argument.starts_with("/clang:--ld-path=")
         || argument.starts_with("--rtlib=")
         || argument.starts_with("-rtlib=")
         || argument.starts_with("-unwindlib=")

@@ -45,12 +45,9 @@ mingw_root=mingw-w64-v12.0.0
 profile_sysroot=sysroots/windows-$arch-gnullvm
 clang_target=$arch-w64-windows-gnu
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=lib/posix.sh
+. "$script_directory/lib/posix.sh"
 repository=$(CDPATH= cd -- "$script_directory/.." && pwd)
-
-if [ ! -x "$bootstrap_prefix/bin/clang" ]; then
-    echo "bootstrap clang is missing: $bootstrap_prefix/bin/clang" >&2
-    exit 66
-fi
 if [ ! -d "$stage/lib/clang/22" ]; then
     echo "stage directory is missing Clang resources: $stage" >&2
     exit 66
@@ -60,17 +57,17 @@ if [ ! -d "$llvm_source/compiler-rt" ]; then
     exit 66
 fi
 
-clang=$bootstrap_prefix/bin/clang
-clangxx=$bootstrap_prefix/bin/clang++
-archiver=$bootstrap_prefix/bin/llvm-ar
-ranlib=$bootstrap_prefix/bin/llvm-ranlib
-linker=$bootstrap_prefix/bin/ld.lld
+clang=$(native_tool_path "$bootstrap_prefix/bin/clang")
+clangxx=$(native_tool_path "$bootstrap_prefix/bin/clang++")
+archiver=$(native_tool_path "$bootstrap_prefix/bin/llvm-ar")
+ranlib=$(native_tool_path "$bootstrap_prefix/bin/llvm-ranlib")
+linker=$(native_tool_path "$bootstrap_prefix/bin/ld.lld")
 cmake_command=${RCC_LLVM_CMAKE:-cmake}
 ninja_command=${RCC_LLVM_NINJA:-ninja}
 build_jobs=${RCC_LLVM_BUILD_JOBS:-8}
 
 for required in "$clang" "$clangxx" "$archiver" "$ranlib" "$linker"; do
-    if [ ! -x "$required" ]; then
+    if [ ! -f "$required" ]; then
         echo "required bootstrap tool is missing: $required" >&2
         exit 69
     fi
@@ -85,7 +82,6 @@ if ! command -v "$ninja_command" >/dev/null 2>&1; then
 fi
 
 sysroot_destination=$stage/$profile_sysroot
-rm -rf "$sysroot_destination"
 mkdir -p "$sysroot_destination"
 
 "$script_directory/stage-mingw-w64-crt.sh" \
@@ -95,19 +91,23 @@ mkdir -p "$sysroot_destination"
     "$bootstrap_prefix" \
     "$sysroot_destination"
 
+sysroot_native=$(native_path "$sysroot_destination")
+stage_native=$(native_path "$stage")
+llvm_source_native=$(native_path "$llvm_source")
+
 echo "building compiler-rt builtins for $clang_target"
 builtins_build=${RCC_WINDOWS_COMPILER_RT_BUILD:-$repository/inner/llvm-engine/compiler-rt-windows-$arch}
 (
     unset SDKROOT
     "$cmake_command" \
-        -S "$llvm_source/compiler-rt" \
+        -S "$llvm_source_native/compiler-rt" \
         -B "$builtins_build" \
         -G Ninja \
         "-DCMAKE_MAKE_PROGRAM=$ninja_command" \
         -DCMAKE_BUILD_TYPE=MinSizeRel \
         -DCMAKE_SYSTEM_NAME=Windows \
         "-DCMAKE_SYSTEM_PROCESSOR=$arch" \
-        "-DCMAKE_SYSROOT=$sysroot_destination" \
+        "-DCMAKE_SYSROOT=$sysroot_native" \
         "-DCMAKE_C_COMPILER=$clang" \
         "-DCMAKE_CXX_COMPILER=$clangxx" \
         "-DCMAKE_ASM_COMPILER=$clang" \
@@ -115,8 +115,8 @@ builtins_build=${RCC_WINDOWS_COMPILER_RT_BUILD:-$repository/inner/llvm-engine/co
         "-DCMAKE_C_COMPILER_TARGET=$clang_target" \
         "-DCMAKE_CXX_COMPILER_TARGET=$clang_target" \
         "-DCMAKE_ASM_COMPILER_TARGET=$clang_target" \
-        "-DCMAKE_C_FLAGS=--target=$clang_target --sysroot=$sysroot_destination -fPIC" \
-        "-DCMAKE_ASM_FLAGS=--target=$clang_target --sysroot=$sysroot_destination" \
+        "-DCMAKE_C_FLAGS=--target=$clang_target --sysroot=$sysroot_native -fPIC" \
+        "-DCMAKE_ASM_FLAGS=--target=$clang_target --sysroot=$sysroot_native" \
         "-DCMAKE_AR=$archiver" \
         "-DCMAKE_RANLIB=$ranlib" \
         -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
@@ -158,19 +158,19 @@ cp -L "$builtins_archive" "$sysroot_destination/lib/libclang_rt.builtins-$arch.a
 
 echo "building libc++ / libc++abi / libunwind for $clang_target"
 cxx_build=${RCC_WINDOWS_LIBCXX_BUILD:-$repository/inner/llvm-engine/libcxx-windows-$arch-gnullvm}
-common_flags="--target=$clang_target --sysroot=$sysroot_destination -resource-dir=$stage/lib/clang/22 -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables -faligned-allocation -nostdinc++"
-c_flags="--target=$clang_target --sysroot=$sysroot_destination -resource-dir=$stage/lib/clang/22 -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables"
+common_flags="--target=$clang_target --sysroot=$sysroot_native -resource-dir=$stage_native/lib/clang/22 -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables -faligned-allocation -nostdinc++"
+c_flags="--target=$clang_target --sysroot=$sysroot_native -resource-dir=$stage_native/lib/clang/22 -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables"
 (
     unset SDKROOT
     "$cmake_command" \
-        -S "$llvm_source/runtimes" \
+        -S "$llvm_source_native/runtimes" \
         -B "$cxx_build" \
         -G Ninja \
         "-DCMAKE_MAKE_PROGRAM=$ninja_command" \
         -DCMAKE_BUILD_TYPE=MinSizeRel \
         -DCMAKE_SYSTEM_NAME=Windows \
         "-DCMAKE_SYSTEM_PROCESSOR=$arch" \
-        "-DCMAKE_SYSROOT=$sysroot_destination" \
+        "-DCMAKE_SYSROOT=$sysroot_native" \
         "-DCMAKE_C_COMPILER=$clang" \
         "-DCMAKE_CXX_COMPILER=$clangxx" \
         "-DCMAKE_ASM_COMPILER=$clang" \
@@ -180,7 +180,7 @@ c_flags="--target=$clang_target --sysroot=$sysroot_destination -resource-dir=$st
         "-DCMAKE_ASM_COMPILER_TARGET=$clang_target" \
         "-DCMAKE_C_FLAGS=$c_flags" \
         "-DCMAKE_CXX_FLAGS=$common_flags" \
-        "-DCMAKE_ASM_FLAGS=--target=$clang_target --sysroot=$sysroot_destination" \
+        "-DCMAKE_ASM_FLAGS=--target=$clang_target --sysroot=$sysroot_native" \
         "-DCMAKE_AR=$archiver" \
         "-DCMAKE_RANLIB=$ranlib" \
         -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \

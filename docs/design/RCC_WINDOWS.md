@@ -1,52 +1,110 @@
 # RCC 与 Windows
 
-> 本文写 **Windows 作为 controller host**：编向 Linux 与 macOS。  
+> 本文写 **Windows 作为 controller host**：编向 Linux、macOS 与 Windows 目标。  
 > 总架构见 [ARCH.md](ARCH.md)。  
 > 从 macOS / Linux 编 Windows，见 [RCC_MACOS.md](RCC_MACOS.md)、[RCC_LINUX.md](RCC_LINUX.md)。
 
 ## 交叉矩阵
 
-| Host → Target | Linux | macOS |
+| Host → Target | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| **Windows x86_64** | **已交付** musl-static / gnu-glibc217（x86_64 与 aarch64）：编译 + `rcc verify` | **已交付**（尽最大努力）：自备 Apple SDK；编译 + `rcc verify`；不在 Windows 上执行 Mach-O | gnu / gnullvm 进 pack；**MSVC 已支持**（Windows host + 本机 VS / Windows SDK，非 hermetic） |
+
+发行物：PE32+ `rcc.exe`（`x86_64-pc-windows-msvc`）。不能把 Darwin LLVM `.a` 链进 PE；引擎在 Windows 上用本机 Clang + `lld-link` 静态编。multicall alias 带 `.exe` 后缀。
+
+第一份 Windows controller 走 **MSVC 宿主**（编 `rcc.exe` 本身需要 VS Build Tools）。运行时 gnu/gnullvm **目标**不依赖本机 MinGW。MSVC **目标**用 clang-cl + 外部 Windows SDK / MSVC toolset，见下文。
+
+## Windows 作为 host（已交付）
+
+引擎：Clang + LLD（Mach-O / ELF / COFF / MinGW）+ llvm-ar，`bridge.cpp` 挂 `LLD_HAS_DRIVER(macho|elf|coff|mingw)`。Windows 上 `ld64.lld.exe` 必须按 Mach-O flavor 分发（basename 含 `.exe`）。pack 与 macOS / Linux host 同一套 linux / windows / macos **目标** sysroot（Apple SDK 仍在 pack 外）。
+
+`cargo-rcc` 的 Windows 发行接受 host `x86_64-pc-windows-msvc`（以及 `x86_64-pc-windows-gnu`）。
+
+### 准备环境
+
+Linux musl/gnu 与 Windows gnu/gnullvm sysroot **已在 pack 内**，不必每个开发者再 stage。专有 SDK 用一键脚本：
+
+```sh
+mise setup                 # 含 Apple SDK（非 macOS）+ 钉死归档
+./scripts/setup-env.sh     # 只准备 SDK
+```
+
+`setup-env.sh` 把 phracker `MacOSX11.3.sdk` 摊到 `$RCC_HOME_DIR/vendor/macos`（Windows 上摊平 Darwin alias、跳过非法文件名）。`rcc` 会找 `vendor/macos`，也可设 `RCC_APPLE_SDK_ROOT`。MSVC 目标的 Windows SDK / MSVC toolset 见下一节；脚本只探测、不下发。
+
+钉死 URL / 摘要：`toolchains/macosx-11.3-sdk.lock.json`。
+
+### Windows → Linux（已交付）
+
+合同与 [RCC_MACOS.md](RCC_MACOS.md) 相同。验收：`rcc doctor`、C/C++ 编译链接、`rcc verify` 检查 ELF。Windows 上不执行 ELF；要跑产物请拿到 Linux 或 qemu/Lima 上。
+
+### Windows → macOS（尽最大努力，已验收编译）
+
+与 Linux → macOS 相同：RCC 不分发 Apple SDK，不要求签名/公证。provider 在非 macOS 上不自动 `xcrun`。
+
+验收：`scripts/verify-macos.sh`（编译 + `rcc verify`）。要执行 Mach-O，把产物拷到 Mac 上跑（可 ad-hoc `codesign -s -`）；x86_64 切片在 Apple Silicon 上走 Rosetta。
+
+`macos-x86_64` 已打进这份 Windows pack。Darwin compiler-rt 抽自官方 macOS ARM64 LLVM 归档，x86_64 链接可能提示 `libclang_rt.osx.a` 只有 arm64。
+
+### Windows → Windows
+
+| Profile | Rust triple | 策略 | 当前 |
+| --- | --- | --- | --- |
+| `windows-x86_64-gnu` | `x86_64-pc-windows-gnu` | MinGW-w64 MSVCRT，hermetic sysroot 进 pack | pack 有；从 Windows host 链 PE 尚未作为验收门槛 |
+| `windows-x86_64-gnullvm` | `x86_64-pc-windows-gnullvm` | UCRT + compiler-rt + libunwind + libc++ | `rcc doctor` 通过；从 Windows host 链接曾缺 `kernel32` dllimport，未关单 |
+| `windows-aarch64-gnullvm` | `aarch64-pc-windows-gnullvm` | 同上，aarch64 | pack 有 |
+| `windows-x86_64-msvc` | `x86_64-pc-windows-msvc` | clang-cl + `lld-link` + 外部 Windows SDK 与 MSVC toolset | **已支持**；见下节 |
+
+- **gnu / gnullvm**：hermetic，最终用户编这些目标不需要 VS。sysroot 来自 pack。
+- **msvc**：需要本机 Microsoft 组件。RCC 不分发 Windows SDK 或 MSVC toolset。
+
+从 **macOS / Linux host** 编 gnu/gnullvm 的验收见 [VERIFY.md](../VERIFY.md) 的 `verify-windows.sh`。MSVC 同一脚本：`./scripts/verify-windows.sh windows-x86_64-msvc`（需要 SDK + toolset；默认 `mise check` 不跑它）。
+
+## `windows-x86_64-msvc`
+
+这是 registry 里的正式 profile（target `windows-x86_64-msvc`、host `host-windows-x86_64-msvc`）。release pack 会声明它，但不打进任何 Microsoft 文件。和 gnu/gnullvm 不同，它不是 hermetic sysroot。
+
+ABI：`x86_64-pc-windows-msvc`，clang-cl，UCRT + 动态 vcruntime（`/MD`），C++ 用 MSVC STL。工具：`cc` / `cxx` / `lld-link` / `ar` / `ranlib`。没有 `lib.exe`、`rc.exe`、`mt.exe`。
+
+clang-cl 注入 `/winsdkdir`、`/vctoolsdir`、`/clang:--ld-path=<视图里的 lld-link>`。C++ 另注 `/EHsc`（与 `cl.exe` 默认关异常不同，`rcc cxx` 需要能编 `try`/`throw`）。用户不能再传 `/winsdkdir`、`/vctoolsdir`、`/winsysroot`。`INCLUDE` / `LIB` / `LIBPATH` / `CL` / `LINK` 仍被清掉。
+
+### 调用方要准备什么
+
+两棵树，分开发现、一起进入 view 身份：
+
+1. **Windows SDK（Kits 10）** — `/winsdkdir`。根目录有 `Include/` 和 `Lib/`；至少一个版本同时有 `Include/<ver>/{ucrt,um,shared}` 和 `Lib/<ver>/{ucrt,um}`。
+2. **MSVC toolset** — `/vctoolsdir`。`VC/Tools/MSVC/<ver>`，内含 `include/` 和 `lib/x64`（或 `lib/amd64`）。
+
+发现顺序相同：环境变量，`$RCC_HOME_DIR/vendor/{windows,msvc}`，Windows 上再搜已安装的 Kits / VS（`vswhere` 与常见 `BuildTools`/`Community` 路径）。根必须是真实目录，junction / symlink 叶会被拒绝。
+
+| | Windows SDK | MSVC toolset |
 | --- | --- | --- |
-| **Windows** | **未交付** | **未交付**（尽最大努力：自备 Apple SDK；不要求签名/公证） |
+| 环境变量 | `RCC_WINDOWS_SDK_ROOT` | `RCC_MSVC_TOOLS_ROOT` |
+| vendor | `$RCC_HOME_DIR/vendor/windows` | `$RCC_HOME_DIR/vendor/msvc` |
+| Windows host 回落 | `Windows Kits\10` | `VC\Tools\MSVC\<ver>` |
 
-还没有 `rcc.exe`。registry 里的 `host-windows-x86_64-gnu` / `gnullvm` / `msvc` 只是 host ABI 名。原生 Windows 编译不进上表。
+缺任何一块，`rcc doctor` / `rcc cc` fail-closed。从 macOS / Linux 交叉时把两棵树拷过去（或设那两个环境变量），不要指望 vswhere。
 
-## Windows 作为 host（未交付）
+```sh
+export RCC_WINDOWS_SDK_ROOT="C:/Program Files (x86)/Windows Kits/10"
+export RCC_MSVC_TOOLS_ROOT="C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207"
 
-要先有 Windows 上的静态引擎 `rcc.exe`（不能把 Darwin LLVM `.a` 链进 PE）。优先 **windows-gnu 编出来的 controller**，不假设已装 VS。Windows 上的 multicall alias（hardlink 或 copy）、argv0、`.exe` 后缀需要真机验收。
+rcc doctor --profile windows-x86_64-msvc
 
-Linker 在 schema 里已分 flavor：`CoffGnu` → `ld.lld`，`CoffMsvc` → `lld-link`。`environment.rs` 知道 `.exe`。缺的是引擎和 pack：
+rcc cc --profile windows-x86_64-msvc -- -o hello.exe hello.c
+rcc cxx --profile windows-x86_64-msvc -- -o hello.exe hello.cpp
 
-- `crates/rcc/native/bridge.cpp` 只 `LLD_HAS_DRIVER(macho)` 与 `elf`，**没有 COFF**。
-- 没有 `sysroot-windows-*` 打进 `.rccpack`。
-- 没有 PE `rcc verify` 验收夹具。
-- `cargo-rcc` 不接受任何 `*-pc-windows-*` triple。
+rcc verify --profile windows-x86_64-msvc hello.exe
+```
 
-### Windows → Linux（未交付）
+Windows host 上若已装 VS Build Tools 和 Windows SDK，通常不用设环境变量。
 
-比 Windows → macOS 便宜：macOS host 已经把 musl / gnu-glibc217 sysroot 和 ELF LLD 做进引擎。Windows controller 只要带上同一份 linux pack（或兼容资源），就可以 `rcc cc` / `cargo rcc --target x86_64-unknown-linux-*`。尚未做是因为没有 `rcc.exe`。合同见 [RCC_MACOS.md](RCC_MACOS.md)。
+`rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`。UCRT / vcruntime 导入是允许的。
 
-### Windows → Windows（controller 就绪后）
-
-| Profile | Rust triple | 策略 | 阶段（ARCH） | 当前 |
-| --- | --- | --- | --- | --- |
-| `windows-x86_64-gnu` | `x86_64-pc-windows-gnu` | MinGW-w64 + GNU runtime，**hermetic sysroot 进 pack** | MVP | registry 有；无 sysroot、无 COFF LLD |
-| `windows-x86_64-gnullvm` | `x86_64-pc-windows-gnullvm` | LLVM-MinGW / UCRT / compiler-rt / libunwind / libc++ | Phase 2 | 同上 |
-| `windows-aarch64-gnullvm` | `aarch64-pc-windows-gnullvm` | 同上，aarch64 | Phase 2 | 同上 |
-| `windows-x86_64-msvc` | `x86_64-pc-windows-msvc` | clang-cl + `lld-link` + **外部** Windows SDK / MSVC headers 与 libs | 尽最大努力 | provider 骨架有；无验收 |
-
-- **gnu / gnullvm**：hermetic，无 VS 也能编（与「bare Windows host」目标一致）。sysroot 来自 pack，不依赖本机 MinGW 安装。
-- **msvc**：尽最大努力。不承诺「只装 RCC、不装任何 Microsoft 组件就能编 MSVC ABI」。调用方准备一份 **Windows SDK** 以及配套 **headers/libs**（UCRT、UM、以及 MSVC toolset 的 vcruntime/STL 等）。RCC 不分发这些专有文件。
-
-已有挂钩：`WINDOWS_MSVC_PROVIDER`、`RCC_WINDOWS_SDK_ROOT`、shape/fingerprint（`crates/rcc/src/provider.rs`）。有 SDK 树就编，没有就 fail-closed。不把 VS Build Tools 安装向导做成 RCC 的运行时依赖，但允许指向一份已展开的 SDK + lib 根目录。clang-cl / lld-link / `DriverKind::ClangCl` 已在 schema 里，尚未接到静态引擎。
-
-### Windows → macOS（尽最大努力）
-
-与 Linux → macOS 相同：自备 Apple SDK（`RCC_APPLE_SDK_ROOT`），不分发 SDK，不要求 RCC 做签名/公证。未做：Windows controller、Mach-O 在 Windows 上的验收。见 [RCC_LINUX.md](RCC_LINUX.md)。
+`cargo-rcc --target x86_64-pc-windows-msvc` 选这个 profile 和合同 `native-rcc-owned`。Windows 上 rustc host 可以是 `x86_64-pc-windows-msvc`。MSVC 目标的 `examples/windows-hello` 走 `verify-windows.sh windows-x86_64-msvc`，不进默认 `mise check`。
 
 ## 相关文档
 
 - [RCC_MACOS.md](RCC_MACOS.md)
 - [RCC_LINUX.md](RCC_LINUX.md)
+- [../VERIFY.md](../VERIFY.md)
 - [ARCH.md](ARCH.md) §3.2、§10.3

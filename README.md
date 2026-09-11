@@ -20,28 +20,31 @@ Design: [docs/design/ARCH.md](docs/design/ARCH.md). Per-OS matrices:
 | --- | --- | --- |
 | macOS arm64 | `aarch64-apple-darwin` | Delivered |
 | Linux x86_64 | `x86_64-unknown-linux-gnu` | Delivered |
-| Windows | — | Not delivered |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | Delivered |
 
 Targets in a typical payload (confirm with `rcc targets`):
 
 - **Linux:** `linux-{x86_64,aarch64}-musl-static`, `linux-{x86_64,aarch64}-gnu-glibc217`
-- **Windows:** hermetic `windows-x86_64-gnu`, `windows-{x86_64,aarch64}-gnullvm`; best-effort `windows-x86_64-msvc`
-- **macOS:** `macos-aarch64` (external Apple SDK); `macos-x86_64` is registered but not packed
+- **Windows:** hermetic `windows-x86_64-gnu`, `windows-{x86_64,aarch64}-gnullvm`; managed `windows-x86_64-msvc` (Windows host + VS / Windows SDK)
+- **macOS:** `macos-aarch64` and (on Linux/Windows packs) `macos-x86_64`; both need an external Apple SDK off macOS
 
 Musl artifacts are static PIE (no interpreter, no `GLIBC_`). GNU artifacts are
 dynamic with `GLIBC_` ≤ 2.17. Windows gnu/gnullvm sysroots are packed
-MinGW-w64; MSVC needs a caller-provided Windows SDK. Apple and Windows SDKs are
-never redistributed.
+MinGW-w64. `windows-x86_64-msvc` is a managed profile: RCC ships clang-cl, the
+caller supplies a Windows SDK tree and (on Windows) a VS MSVC toolset. Apple
+and Windows SDKs are never redistributed.
 
 RCC does not invoke the host `clang`, `gcc`, or `ld`.
 
 ## Build and install
 
 Requires Rust 1.85+, CMake, and Ninja. On macOS, Xcode CLT is used only as the
-build-time host linker.
+build-time host linker. On Windows, building `rcc.exe` needs VS Build Tools
+(the first Windows controller is MSVC-hosted).
 
 ```sh
-mise setup              # cargo fetch, pinned archives; Lima guests on macOS
+mise setup              # cargo fetch, pinned archives; Apple SDK off macOS; Lima on macOS
+mise run setup:env      # only the Apple SDK / host SDK probe (no cargo fetch)
 mise release            # rebuild cargo-rcc and rcc; zip dist/rcc-{os}-{arch}-{version}.zip
 mise run release:install
 ```
@@ -80,7 +83,8 @@ closed. `rcc env --format sh` emits the matching unsets.
 ## cargo-rcc
 
 `cargo rcc` is `cargo build` with RCC as `cc` / linker. Hosts:
-`aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`. It locates `rcc` from
+`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`,
+and `x86_64-pc-windows-gnu`. It locates `rcc` from
 `--rcc`, `$RCC`, a sibling of `cargo-rcc`, `$PATH`, then `$CARGO_HOME/bin`.
 
 ```sh
@@ -109,11 +113,22 @@ Details: [docs/VERIFY.md](docs/VERIFY.md),
 
 ## External SDKs
 
-Place proprietary SDKs under `$RCC_HOME_DIR/vendor/{macos,windows}`
+Place proprietary SDKs under `$RCC_HOME_DIR/vendor/{macos,windows,msvc}`
 (`--home-dir` / `RCC_HOME_DIR`; default is the platform local-data `rcc`
-directory). On macOS, if `vendor/macos` is absent, RCC falls back to
-`xcrun --sdk macosx --show-sdk-path`. Flatten an Apple SDK with
-`scripts/stage-apple-sdk.sh`.
+directory), or set `RCC_APPLE_SDK_ROOT` / `RCC_WINDOWS_SDK_ROOT` /
+`RCC_MSVC_TOOLS_ROOT`. On macOS, if neither Apple path is set, RCC falls back
+to `xcrun --sdk macosx --show-sdk-path`. On Windows, missing Windows SDK /
+MSVC toolset paths fall back to an installed Kits tree and Visual Studio.
+
+Linux/Windows gnu/gnullvm sysroots are inside the rcc pack. The Apple SDK is
+not. Off macOS, `mise setup` (or `./scripts/setup-env.sh`) downloads phracker
+MacOSX11.3.sdk and stages it into `vendor/macos`. On Windows the unpacker
+flattens Darwin aliases and skips NTFS-illegal names so Clang can use the tree.
+
+`windows-x86_64-msvc` needs a Windows Kits 10 tree and an MSVC toolset
+(`RCC_WINDOWS_SDK_ROOT` / `RCC_MSVC_TOOLS_ROOT`, or `vendor/windows` and
+`vendor/msvc`; real directories, not junctions). On Windows, rcc also searches
+installed Kits and VS. Details: [RCC_WINDOWS.md](docs/design/RCC_WINDOWS.md).
 
 ## Check
 
@@ -136,8 +151,13 @@ Linux guest VMs (Homebrew `qemu-system` + Lima) are set up on macOS only.
 
 ## Limits
 
-- Windows as a controller host is not delivered.
-- `macos-x86_64` has no packed Darwin sysroot yet.
+- The first Windows controller is MSVC-hosted (`rcc.exe`). Linking
+  windows-gnu/gnullvm **from that Windows host** is not a closed verify yet;
+  those targets are verified from macOS/Linux hosts. `windows-x86_64-msvc`
+  binds `/winsdkdir` + `/vctoolsdir` + view `lld-link`. See
+  [RCC_WINDOWS.md](docs/design/RCC_WINDOWS.md).
+- Apple Silicon macOS packs may omit `macos-x86_64`; Linux/Windows packs include
+  it. `libclang_rt.osx.a` currently comes from the macOS ARM64 LLVM archive.
 - Linux gnu user binaries stay on GLIBC 2.17; the Linux `rcc` itself may link a
   newer host glibc.
 - Default C++ is static libc++; there is no shared `libc++.so`.

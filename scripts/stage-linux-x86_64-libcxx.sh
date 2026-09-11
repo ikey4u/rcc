@@ -9,6 +9,10 @@
 #     <target-triple> <gnu|musl> <persist-build-dir> <shared-header-dir>
 set -eu
 
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=lib/posix.sh
+. "$script_directory/lib/posix.sh"
+
 if [ "$#" -ne 8 ]; then
     echo "usage: $0 <sysroot> <clang-resource-dir> <llvm-src> <bootstrap-prefix> <target-triple> <gnu|musl> <build-dir> <shared-header-dir>" >&2
     exit 64
@@ -52,17 +56,17 @@ if [ ! -d "$llvm_source/runtimes" ] || [ ! -d "$llvm_source/libcxx" ]; then
     exit 66
 fi
 
-clang=$bootstrap_prefix/bin/clang
-clangxx=$bootstrap_prefix/bin/clang++
-archiver=$bootstrap_prefix/bin/llvm-ar
-ranlib=$bootstrap_prefix/bin/llvm-ranlib
-linker=$bootstrap_prefix/bin/ld.lld
+clang=$(native_tool_path "$bootstrap_prefix/bin/clang")
+clangxx=$(native_tool_path "$bootstrap_prefix/bin/clang++")
+archiver=$(native_tool_path "$bootstrap_prefix/bin/llvm-ar")
+ranlib=$(native_tool_path "$bootstrap_prefix/bin/llvm-ranlib")
+linker=$(native_tool_path "$bootstrap_prefix/bin/ld.lld")
 cmake_command=${RCC_LLVM_CMAKE:-cmake}
 ninja_command=${RCC_LLVM_NINJA:-ninja}
 build_jobs=${RCC_LLVM_BUILD_JOBS:-8}
 
 for required in "$clang" "$clangxx" "$archiver" "$ranlib" "$linker"; do
-    if [ ! -x "$required" ]; then
+    if [ ! -f "$required" ]; then
         echo "required bootstrap tool is missing: $required" >&2
         exit 69
     fi
@@ -78,6 +82,10 @@ fi
 
 # Do not inherit the macOS SDK; this is a linux cross compile.
 unset SDKROOT
+
+sysroot=$(native_path "$sysroot")
+resource_dir=$(native_path "$resource_dir")
+llvm_source=$(native_path "$llvm_source")
 
 common_flags="--target=$target_triple --sysroot=$sysroot -resource-dir=$resource_dir -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables -faligned-allocation -nostdinc++"
 c_flags="--target=$target_triple --sysroot=$sysroot -resource-dir=$resource_dir -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables"

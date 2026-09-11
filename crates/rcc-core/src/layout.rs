@@ -5,7 +5,7 @@ use crate::schema::{
     launcher_name, DriverKind, LinkerFlavor, PackFile, Profile, RuntimeContract, ToolKind,
     ViewManifest, ViewTool, SCHEMA_VERSION,
 };
-use crate::view::{ControllerExecutable, ViewMaterializer};
+use crate::view::{strip_verbatim_prefix, ControllerExecutable, ViewMaterializer};
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 pub struct ExternalSysroot {
     pub path: PathBuf,
     pub identity: String,
+    /// MSVC toolset root (`VC/Tools/MSVC/<ver>`). Required for clang-cl.
+    pub msvc_toolset: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -179,10 +181,18 @@ pub fn build_view_manifest(
     let resource_relative = resource_directory(&pack.manifest.files)?;
     let resource_dir = root.join(resource_relative);
     let sysroot = match external_sysroot {
-        Some(external) => external.path.canonicalize().with_context(|| {
-            format!("failed to resolve SDK sysroot {}", external.path.display())
-        })?,
+        Some(external) => {
+            strip_verbatim_prefix(external.path.canonicalize().with_context(|| {
+                format!("failed to resolve SDK sysroot {}", external.path.display())
+            })?)
+        }
         None => root.join(sysroot_directory(&pack.manifest.files, profile)?),
+    };
+    let msvc_toolset = match external_sysroot.and_then(|value| value.msvc_toolset.as_ref()) {
+        Some(path) => Some(strip_verbatim_prefix(path.canonicalize().with_context(
+            || format!("failed to resolve MSVC toolset {}", path.display()),
+        )?)),
+        None => None,
     };
     let cxx_headers = if profile.tool_kinds.contains(&ToolKind::Cxx) {
         cxx_header_directories(&pack.manifest.files, profile, &root, &sysroot)?
@@ -203,8 +213,15 @@ pub fn build_view_manifest(
                 driver_kind: static_driver_kind(profile, *kind),
             },
         );
-        let arguments =
-            trusted_arguments(profile, *kind, &root, &sysroot, &resource_dir, &cxx_headers)?;
+        let arguments = trusted_arguments(
+            profile,
+            *kind,
+            &root,
+            &sysroot,
+            msvc_toolset.as_deref(),
+            &resource_dir,
+            &cxx_headers,
+        )?;
         if !arguments.is_empty() {
             injected_args.insert(*kind, arguments);
         }
@@ -543,6 +560,7 @@ fn trusted_arguments(
     kind: ToolKind,
     root: &Path,
     sysroot: &Path,
+    msvc_toolset: Option<&Path>,
     resource_dir: &Path,
     cxx_headers: &[PathBuf],
 ) -> Result<Vec<String>> {
@@ -552,17 +570,23 @@ fn trusted_arguments(
 
     let mut arguments = vec![
         format!("--target={}", profile.clang_target),
-        format!("--sysroot={}", sysroot.display()),
         format!("-resource-dir={}", resource_dir.display()),
     ];
     if profile.driver_kind == DriverKind::ClangCl {
+        let toolset = msvc_toolset.context("MSVC profile has no bound toolset")?;
         arguments.insert(0, "--driver-mode=cl".into());
+        arguments.push(format!("/winsdkdir:{}", sysroot.display()));
+        arguments.push(format!("/vctoolsdir:{}", toolset.display()));
+        if kind == ToolKind::Cxx {
+            arguments.push("/EHsc".into());
+        }
         if profile.tool_kinds.contains(&ToolKind::Linker) {
             let linker = launcher_path_from_root(root, profile, ToolKind::Linker);
-            arguments.push(format!("--ld-path={}", linker.display()));
+            arguments.push(format!("/clang:--ld-path={}", linker.display()));
         }
         return Ok(arguments);
     }
+    arguments.insert(1, format!("--sysroot={}", sysroot.display()));
     if kind == ToolKind::Cxx {
         ensure!(
             !cxx_headers.is_empty(),
@@ -682,6 +706,7 @@ mod tests {
         let external = ExternalSysroot {
             path: sdk,
             identity: "22".repeat(32),
+            msvc_toolset: None,
         };
         let controller = materializer
             .persist_controller(&controller_fixture(temporary.path()))
@@ -1088,6 +1113,69 @@ mod tests {
     }
 
     #[test]
+    fn binds_windows_msvc_clang_cl_flags() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let profile = registry::resolve_target_profile("windows-x86_64-msvc").unwrap();
+        fs::create_dir_all(source.join("lib/clang/22")).unwrap();
+        fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
+        let pack = create_pack(
+            &source,
+            &temporary.path().join("fixture.rccpack"),
+            &PackOptions::new(
+                "fixture",
+                "r1",
+                "aarch64-apple-darwin",
+                [profile.profile_id.as_str()],
+            ),
+        )
+        .unwrap();
+        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let sdk = temporary.path().join("Kits/10");
+        let toolset = temporary.path().join("VC/Tools/MSVC/14.44.35207");
+        fs::create_dir_all(&sdk).unwrap();
+        fs::create_dir_all(&toolset).unwrap();
+        let external = ExternalSysroot {
+            path: sdk,
+            identity: "22".repeat(32),
+            msvc_toolset: Some(toolset),
+        };
+        let controller = materializer
+            .persist_controller(&controller_fixture(temporary.path()))
+            .unwrap();
+        let view = build_view_manifest(
+            &materializer,
+            &pack,
+            profile,
+            &contract,
+            &ControllerIdentity::new(
+                &"11".repeat(32),
+                &controller,
+                "llvm-22.1.8-aarch64-x86-coff-minsize",
+            ),
+            Some(&external),
+        )
+        .unwrap();
+        let cc = &view.injected_args[&ToolKind::Cc];
+        assert!(cc.iter().any(|argument| argument == "--driver-mode=cl"));
+        assert!(cc
+            .iter()
+            .any(|argument| argument.starts_with("/winsdkdir:")));
+        assert!(cc
+            .iter()
+            .any(|argument| argument.starts_with("/vctoolsdir:")));
+        assert!(cc
+            .iter()
+            .any(|argument| argument.starts_with("/clang:--ld-path=")));
+        assert!(!cc.iter().any(|argument| argument.starts_with("--sysroot=")));
+        assert!(!cc.iter().any(|argument| argument == "/EHsc"));
+        let cxx = &view.injected_args[&ToolKind::Cxx];
+        assert!(cxx.iter().any(|argument| argument == "/EHsc"));
+        validate_view_binding(&view).unwrap();
+    }
+
+    #[test]
     fn rejects_executable_payload_layout() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
@@ -1116,6 +1204,7 @@ mod tests {
         let external = ExternalSysroot {
             path: sdk,
             identity: "22".repeat(32),
+            msvc_toolset: None,
         };
         let controller = materializer
             .persist_controller(&controller_fixture(temporary.path()))

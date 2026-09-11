@@ -2,7 +2,8 @@
 
 > 对应 [RCC_LINUX.md](../design/RCC_LINUX.md)。  
 > Linux **目标**（musl / gnu-glibc217，x86_64 与 aarch64）已在 macOS host 交付；本计划做 **Linux x86_64 controller**。  
-> 实现主机：TencentOS 3.2（el8 / glibc 2.28），`ssh anydev.zhqli`，仓库 `~/rcc`。
+> 实现主机：TencentOS 3.2（el8 / glibc 2.28），`ssh anydev.zhqli`，仓库 `~/rcc`。  
+> **状态：** Linux controller 已交付。Windows controller 见 [RCC_WINDOWS.md](../design/RCC_WINDOWS.md)；Apple SDK 一键准备见 `scripts/setup-env.sh`。
 
 ## 0. 交付物
 
@@ -11,7 +12,7 @@
 | `rcc-linux-x86_64` | 静态集成 Clang + LLD（Mach-O + ELF + COFF/MinGW）+ llvm-ar；动态依赖 host glibc，**不**依赖 `libstdc++.so` / LLVM dylib |
 | Pack host | `x86_64-unknown-linux-gnu` |
 | Linux 目标 | 复用现有 sysroot：musl-static / gnu-glibc217 × x86_64/aarch64 |
-| Windows 目标 | 复用现有 sysroot：gnu x64、gnullvm x64/arm64；MSVC fail-closed |
+| Windows 目标 | 复用现有 sysroot：gnu x64、gnullvm x64/arm64；MSVC 需自备 Windows SDK + MSVC toolset |
 | macOS 目标 | `macos-aarch64`（及资源够用时 `macos-x86_64`）；`RCC_APPLE_SDK_ROOT` 指向 phracker **MacOSX11.3.sdk**（摊平、无符号链接叶）；RCC **不分发** SDK |
 | `cargo-rcc` | 接受 `x86_64-unknown-linux-gnu` host；`--target` 覆盖上表 |
 

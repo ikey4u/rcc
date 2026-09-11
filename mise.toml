@@ -6,6 +6,7 @@
 #   mise setup
 #     -> cargo fetch --locked
 #     -> pinned LLVM/musl/glibc/mingw archives into .cache/
+#     -> Apple SDK into vendor/macos (non-macOS; scripts/setup-env.sh)
 #     -> linux guest runtimes on macOS (Homebrew qemu-system + Lima)
 #   mise check
 #     -> rustfmt --check, cargo test, clippy, script/lock metadata
@@ -32,8 +33,12 @@ min_version = "2024.11.1"
 rust = { version = "stable", components = "rustfmt,clippy" }
 
 [tasks.setup]
-description = "cargo fetch, pinned archives, and macOS linux guest VMs (qemu/Lima)"
+description = "cargo fetch, pinned archives, Apple SDK off macOS, and macOS linux guest VMs"
 run = "./scripts/setup.sh"
+
+[tasks."setup:env"]
+description = "Stage the Apple SDK (and optional pinned archives) so rcc can target macos-*"
+run = "./scripts/setup-env.sh"
 
 [tasks.build]
 description = "Build the development workspace (not the distributable static-engine release)"

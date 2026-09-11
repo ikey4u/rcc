@@ -1,6 +1,9 @@
 #!/bin/sh
-# Unpack a phracker (or Xcode-extracted) MacOSX.sdk into a real directory
-# suitable for RCC_APPLE_SDK_ROOT. The SDK is never copied into an RCC pack.
+# Unpack a phracker (or Xcode-extracted) MacOSX.sdk for RCC_APPLE_SDK_ROOT.
+# The SDK is never copied into an RCC pack.
+#
+# On Windows the tarball is flattened (Darwin aliases become copies; illegal
+# NTFS names are skipped). On Unix the extracted SDK is moved as-is.
 set -eu
 
 case "$#" in
@@ -18,9 +21,61 @@ if [ ! -f "$archive" ]; then
     echo "SDK archive is not a regular file: $archive" >&2
     exit 66
 fi
+
+looks_like_apple_sdk() {
+    root=$1
+    [ -d "$root/usr/include" ] || return 1
+    [ -d "$root/usr/lib" ] || return 1
+    [ -d "$root/System/Library/Frameworks" ] || return 1
+    [ -f "$root/SDKSettings.json" ] || [ -f "$root/SDKSettings.plist" ]
+}
+
 if [ -e "$destination" ]; then
-    echo "destination already exists: $destination" >&2
+    if looks_like_apple_sdk "$destination"; then
+        echo "Apple SDK already staged at $destination"
+        echo "export RCC_APPLE_SDK_ROOT=$destination"
+        exit 0
+    fi
+    echo "destination already exists and is not an Apple SDK: $destination" >&2
     exit 73
+fi
+
+find_python() {
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        command -v python
+        return 0
+    fi
+    if command -v py >/dev/null 2>&1; then
+        echo "py -3"
+        return 0
+    fi
+    return 1
+}
+
+host=$(uname -s)
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+flatten=$script_directory/lib/flatten-apple-sdk.py
+
+needs_flatten=0
+case "$host" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) needs_flatten=1 ;;
+esac
+
+if [ "$needs_flatten" -eq 1 ]; then
+    python=$(find_python) || {
+        echo "Python 3 is required to stage the Apple SDK on Windows" >&2
+        exit 69
+    }
+    mkdir -p "$(dirname "$destination")"
+    # `py -3` is two words.
+    # shellcheck disable=SC2086
+    $python "$flatten" "$archive" "$destination"
+    echo "export RCC_APPLE_SDK_ROOT=$destination"
+    exit 0
 fi
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/rcc-apple-sdk.XXXXXX")
@@ -41,11 +96,8 @@ mkdir -p "$(dirname "$destination")"
 # root itself must be a real directory — RCC_APPLE_SDK_ROOT rejects a symlink leaf.
 mv "$extracted" "$destination"
 
-test -d "$destination/usr/include"
-test -d "$destination/usr/lib"
-test -d "$destination/System/Library/Frameworks"
-if [ ! -f "$destination/SDKSettings.json" ] && [ ! -f "$destination/SDKSettings.plist" ]; then
-    echo "SDK is missing SDKSettings.json and SDKSettings.plist" >&2
+if ! looks_like_apple_sdk "$destination"; then
+    echo "staged tree is not an Apple SDK: $destination" >&2
     exit 65
 fi
 

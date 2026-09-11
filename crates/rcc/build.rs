@@ -86,8 +86,11 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
     let host = match target.as_str() {
         "aarch64-apple-darwin" => EngineHost::MacosAarch64,
         "x86_64-unknown-linux-gnu" => EngineHost::LinuxX86_64,
+        "x86_64-pc-windows-msvc" => EngineHost::WindowsX86_64Msvc,
+        "x86_64-pc-windows-gnu" => EngineHost::WindowsX86_64Gnu,
         other => panic!(
-            "static engine builds support aarch64-apple-darwin and x86_64-unknown-linux-gnu; got {other}"
+            "static engine builds support aarch64-apple-darwin, x86_64-unknown-linux-gnu, \
+             x86_64-pc-windows-msvc, and x86_64-pc-windows-gnu; got {other}"
         ),
     };
     let build = PathBuf::from(variables[0].1.clone().expect("checked above"));
@@ -106,7 +109,9 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
     validate_static_engine_patch(&source);
     let macos_sysroot = match host {
         EngineHost::MacosAarch64 => Some(macos_build_sysroot()),
-        EngineHost::LinuxX86_64 => None,
+        EngineHost::LinuxX86_64 | EngineHost::WindowsX86_64Msvc | EngineHost::WindowsX86_64Gnu => {
+            None
+        }
     };
 
     let native_archive = compile_native_entries(
@@ -116,16 +121,25 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
         &build,
         &bootstrap,
         macos_sysroot.as_ref(),
+        host,
     );
     emit_static_links(out_dir, &build, &bootstrap, &native_archive, host);
     println!("cargo:rustc-cfg=rcc_static_llvm");
     build_id
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum EngineHost {
     MacosAarch64,
     LinuxX86_64,
+    WindowsX86_64Msvc,
+    WindowsX86_64Gnu,
+}
+
+impl EngineHost {
+    fn is_windows(self) -> bool {
+        matches!(self, Self::WindowsX86_64Msvc | Self::WindowsX86_64Gnu)
+    }
 }
 
 struct MacosBuildSysroot {
@@ -178,9 +192,10 @@ fn compile_native_entries(
     build: &Path,
     bootstrap: &Path,
     macos: Option<&MacosBuildSysroot>,
+    host: EngineHost,
 ) -> PathBuf {
-    let compiler = bootstrap.join("bin/clang++");
-    let archiver = bootstrap.join("bin/llvm-ar");
+    let compiler = llvm_tool(bootstrap, "clang++");
+    let archiver = llvm_tool(bootstrap, "llvm-ar");
     require_file(&compiler, "bootstrap C++ compiler");
     require_file(&archiver, "bootstrap archiver");
 
@@ -226,8 +241,6 @@ fn compile_native_entries(
             .args([
                 "-std=c++17",
                 "-Os",
-                "-fPIC",
-                "-fvisibility-inlines-hidden",
                 "-fno-common",
                 "-fno-exceptions",
                 "-fno-rtti",
@@ -238,6 +251,20 @@ fn compile_native_entries(
                 "-D__STDC_FORMAT_MACROS",
                 "-D__STDC_LIMIT_MACROS",
             ]);
+        if !host.is_windows() {
+            command.args(["-fPIC", "-fvisibility-inlines-hidden"]);
+        } else {
+            // Match the engine's MultiThreadedDLL (/MD) CRT. Default clang++
+            // on Windows emits /MT, which lld-link rejects against LLVM .lib.
+            command.args([
+                "-D_CRT_SECURE_NO_WARNINGS",
+                "-D_CRT_NONSTDC_NO_WARNINGS",
+                "-D_DLL",
+                "-D_MT",
+                "-Xclang",
+                "--dependent-lib=msvcrt",
+            ]);
+        }
         if let Some(macos) = macos {
             command
                 .arg("-isysroot")
@@ -251,7 +278,11 @@ fn compile_native_entries(
         objects.push(object);
     }
 
-    let archive = out_dir.join("librcc_native_entries.a");
+    let archive = if matches!(host, EngineHost::WindowsX86_64Msvc) {
+        out_dir.join("rcc_native_entries.lib")
+    } else {
+        out_dir.join("librcc_native_entries.a")
+    };
     let mut command = Command::new(&archiver);
     command.arg("crs").arg(&archive).args(&objects);
     run_command(command, "archive static LLVM entry objects");
@@ -266,7 +297,7 @@ fn emit_static_links(
     host: EngineHost,
 ) {
     require_file(native_archive, "native entry archive");
-    let llvm_config = build.join("bin/llvm-config");
+    let llvm_config = llvm_tool(build, "llvm-config");
     require_file(&llvm_config, "custom llvm-config");
     let library_directory = build.join("lib");
     let version = command_output(
@@ -287,8 +318,8 @@ fn emit_static_links(
     println!("cargo:rustc-link-lib=static=rcc_native_entries");
 
     // Keep the dependency order used by Clang's own statically linked driver.
-    // Repeated archives are deliberate: Mach-O archive linking does not group
-    // circular Clang dependencies the way an ELF --start-group does.
+    // Repeated archives are deliberate: Mach-O and COFF archive linking do not
+    // group circular Clang dependencies the way an ELF --start-group does.
     if matches!(host, EngineHost::LinuxX86_64) {
         println!("cargo:rustc-link-arg=-Wl,--start-group");
     }
@@ -348,7 +379,7 @@ fn emit_static_links(
     ];
     for library in clang_libraries {
         require_file(
-            &library_directory.join(format!("lib{library}.a")),
+            &static_archive(&library_directory, library),
             "custom Clang/LLD archive",
         );
         println!("cargo:rustc-link-lib=static={library}");
@@ -389,8 +420,8 @@ fn emit_static_links(
             // rustc passes -nodefaultlibs, so clang++ driver flags such as
             // -static-libstdc++ never pull in the C++ runtime. Link the static
             // archives explicitly after the LLVM group.
-            let clangxx = bootstrap.join("bin/clang++");
-            let lld = bootstrap.join("bin/ld.lld");
+            let clangxx = llvm_tool(bootstrap, "clang++");
+            let lld = llvm_tool(bootstrap, "ld.lld");
             if lld.is_file() {
                 println!("cargo:rustc-link-arg=-fuse-ld={}", lld.display());
             }
@@ -401,6 +432,22 @@ fn emit_static_links(
             println!("cargo:rustc-link-lib=pthread");
             println!("cargo:rustc-link-lib=dl");
             println!("cargo:rustc-link-lib=m");
+        }
+        EngineHost::WindowsX86_64Msvc | EngineHost::WindowsX86_64Gnu => {
+            // rustc windows-msvc already pulls in the UCRT. LLVM still needs
+            // the MSVC C++ standard library and a few Win32 libs llvm-config
+            // does not always list when queried from MinGW-style tokens.
+            println!("cargo:rustc-link-lib=dylib=msvcprt");
+            println!("cargo:rustc-link-lib=dylib=oldnames");
+            println!("cargo:rustc-link-lib=dylib=ntdll");
+            println!("cargo:rustc-link-lib=dylib=shell32");
+            println!("cargo:rustc-link-lib=dylib=ole32");
+            println!("cargo:rustc-link-lib=dylib=uuid");
+            println!("cargo:rustc-link-lib=dylib=advapi32");
+            println!("cargo:rustc-link-lib=dylib=ws2_32");
+            println!("cargo:rustc-link-lib=dylib=version");
+            println!("cargo:rustc-link-lib=dylib=dbghelp");
+            println!("cargo:rustc-link-lib=dylib=legacy_stdio_definitions");
         }
     }
 }
@@ -456,7 +503,7 @@ fn emit_link_tokens(output: &str, library_directory: &Path, require_static: bool
                 // `llvm-config --libs all` describes every configured LLVM
                 // component. The release build intentionally builds only the
                 // dependency closure of Clang, Mach-O LLD and llvm-ar.
-                if library_directory.join(format!("lib{library}.a")).is_file() {
+                if static_archive(library_directory, library).is_file() {
                     println!("cargo:rustc-link-lib=static={library}");
                 }
             } else {
@@ -467,10 +514,51 @@ fn emit_link_tokens(output: &str, library_directory: &Path, require_static: bool
         } else if token.ends_with(".a") {
             require_file(Path::new(token), "custom LLVM system archive");
             println!("cargo:rustc-link-arg={token}");
+        } else if token.ends_with(".lib") {
+            // llvm-config on Windows prints absolute `E:\...\LLVMFoo.lib`
+            // paths. rustc treats `static=E:\...` as a library rename of `E`.
+            let path = Path::new(token);
+            if require_static && !path.is_file() {
+                continue;
+            }
+            require_file(path, "custom LLVM archive");
+            if let Some(dir) = path.parent() {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| panic!("invalid LLVM archive name {token:?}"));
+            if require_static {
+                println!("cargo:rustc-link-lib=static={stem}");
+            } else {
+                println!("cargo:rustc-link-lib={stem}");
+            }
         } else if !token.is_empty() {
             panic!("unsupported llvm-config link token {token:?}");
         }
     }
+}
+
+fn llvm_tool(prefix: &Path, name: &str) -> PathBuf {
+    let bin = prefix.join("bin");
+    let unix = bin.join(name);
+    if unix.is_file() {
+        return unix;
+    }
+    let exe = bin.join(format!("{name}.exe"));
+    if exe.is_file() {
+        return exe;
+    }
+    unix
+}
+
+fn static_archive(library_directory: &Path, name: &str) -> PathBuf {
+    let unix = library_directory.join(format!("lib{name}.a"));
+    if unix.is_file() {
+        return unix;
+    }
+    library_directory.join(format!("{name}.lib"))
 }
 
 fn command_output(command: &mut Command, description: &str) -> String {

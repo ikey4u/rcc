@@ -1,3 +1,4 @@
+#include "clang/AST/ASTContext.h"
 #include "lld/Common/Driver.h"
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -7,6 +8,20 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <vector>
+
+#if defined(_WIN32)
+// GNU-like clang++ targeting MSVC does not emit these inline placement
+// operators into clangAST.lib. Taking their address forces a COMDAT in
+// this TU so lld-link can resolve InterpStack/PrimType/InterpBlock.
+using RccAstPlacementNew =
+    void *(*)(size_t, const clang::ASTContext &, size_t);
+using RccAstPlacementDelete =
+    void (*)(void *, const clang::ASTContext &, size_t);
+[[maybe_unused]] RccAstPlacementNew rcc_ast_new = operator new;
+[[maybe_unused]] RccAstPlacementNew rcc_ast_new_array = operator new[];
+[[maybe_unused]] RccAstPlacementDelete rcc_ast_delete = operator delete;
+[[maybe_unused]] RccAstPlacementDelete rcc_ast_delete_array = operator delete[];
+#endif
 
 int clang_main(int argc, char **argv,
                const llvm::ToolContext &tool_context);
@@ -38,6 +53,10 @@ bool is_coff_msvc_alias(llvm::StringRef basename) {
   return basename == "lld-link" || basename == "lld-link.exe";
 }
 
+bool is_macho_alias(llvm::StringRef basename) {
+  return basename == "ld64.lld" || basename == "ld64.lld.exe";
+}
+
 } // namespace
 
 extern "C" int rcc_clang_main(int argc, char **argv) noexcept {
@@ -62,7 +81,7 @@ extern "C" int rcc_lld_main(int argc,
   // passes a PE emulation such as `-m i386pep` / `-m arm64pe`.
   if (coff_msvc) {
     arguments[0] = "lld-link";
-  } else if (launcher_basename(argv[0]) == "ld64.lld") {
+  } else if (is_macho_alias(launcher_basename(argv[0]))) {
     arguments[0] = "ld64.lld";
   } else {
     arguments[0] = "ld.lld";

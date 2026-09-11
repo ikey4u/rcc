@@ -24,3 +24,13 @@ case "$host" in
         echo "linux guest runtimes (qemu/Lima) are only supported on macOS; $host is not supported yet"
         ;;
 esac
+
+echo "==> external SDKs"
+case "$host" in
+    Darwin)
+        echo "Apple SDK: using xcrun (pass scripts/setup-env.sh --apple-sdk to vendor phracker 11.3)"
+        ;;
+    *)
+        "$repository/scripts/setup-env.sh" --apple-sdk
+        ;;
+esac

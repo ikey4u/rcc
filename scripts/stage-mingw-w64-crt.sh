@@ -11,6 +11,10 @@
 #     <sysroot-destination>
 set -eu
 
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=lib/posix.sh
+. "$script_directory/lib/posix.sh"
+
 if [ "$#" -ne 5 ]; then
     echo "usage: $0 <x86_64|aarch64> <ucrt|msvcrt> <mingw-w64.tar.bz2> <LLVM-bootstrap-prefix> <sysroot-dir>" >&2
     exit 64
@@ -52,18 +56,18 @@ mingw_expected_sha256=cc41898aac4b6e8dd5cffd7331b9d9515b912df4420a3a612b5ea2955b
 mingw_root=mingw-w64-v12.0.0
 clang_target=$arch-w64-windows-gnu
 mingw_host=$arch-w64-mingw32
+clang=$(native_tool_path "$bootstrap_prefix/bin/clang")
+clangxx=$(native_tool_path "$bootstrap_prefix/bin/clang++")
+archiver=$(native_tool_path "$bootstrap_prefix/bin/llvm-ar")
+ranlib=$(native_tool_path "$bootstrap_prefix/bin/llvm-ranlib")
+linker=$(native_tool_path "$bootstrap_prefix/bin/ld.lld")
+dlltool=$(native_tool_path "$bootstrap_prefix/bin/llvm-dlltool")
+windres=$(native_tool_path "$bootstrap_prefix/bin/llvm-windres")
+make_bin=$(make_command)
 build_jobs=${RCC_LLVM_BUILD_JOBS:-8}
 
-clang=$bootstrap_prefix/bin/clang
-clangxx=$bootstrap_prefix/bin/clang++
-archiver=$bootstrap_prefix/bin/llvm-ar
-ranlib=$bootstrap_prefix/bin/llvm-ranlib
-linker=$bootstrap_prefix/bin/ld.lld
-dlltool=$bootstrap_prefix/bin/llvm-dlltool
-windres=$bootstrap_prefix/bin/llvm-windres
-
 for required in "$clang" "$clangxx" "$archiver" "$ranlib" "$linker"; do
-    if [ ! -x "$required" ]; then
+    if [ ! -f "$required" ]; then
         echo "required bootstrap tool is missing: $required" >&2
         exit 69
     fi
@@ -75,11 +79,108 @@ if [ "$actual" != "$mingw_expected_sha256" ]; then
     exit 65
 fi
 
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/rcc-mingw-crt.XXXXXX")
+remove_tree() {
+    dir=$1
+    [ -e "$dir" ] || return 0
+    python=$(python_executable)
+    "$python" - "$dir" <<'PY' || true
+import os, shutil, stat, sys, time
+path = sys.argv[1]
+
+def onerror(func, p, _exc):
+    try:
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    except Exception:
+        pass
+
+for _ in range(8):
+    if not os.path.exists(path):
+        break
+    shutil.rmtree(path, onerror=onerror)
+    time.sleep(0.4)
+PY
+}
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        temporary=$(CDPATH= cd -- "$bootstrap_prefix/.." && pwd)/mingw-$arch-$msvcrt
+        remove_tree "$temporary"
+        if [ -e "$temporary" ]; then
+            temporary=$temporary-$$
+        fi
+        mkdir -p "$temporary"
+        ;;
+    *)
+        temporary=$(mktemp -d "${TMPDIR:-/tmp}/rcc-mingw-crt.XXXXXX")
+        ;;
+esac
 cleanup() {
-    rm -R "$temporary"
+    remove_tree "$temporary" || true
 }
 trap cleanup EXIT HUP INT TERM
+# Autotools on Git-for-Windows try to re-run automake via an unquoted
+# C:/Program Files/... path and fail with "C:/Program: No such file".
+export AUTOMAKE=: ACLOCAL=: AUTOCONF=: AUTOHEADER=: MAKEINFO=true
+export CONFIG_SHELL=sh.exe
+export SHELL=sh.exe
+# MSYS make spawns native llvm-ar via CreateProcess (~32k argv).
+# Write object lists to a response file so the archive command stays short.
+rewrite_automake_ar_recipes() {
+    makefile=$1
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) ;;
+        *) return 0 ;;
+    esac
+    [ -f "$makefile" ] || return 0
+    python=$(python_executable)
+    "$python" - "$makefile" <<'PY'
+import re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+changed = 0
+ar_pat = re.compile(
+    r"^(\t\$\(AM_V_AR\))\$\(([A-Za-z0-9_]+)_AR\) (\S+) \$\(\2_OBJECTS\) \$\(\2_LIBADD\)$",
+    re.M,
+)
+def ar_repl(m):
+    prefix, name, out = m.group(1), m.group(2), m.group(3)
+    return (
+        f"{prefix}$(file >{out}.rsp,$({name}_OBJECTS) $({name}_LIBADD))\n"
+        f"{prefix}$(AR) $(ARFLAGS) {out} @{out}.rsp"
+    )
+text, n = ar_pat.subn(ar_repl, text)
+changed += n
+if n:
+    sys.stderr.write(f"rewrote {n} automake AR recipes in {path}\n")
+list_pat = re.compile(
+    r"^(\t@?)list='(\$\(([A-Za-z0-9_]+)\))';",
+    re.M,
+)
+def list_repl(m):
+    prefix, full, name = m.group(1), m.group(2), m.group(3)
+    return (
+        f"\t$(file >.am-{name}.lst,{full})\n"
+        f"{prefix}list=`cat .am-{name}.lst`;"
+    )
+text, n = list_pat.subn(list_repl, text)
+changed += n
+if n:
+    sys.stderr.write(f"rewrote {n} automake install lists in {path}\n")
+if changed:
+    path.write_text(text, encoding="utf-8", newline="\n")
+PY
+}
+
+make_headers() {
+    if [ -f Makefile ]; then
+        sed -i "s|C:/Program Files/Git/usr/bin/sh.exe|sh.exe|g" Makefile
+        sed -i "s|/usr/bin/make|$make_bin|g" Makefile
+        rewrite_automake_ar_recipes Makefile
+    fi
+    "$make_bin" MAKE="$make_bin" "$@"
+}
 
 echo "extracting pinned mingw-w64 12.0.0"
 tar -xf "$mingw_archive" -C "$temporary"
@@ -91,9 +192,16 @@ fi
 
 wrappers=$temporary/wrappers
 mkdir -p "$wrappers"
+win_tmp=C:/Windows/Temp
+if [ -n "${LOCALAPPDATA:-}" ]; then
+    win_tmp=$(cygpath -w "$LOCALAPPDATA/Temp")
+fi
 for name in gcc cc clang; do
     cat > "$wrappers/$mingw_host-$name" <<EOF
 #!/bin/sh
+export TMP='$win_tmp'
+export TEMP=\$TMP
+unset TMPDIR
 exec "$clang" --target=$clang_target --sysroot="$sysroot_destination" -fuse-ld="$linker" "\$@"
 EOF
     chmod 755 "$wrappers/$mingw_host-$name"
@@ -101,15 +209,43 @@ done
 for name in g++ c++ clang++; do
     cat > "$wrappers/$mingw_host-$name" <<EOF
 #!/bin/sh
+export TMP='$win_tmp'
+export TEMP=\$TMP
+unset TMPDIR
 exec "$clangxx" --target=$clang_target --sysroot="$sysroot_destination" -fuse-ld="$linker" "\$@"
 EOF
     chmod 755 "$wrappers/$mingw_host-$name"
 done
-ln -s "$archiver" "$wrappers/$mingw_host-ar"
-ln -s "$archiver" "$wrappers/$mingw_host-llvm-ar"
+cat > "$wrappers/$mingw_host-ar" <<EOF
+#!/bin/sh
+export TMP='$win_tmp'
+export TEMP=\$TMP
+unset TMPDIR
+real_ar="$archiver"
+if [ "\$#" -le 3 ]; then
+    exec "\$real_ar" "\$@"
+fi
+rsp_dir=\$(cygpath -u '$win_tmp' 2>/dev/null || echo /tmp)
+rsp="\$rsp_dir/llvm-ar-\$\$.rsp"
+: > "\$rsp"
+for arg in "\$@"; do
+    printf '%s\n' "\$arg" >> "\$rsp"
+done
+"\$real_ar" @"\$(cygpath -m "\$rsp" 2>/dev/null || echo "\$rsp")"
+status=\$?
+rm -f "\$rsp"
+exit \$status
+EOF
+chmod 755 "$wrappers/$mingw_host-ar"
+ln -s "$wrappers/$mingw_host-ar" "$wrappers/$mingw_host-llvm-ar"
 ln -s "$ranlib" "$wrappers/$mingw_host-ranlib"
 ln -s "$ranlib" "$wrappers/$mingw_host-llvm-ranlib"
 ln -s "$linker" "$wrappers/$mingw_host-ld"
+ln -s "$linker" "$wrappers/$mingw_host-ld.exe"
+ln -s "$linker" "$wrappers/ld"
+ln -s "$linker" "$wrappers/ld.exe"
+ln -s "$linker" "$wrappers/ld.lld"
+ln -s "$linker" "$wrappers/ld.lld.exe"
 if [ -x "$dlltool" ]; then
     ln -s "$dlltool" "$wrappers/$mingw_host-dlltool"
     ln -s "$dlltool" "$wrappers/$mingw_host-llvm-dlltool"
@@ -148,7 +284,7 @@ mkdir -p "$temporary/headers-build"
         --enable-idl \
         --with-default-win32-winnt=0x0A00 \
         --with-default-msvcrt="$msvcrt"
-    make install
+    make_headers install
 )
 
 crt_enable="--disable-lib32"
@@ -157,26 +293,31 @@ case "$arch" in
     aarch64) crt_enable="$crt_enable --disable-lib64 --enable-libarm64" ;;
 esac
 
-echo "building mingw-w64 CRT for $mingw_host"
-mkdir -p "$temporary/crt-build"
-(
-    unset SDKROOT
-    cd "$temporary/crt-build"
-    CC="$wrappers/$mingw_host-clang" \
-    CXX="$wrappers/$mingw_host-clang++" \
-    AR="$archiver" \
-    RANLIB="$ranlib" \
-    DLLTOOL="${dlltool:-true}" \
-    "$mingw_source/mingw-w64-crt/configure" \
-        --prefix="$sysroot_destination" \
-        --host="$mingw_host" \
-        --with-sysroot="$sysroot_destination" \
-        --with-default-msvcrt="$msvcrt" \
-        --enable-silent-rules \
-        $crt_enable
-    make -j "$build_jobs"
-    make install
-)
+if [ -f "$sysroot_destination/lib/libmingwex.a" ]; then
+    echo "reusing mingw-w64 CRT at $sysroot_destination"
+else
+    echo "building mingw-w64 CRT for $mingw_host"
+    mkdir -p "$temporary/crt-build"
+    (
+        unset SDKROOT
+        cd "$temporary/crt-build"
+        CC="$wrappers/$mingw_host-clang" \
+        CXX="$wrappers/$mingw_host-clang++" \
+        AR="$wrappers/$mingw_host-ar" \
+        RANLIB="$ranlib" \
+        LD="$linker" \
+        DLLTOOL="${dlltool:-true}" \
+        "$mingw_source/mingw-w64-crt/configure" \
+            --prefix="$sysroot_destination" \
+            --host="$mingw_host" \
+            --with-sysroot="$sysroot_destination" \
+            --with-default-msvcrt="$msvcrt" \
+            --enable-silent-rules \
+            $crt_enable
+        make_headers -j "$build_jobs"
+        make_headers install
+    )
+fi
 
 if [ -d "$mingw_source/mingw-w64-libraries/winpthreads" ]; then
     echo "building winpthreads for $mingw_host"
@@ -186,8 +327,9 @@ if [ -d "$mingw_source/mingw-w64-libraries/winpthreads" ]; then
         cd "$temporary/winpthreads-build"
         CC="$wrappers/$mingw_host-clang" \
         CXX="$wrappers/$mingw_host-clang++" \
-        AR="$archiver" \
+        AR="$wrappers/$mingw_host-ar" \
         RANLIB="$ranlib" \
+        LD="$linker" \
         "$mingw_source/mingw-w64-libraries/winpthreads/configure" \
             --prefix="$sysroot_destination" \
             --host="$mingw_host" \
@@ -207,13 +349,13 @@ if [ -d "$mingw_source/mingw-w64-libraries/winpthreads" ]; then
                 -e 's|src/version\.lo[[:space:]]*||g' \
                 Makefile
         fi
-        make -j "$build_jobs" || {
+        make_headers -j "$build_jobs" || {
             if [ -f .libs/libwinpthread.lib ] && [ ! -f .libs/libwinpthread.a ]; then
                 cp -f .libs/libwinpthread.lib .libs/libwinpthread.a
             fi
-            make -j "$build_jobs"
+            make_headers -j "$build_jobs"
         }
-        make install
+        make_headers install
     )
 fi
 

@@ -3,6 +3,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 pub const HOME_ENV: &str = "RCC_HOME_DIR";
+pub const APPLE_SDK_ROOT_ENV: &str = "RCC_APPLE_SDK_ROOT";
+pub const WINDOWS_SDK_ROOT_ENV: &str = "RCC_WINDOWS_SDK_ROOT";
+pub const MSVC_TOOLS_ROOT_ENV: &str = "RCC_MSVC_TOOLS_ROOT";
 
 /// Resolve the RCC home directory.
 ///
@@ -13,7 +16,7 @@ pub const HOME_ENV: &str = "RCC_HOME_DIR";
 /// - macOS: `~/Library/Application Support/rcc`
 /// - Windows: `%LOCALAPPDATA%\rcc`
 ///
-/// External SDKs live under `$RCC_HOME_DIR/vendor/{macos,windows,linux}`.
+/// External SDKs live under `$RCC_HOME_DIR/vendor/{macos,windows,msvc,linux}`.
 pub fn resolve(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         ensure!(!path.as_os_str().is_empty(), "{HOME_ENV} is set but empty");
@@ -41,6 +44,7 @@ mod tests {
         let home = Path::new("/tmp/rcc-home");
         assert_eq!(vendor_dir(home, "macos"), home.join("vendor/macos"));
         assert_eq!(vendor_dir(home, "windows"), home.join("vendor/windows"));
+        assert_eq!(vendor_dir(home, "msvc"), home.join("vendor/msvc"));
         assert_eq!(vendor_dir(home, "linux"), home.join("vendor/linux"));
     }
 }
