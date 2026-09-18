@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "LLVM-22.1.8-Linux-ARM64.tar.xz",
+  "role": "optional_linux_aarch64_bootstrap_only",
+  "source": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-ARM64.tar.xz",
+  "sha256": "805efad2bb91cb4967fa569e0881d10c0f69c04461cf671cccbae19f547acc34",
+  "attestation": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-ARM64.tar.xz.jsonl",
+  "repository": "https://github.com/llvm/llvm-project",
+  "git_commit": "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1",
+  "workflow": ".github/workflows/release-binaries.yml@refs/tags/llvmorg-22.1.8",
+  "license": "Apache-2.0 WITH LLVM-exception"
+}

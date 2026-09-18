@@ -643,6 +643,9 @@ fn trusted_arguments(
     }
     if profile.os == "windows" {
         arguments.push("--rtlib=compiler-rt".into());
+        // MinGW/gnullvm sysroots expose kernel32 as libkernel32.a. Windows-hosted
+        // Clang otherwise omits it and LLD reports missing __imp_* dllimports.
+        arguments.push("-lkernel32".into());
         if kind == ToolKind::Cxx {
             arguments.push("-unwindlib=libunwind".into());
             // libc++ is built against UCRT. Clang's MSVCRT MinGW driver only
@@ -1108,6 +1111,7 @@ mod tests {
         .unwrap();
         let cxx = &view.injected_args[&ToolKind::Cxx];
         assert!(cxx.iter().any(|argument| argument == "-lucrt"));
+        assert!(cxx.iter().any(|argument| argument == "-lkernel32"));
         assert!(cxx.iter().any(|argument| argument == "-stdlib=libc++"));
         validate_view_binding(&view).unwrap();
     }
@@ -1170,8 +1174,10 @@ mod tests {
             .any(|argument| argument.starts_with("/clang:--ld-path=")));
         assert!(!cc.iter().any(|argument| argument.starts_with("--sysroot=")));
         assert!(!cc.iter().any(|argument| argument == "/EHsc"));
+        assert!(!cc.iter().any(|argument| argument == "-lkernel32"));
         let cxx = &view.injected_args[&ToolKind::Cxx];
         assert!(cxx.iter().any(|argument| argument == "/EHsc"));
+        assert!(!cxx.iter().any(|argument| argument == "-lkernel32"));
         validate_view_binding(&view).unwrap();
     }
 

@@ -32,6 +32,8 @@ host_label() {
         x86_64-apple-darwin) printf '%s\n' macos-x64 ;;
         aarch64-unknown-linux-gnu|aarch64-unknown-linux-musl) printf '%s\n' linux-arm64 ;;
         x86_64-unknown-linux-gnu|x86_64-unknown-linux-musl) printf '%s\n' linux-x64 ;;
+        x86_64-pc-windows-msvc|x86_64-pc-windows-gnu) printf '%s\n' windows-x64 ;;
+        aarch64-pc-windows-msvc) printf '%s\n' windows-arm64 ;;
         *)
             echo "unsupported rustc host for release packaging: $host" >&2
             exit 64
@@ -65,10 +67,45 @@ build_full_rcc() {
                 "$musl_archive" \
                 "$rcc_release_dir"
             ;;
+        x86_64-apple-darwin)
+            RCC_ARCHIVE_CACHE=$archive_cache \
+            "$script_directory/build-macos-x64-release.sh" \
+                "$bootstrap_archive" \
+                "$source_archive" \
+                "$musl_archive" \
+                "$rcc_release_dir"
+            ;;
         x86_64-unknown-linux-gnu|x86_64-unknown-linux-musl)
             resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
             RCC_ARCHIVE_CACHE=$archive_cache \
             "$script_directory/build-linux-x86_64-release.sh" \
+                "$resource_archive" \
+                "$source_archive" \
+                "$musl_archive" \
+                "$rcc_release_dir"
+            ;;
+        aarch64-unknown-linux-gnu|aarch64-unknown-linux-musl)
+            resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
+            RCC_ARCHIVE_CACHE=$archive_cache \
+            "$script_directory/build-linux-aarch64-release.sh" \
+                "$resource_archive" \
+                "$source_archive" \
+                "$musl_archive" \
+                "$rcc_release_dir"
+            ;;
+        x86_64-pc-windows-msvc|x86_64-pc-windows-gnu)
+            resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
+            RCC_ARCHIVE_CACHE=$archive_cache \
+            "$script_directory/build-windows-x64-release.sh" \
+                "$resource_archive" \
+                "$source_archive" \
+                "$musl_archive" \
+                "$rcc_release_dir"
+            ;;
+        aarch64-pc-windows-msvc)
+            resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
+            RCC_ARCHIVE_CACHE=$archive_cache \
+            "$script_directory/build-windows-arm64-release.sh" \
                 "$resource_archive" \
                 "$source_archive" \
                 "$musl_archive" \
@@ -86,6 +123,9 @@ rebuild_rcc() {
     "$script_directory/relink-rcc.sh" || relink_status=$?
     if [ "$relink_status" -eq 0 ]; then
         rcc=$rcc_release_dir/rcc
+        if [ ! -x "$rcc" ] && [ -x "$rcc.exe" ]; then
+            rcc=$rcc.exe
+        fi
         return 0
     fi
     if [ "$relink_status" -ne 69 ]; then
@@ -93,6 +133,9 @@ rebuild_rcc() {
     fi
     build_full_rcc
     rcc=$rcc_release_dir/rcc
+    if [ ! -x "$rcc" ] && [ -x "$rcc.exe" ]; then
+        rcc=$rcc.exe
+    fi
 }
 
 version=$(workspace_version)
@@ -123,12 +166,18 @@ cargo build \
     -p cargo-rcc
 
 cargo_rcc=$repository/target/release/cargo-rcc
+if [ ! -x "$cargo_rcc" ] && [ -x "$cargo_rcc.exe" ]; then
+    cargo_rcc=$cargo_rcc.exe
+fi
 if [ ! -x "$cargo_rcc" ]; then
     echo "cargo-rcc was not produced at $cargo_rcc" >&2
     exit 65
 fi
 
 rebuild_rcc
+if [ ! -x "$rcc" ] && [ -x "$rcc.exe" ]; then
+    rcc=$rcc.exe
+fi
 if [ ! -x "$rcc" ]; then
     echo "release rcc is not an executable: $rcc" >&2
     exit 65
@@ -136,14 +185,16 @@ fi
 
 rm -rf "$bin_dir"
 mkdir -p "$bin_dir"
-install -m 755 "$cargo_rcc" "$bin_dir/cargo-rcc"
-install -m 755 "$rcc" "$bin_dir/rcc"
+cargo_rcc_name=$(basename "$cargo_rcc")
+rcc_name=$(basename "$rcc")
+install -m 755 "$cargo_rcc" "$bin_dir/$cargo_rcc_name"
+install -m 755 "$rcc" "$bin_dir/$rcc_name"
 
 rm -f "$archive"
 (
     CDPATH= cd -- "$bin_dir"
-    zip -X "$archive" cargo-rcc rcc
+    zip -X "$archive" "$cargo_rcc_name" "$rcc_name"
 )
 
-echo "release binaries: $bin_dir/cargo-rcc $bin_dir/rcc"
+echo "release binaries: $bin_dir/$cargo_rcc_name $bin_dir/$rcc_name"
 echo "release archive: $archive"

@@ -77,3 +77,49 @@ if command -v cargo-rcc >/dev/null 2>&1 || [ -x "$repository/target/release/carg
 fi
 
 echo "macos $profile compile+verify ok"
+
+darwin_can_run() {
+    [ "$(uname -s)" = Darwin ] || return 1
+    host_arch=$(uname -m)
+    case "$profile" in
+        macos-aarch64)
+            [ "$host_arch" = arm64 ]
+            ;;
+        macos-x86_64)
+            if [ "$host_arch" = x86_64 ]; then
+                return 0
+            fi
+            if [ "$host_arch" = arm64 ] \
+                && [ -x /usr/bin/arch ] \
+                && /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1
+            then
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ran=0
+if darwin_can_run; then
+    echo "==> run $out_dir/hello"
+    output=$("$out_dir/hello")
+    case "$output" in
+        *rcc-c-ok*) ;;
+        *)
+            echo "macos hello output did not contain rcc-c-ok: $output" >&2
+            exit 1
+            ;;
+    esac
+    ran=1
+fi
+if [ "$ran" -eq 0 ]; then
+    echo "runtime checks were skipped (Mach-O is not executed off macOS, or Rosetta is missing)"
+    if [ "${RCC_REQUIRE_RUNTIME:-}" = 1 ]; then
+        echo "RCC_REQUIRE_RUNTIME=1 requires a Darwin host that can run $profile" >&2
+        exit 1
+    fi
+fi

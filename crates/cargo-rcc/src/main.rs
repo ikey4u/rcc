@@ -33,11 +33,17 @@ const WINDOWS_AARCH64_GNULLVM: &str = "aarch64-pc-windows-gnullvm";
 const WINDOWS_AARCH64_GNULLVM_PROFILE: &str = "windows-aarch64-gnullvm";
 const WINDOWS_X64_MSVC: &str = "x86_64-pc-windows-msvc";
 const WINDOWS_X64_MSVC_PROFILE: &str = "windows-x86_64-msvc";
+const WINDOWS_AARCH64_MSVC: &str = "aarch64-pc-windows-msvc";
+const WINDOWS_AARCH64_MSVC_PROFILE: &str = "windows-aarch64-msvc";
 const HOST_MACOS_AARCH64: &str = "aarch64-apple-darwin";
 const HOST_MACOS_AARCH64_PROFILE: &str = "host-macos-aarch64";
+const HOST_MACOS_X86_64_PROFILE: &str = "host-macos-x86_64";
 const HOST_LINUX_X64_GNU: &str = "x86_64-unknown-linux-gnu";
 const HOST_LINUX_X64_GNU_PROFILE: &str = "host-linux-x86_64-gnu-glibc217";
+const HOST_LINUX_AARCH64_GNU: &str = "aarch64-unknown-linux-gnu";
+const HOST_LINUX_AARCH64_GNU_PROFILE: &str = "host-linux-aarch64-gnu-glibc217";
 const HOST_WINDOWS_X64_MSVC_PROFILE: &str = "host-windows-x86_64-msvc";
+const HOST_WINDOWS_AARCH64_MSVC_PROFILE: &str = "host-windows-aarch64-msvc";
 const HOST_WINDOWS_X64_GNU_PROFILE: &str = "host-windows-x86_64-gnu";
 const MACOS_AARCH64_PROFILE: &str = "macos-aarch64";
 const MACOS_X86_64: &str = "x86_64-apple-darwin";
@@ -250,11 +256,12 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
     }
 
     if let Some(profile_id) = windows_profile(&rust_target) {
-        let runtime_contract = if rust_target == WINDOWS_X64_MSVC {
-            NATIVE_RCC_OWNED
-        } else {
-            RUSTC_WINDOWS_V0
-        };
+        let runtime_contract =
+            if rust_target == WINDOWS_X64_MSVC || rust_target == WINDOWS_AARCH64_MSVC {
+                NATIVE_RCC_OWNED
+            } else {
+                RUSTC_WINDOWS_V0
+            };
         return Ok(TargetPlan {
             rust_target,
             profile_id: profile_override.unwrap_or(profile_id).to_owned(),
@@ -267,7 +274,7 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
         "cargo-rcc currently supports {LINUX_X64_MUSL}, {LINUX_X64_GNU}, \
          {LINUX_AARCH64_MUSL}, {LINUX_AARCH64_GNU}, {WINDOWS_X64_GNU}, \
          {WINDOWS_X64_GNULLVM}, {WINDOWS_AARCH64_GNULLVM}, {WINDOWS_X64_MSVC}, \
-         {HOST_MACOS_AARCH64}, and {MACOS_X86_64}; got {target}"
+         {WINDOWS_AARCH64_MSVC}, {HOST_MACOS_AARCH64}, and {MACOS_X86_64}; got {target}"
     );
 }
 
@@ -293,6 +300,7 @@ fn windows_profile(rust_target: &str) -> Option<&'static str> {
         WINDOWS_X64_GNULLVM => Some(WINDOWS_X64_GNULLVM_PROFILE),
         WINDOWS_AARCH64_GNULLVM => Some(WINDOWS_AARCH64_GNULLVM_PROFILE),
         WINDOWS_X64_MSVC => Some(WINDOWS_X64_MSVC_PROFILE),
+        WINDOWS_AARCH64_MSVC => Some(WINDOWS_AARCH64_MSVC_PROFILE),
         _ => None,
     }
 }
@@ -319,10 +327,15 @@ fn canonical_rust_target(target: &str) -> Result<String> {
             return Ok(WINDOWS_AARCH64_GNULLVM.to_owned());
         }
         WINDOWS_X64_MSVC | WINDOWS_X64_MSVC_PROFILE => return Ok(WINDOWS_X64_MSVC.to_owned()),
+        WINDOWS_AARCH64_MSVC | WINDOWS_AARCH64_MSVC_PROFILE => {
+            return Ok(WINDOWS_AARCH64_MSVC.to_owned());
+        }
         HOST_MACOS_AARCH64 | MACOS_AARCH64_PROFILE | HOST_MACOS_AARCH64_PROFILE => {
             return Ok(HOST_MACOS_AARCH64.to_owned());
         }
-        MACOS_X86_64 | MACOS_X86_64_PROFILE => return Ok(MACOS_X86_64.to_owned()),
+        MACOS_X86_64 | MACOS_X86_64_PROFILE | HOST_MACOS_X86_64_PROFILE => {
+            return Ok(MACOS_X86_64.to_owned());
+        }
         _ => {}
     }
 
@@ -589,13 +602,17 @@ fn detect_rustc_host() -> Result<String> {
 
 fn host_profile_for(host: &str) -> Result<String> {
     match host {
-        "aarch64-apple-darwin" => Ok(HOST_MACOS_AARCH64_PROFILE.into()),
-        "x86_64-unknown-linux-gnu" => Ok(HOST_LINUX_X64_GNU_PROFILE.into()),
-        "x86_64-pc-windows-msvc" => Ok(HOST_WINDOWS_X64_MSVC_PROFILE.into()),
-        "x86_64-pc-windows-gnu" => Ok(HOST_WINDOWS_X64_GNU_PROFILE.into()),
+        HOST_MACOS_AARCH64 => Ok(HOST_MACOS_AARCH64_PROFILE.into()),
+        MACOS_X86_64 => Ok(HOST_MACOS_X86_64_PROFILE.into()),
+        HOST_LINUX_X64_GNU => Ok(HOST_LINUX_X64_GNU_PROFILE.into()),
+        HOST_LINUX_AARCH64_GNU => Ok(HOST_LINUX_AARCH64_GNU_PROFILE.into()),
+        WINDOWS_X64_MSVC => Ok(HOST_WINDOWS_X64_MSVC_PROFILE.into()),
+        WINDOWS_AARCH64_MSVC => Ok(HOST_WINDOWS_AARCH64_MSVC_PROFILE.into()),
+        WINDOWS_X64_GNU => Ok(HOST_WINDOWS_X64_GNU_PROFILE.into()),
         other => bail!(
-            "cargo-rcc currently requires an aarch64-apple-darwin, \
-             x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, or \
+            "cargo-rcc currently requires an aarch64-apple-darwin, x86_64-apple-darwin, \
+             x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, \
+             x86_64-pc-windows-msvc, aarch64-pc-windows-msvc, or \
              x86_64-pc-windows-gnu host (got {other})"
         ),
     }
@@ -902,6 +919,8 @@ mod tests {
         let msvc = plan_for_rust_target(WINDOWS_X64_MSVC, None).unwrap();
         assert_eq!(msvc.profile_id, WINDOWS_X64_MSVC_PROFILE);
         assert_eq!(msvc.runtime_contract, NATIVE_RCC_OWNED);
+        let arm_msvc = plan_for_rust_target(WINDOWS_AARCH64_MSVC, None).unwrap();
+        assert_eq!(arm_msvc.profile_id, WINDOWS_AARCH64_MSVC_PROFILE);
     }
 
     #[test]
@@ -944,8 +963,20 @@ mod tests {
             HOST_WINDOWS_X64_MSVC_PROFILE
         );
         assert_eq!(
+            host_profile_for(WINDOWS_AARCH64_MSVC).unwrap(),
+            HOST_WINDOWS_AARCH64_MSVC_PROFILE
+        );
+        assert_eq!(
             host_profile_for(WINDOWS_X64_GNU).unwrap(),
             HOST_WINDOWS_X64_GNU_PROFILE
+        );
+        assert_eq!(
+            host_profile_for(MACOS_X86_64).unwrap(),
+            HOST_MACOS_X86_64_PROFILE
+        );
+        assert_eq!(
+            host_profile_for(HOST_LINUX_AARCH64_GNU).unwrap(),
+            HOST_LINUX_AARCH64_GNU_PROFILE
         );
     }
 

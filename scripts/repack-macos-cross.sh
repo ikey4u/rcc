@@ -152,7 +152,10 @@ fi
 if [ -d "$stage/sysroots/windows-x86_64-gnu" ]; then
     set -- "$@" --profile windows-x86_64-gnu
 fi
-set -- "$@" --profile windows-x86_64-msvc
+set -- "$@" --profile windows-x86_64-msvc --profile windows-aarch64-msvc
+if [ -f "$stage/lib/clang/22/lib/darwin/.rcc-osx-x86_64" ]; then
+    set -- "$@" --profile macos-x86_64 --profile host-macos-x86_64
+fi
 "$@"
 "$repository/target/release/rcc-pack" verify "$pack"
 

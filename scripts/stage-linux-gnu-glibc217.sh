@@ -192,7 +192,7 @@ rewrite_linker_scripts "$sysroot_destination/lib"
 # binary stays free of DT_NEEDED libgcc_s.so.1.
 llvm_source=${RCC_LLVM_SOURCE_DIR:-$repository/inner/llvm-engine/llvm-project-22.1.8.src}
 bootstrap_prefix=${RCC_LLVM_BOOTSTRAP_PREFIX:-$repository/inner/llvm-engine/LLVM-22.1.8-macOS-ARM64}
-cxx_build=${RCC_LINUX_GNU_LIBCXX_BUILD:-$repository/inner/llvm-engine/libcxx-linux-$arch-gnu}
+cxx_build=${RCC_LINUX_GNU_LIBCXX_BUILD:-$(dirname "$llvm_source")/libcxx-linux-$arch-gnu}
 "$script_directory/stage-linux-x86_64-libcxx.sh" \
     "$sysroot_destination" \
     "$stage/lib/clang/22" \

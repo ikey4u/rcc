@@ -210,10 +210,12 @@ probe_windows_sdk() {
             echo "  set RCC_WINDOWS_SDK_ROOT to Kits\\10, or copy it to $vendor_sdk"
         fi
     fi
-    if [ -d "$vendor_msvc/include" ] && { [ -d "$vendor_msvc/lib/x64" ] || [ -d "$vendor_msvc/lib/amd64" ]; }; then
+    if [ -d "$vendor_msvc/include" ] && {
+        [ -d "$vendor_msvc/lib/x64" ] || [ -d "$vendor_msvc/lib/amd64" ] || [ -d "$vendor_msvc/lib/arm64" ]
+    }; then
         echo "  MSVC toolset vendor: $vendor_msvc"
     else
-        echo "  optional: export RCC_MSVC_TOOLS_ROOT to VC\\Tools\\MSVC\\<ver> (include + lib\\x64),"
+        echo "  optional: export RCC_MSVC_TOOLS_ROOT to VC\\Tools\\MSVC\\<ver> (include + lib\\x64 or lib\\arm64),"
         echo "    or copy that tree to $vendor_msvc"
     fi
 }

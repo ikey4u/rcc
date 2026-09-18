@@ -96,7 +96,9 @@ stage_native=$(native_path "$stage")
 llvm_source_native=$(native_path "$llvm_source")
 
 echo "building compiler-rt builtins for $clang_target"
-builtins_build=${RCC_WINDOWS_COMPILER_RT_BUILD:-$repository/inner/llvm-engine/compiler-rt-windows-$arch}
+# Keep this cache next to the LLVM source tree so a second engine does not
+# reuse a CMake cache from a different checkout.
+builtins_build=${RCC_WINDOWS_COMPILER_RT_BUILD:-$(dirname "$llvm_source")/compiler-rt-windows-$arch}
 (
     unset SDKROOT
     "$cmake_command" \
@@ -157,7 +159,7 @@ cp -L "$builtins_archive" "$stage/lib/clang/22/lib/windows/libclang_rt.builtins-
 cp -L "$builtins_archive" "$sysroot_destination/lib/libclang_rt.builtins-$arch.a"
 
 echo "building libc++ / libc++abi / libunwind for $clang_target"
-cxx_build=${RCC_WINDOWS_LIBCXX_BUILD:-$repository/inner/llvm-engine/libcxx-windows-$arch-gnullvm}
+cxx_build=${RCC_WINDOWS_LIBCXX_BUILD:-$(dirname "$llvm_source")/libcxx-windows-$arch-gnullvm}
 common_flags="--target=$clang_target --sysroot=$sysroot_native -resource-dir=$stage_native/lib/clang/22 -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables -faligned-allocation -nostdinc++"
 c_flags="--target=$clang_target --sysroot=$sysroot_native -resource-dir=$stage_native/lib/clang/22 -rtlib=compiler-rt -unwindlib=none -fPIC -funwind-tables"
 (

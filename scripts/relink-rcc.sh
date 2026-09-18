@@ -30,6 +30,20 @@ case "$host" in
         engine_build_id=llvm-22.1.8-aarch64-x86-macho-minsizerel-nolto-ca7933e47d3a-patch-$engine_patch_identity
         linker=$bootstrap_prefix/bin/clang++
         linker_env=CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER
+        rcc_name=rcc
+        ;;
+    x86_64-apple-darwin)
+        llvm_engine=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine-macos-x64}
+        bootstrap_prefix=$llvm_engine/LLVM-22.1.8-macOS-ARM64
+        source_directory=$llvm_engine/llvm-project-22.1.8.src
+        llvm_build_directory=$llvm_engine/llvm-build
+        engine_build_id=llvm-22.1.8-aarch64-x86-macho-minsizerel-nolto-ca7933e47d3a-patch-$engine_patch_identity
+        linker=$bootstrap_prefix/bin/clang++
+        if [ ! -x "$linker" ] || ! "$linker" --version >/dev/null 2>&1; then
+            linker=$(xcrun -f clang++)
+        fi
+        linker_env=CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER
+        rcc_name=rcc
         ;;
     x86_64-unknown-linux-gnu|x86_64-unknown-linux-musl)
         llvm_engine=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine-linux}
@@ -39,6 +53,43 @@ case "$host" in
         engine_build_id=llvm-22.1.8-aarch64-x86-elf-minsizerel-nolto-ca7933e47d3a-patch-$engine_patch_identity
         linker=$bootstrap_prefix/bin/clang++
         linker_env=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+        rcc_name=rcc
+        ;;
+    aarch64-unknown-linux-gnu|aarch64-unknown-linux-musl)
+        llvm_engine=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine-linux-arm64}
+        bootstrap_prefix=$llvm_engine/LLVM-22.1.8-Linux-ARM64
+        source_directory=$llvm_engine/llvm-project-22.1.8.src
+        llvm_build_directory=$llvm_engine/llvm-build
+        engine_build_id=llvm-22.1.8-aarch64-x86-elf-minsizerel-nolto-ca7933e47d3a-patch-$engine_patch_identity
+        linker=$bootstrap_prefix/bin/clang++
+        linker_env=CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+        rcc_name=rcc
+        ;;
+    x86_64-pc-windows-msvc|x86_64-pc-windows-gnu)
+        llvm_engine=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine-windows}
+        bootstrap_prefix=$llvm_engine/clang+llvm-22.1.8-x86_64-pc-windows-msvc
+        source_directory=$llvm_engine/llvm-project-22.1.8.src
+        llvm_build_directory=$llvm_engine/llvm-build
+        engine_build_id=llvm-22.1.8-aarch64-x86-coff-minsizerel-nolto-ca7933e47d3a-patch-$engine_patch_identity
+        linker=$llvm_build_directory/bin/lld-link.exe
+        if [ ! -x "$linker" ]; then
+            linker=$bootstrap_prefix/bin/lld-link.exe
+        fi
+        linker_env=CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
+        rcc_name=rcc.exe
+        ;;
+    aarch64-pc-windows-msvc)
+        llvm_engine=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine-windows-arm64}
+        bootstrap_prefix=$llvm_engine/clang+llvm-22.1.8-aarch64-pc-windows-msvc
+        source_directory=$llvm_engine/llvm-project-22.1.8.src
+        llvm_build_directory=$llvm_engine/llvm-build
+        engine_build_id=llvm-22.1.8-aarch64-x86-coff-minsizerel-nolto-ca7933e47d3a-patch-$engine_patch_identity
+        linker=$llvm_build_directory/bin/lld-link.exe
+        if [ ! -x "$linker" ]; then
+            linker=$bootstrap_prefix/bin/lld-link.exe
+        fi
+        linker_env=CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER
+        rcc_name=rcc.exe
         ;;
     *)
         echo "no relink recipe for rustc host $host" >&2
@@ -46,7 +97,18 @@ case "$host" in
         ;;
 esac
 
-if [ ! -x "$bootstrap_prefix/bin/clang++" ] || [ ! -x "$llvm_build_directory/bin/llvm-config" ]; then
+if [ ! -x "$bootstrap_prefix/bin/clang++" ] \
+    && [ ! -x "$bootstrap_prefix/bin/clang++.exe" ]
+then
+    if [ ! -x "$llvm_build_directory/bin/llvm-config" ] \
+        && [ ! -x "$llvm_build_directory/bin/llvm-config.exe" ]
+    then
+        echo "existing LLVM engine is missing under $llvm_engine" >&2
+        exit 69
+    fi
+elif [ ! -x "$llvm_build_directory/bin/llvm-config" ] \
+    && [ ! -x "$llvm_build_directory/bin/llvm-config.exe" ]
+then
     echo "existing LLVM engine is missing under $llvm_engine" >&2
     exit 69
 fi
@@ -61,11 +123,15 @@ if [ -n "$pack" ]; then
         echo "RCC_EMBED_PACK is not a file: $pack" >&2
         exit 66
     fi
-elif [ -x "$rcc_release_dir/rcc" ]; then
+elif [ -x "$rcc_release_dir/rcc" ] || [ -x "$rcc_release_dir/rcc.exe" ]; then
     mkdir -p "$rcc_release_dir"
     pack=$rcc_release_dir/.embedded-for-relink.rccpack
-    echo "extracting embedded pack from $rcc_release_dir/rcc"
-    python3 "$script_directory/extract-embedded-pack.py" "$rcc_release_dir/rcc" "$pack"
+    relink_source=$rcc_release_dir/rcc
+    if [ -x "$rcc_release_dir/rcc.exe" ]; then
+        relink_source=$rcc_release_dir/rcc.exe
+    fi
+    echo "extracting embedded pack from $relink_source"
+    python3 "$script_directory/extract-embedded-pack.py" "$relink_source" "$pack"
 else
     echo "no embedded pack: set RCC_EMBED_PACK or keep dist/rcc-release/rcc" >&2
     exit 69
@@ -73,7 +139,7 @@ fi
 
 deployment_target=${RCC_MACOS_DEPLOYMENT_TARGET:-11.0}
 build_sdkroot=${RCC_MACOS_BUILD_SDKROOT:-${SDKROOT:-}}
-if [ "$host" = aarch64-apple-darwin ]; then
+if [ "$host" = aarch64-apple-darwin ] || [ "$host" = x86_64-apple-darwin ]; then
     if [ -z "$build_sdkroot" ]; then
         build_sdkroot=$(xcrun --sdk macosx --show-sdk-path)
     fi
@@ -100,7 +166,7 @@ env \
         --locked \
         -p rcc
 
-install -m 755 "$repository/target/release/rcc" "$rcc_release_dir/rcc"
-echo "release executable: $rcc_release_dir/rcc"
+install -m 755 "$repository/target/release/$rcc_name" "$rcc_release_dir/$rcc_name"
+echo "release executable: $rcc_release_dir/$rcc_name"
 echo "embedded pack: $pack"
 echo "engine: $engine_build_id"

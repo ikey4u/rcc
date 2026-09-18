@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "clang+llvm-22.1.8-aarch64-pc-windows-msvc.tar.xz",
+  "role": "optional_windows_aarch64_bootstrap_only",
+  "source": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/clang+llvm-22.1.8-aarch64-pc-windows-msvc.tar.xz",
+  "sha256": "de718c58ebbc5f61d58c17b90457fcf42983bc2c4a4aba3c010d108713bfd7f1",
+  "attestation": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/clang+llvm-22.1.8-aarch64-pc-windows-msvc.tar.xz.jsonl",
+  "repository": "https://github.com/llvm/llvm-project",
+  "git_commit": "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1",
+  "workflow": ".github/workflows/release-binaries.yml@refs/tags/llvmorg-22.1.8",
+  "license": "Apache-2.0 WITH LLVM-exception"
+}

@@ -72,6 +72,50 @@ default_archive() {
     fi
 }
 
+linux_host=${RCC_LINUX_HOST:-x86_64-unknown-linux-gnu}
+linux_bootstrap_name=LLVM-22.1.8-Linux-X64.tar.xz
+linux_bootstrap_root=LLVM-22.1.8-Linux-X64
+linux_bootstrap_expected_sha256=df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+linux_pack_id=llvm-22.1.8-linux-x64-static
+linux_pack_file=llvm-22.1.8-linux-x64.rccpack
+linux_engine_dir=llvm-engine-linux
+linux_host_profile=host-linux-x86_64-gnu-glibc217
+linux_linker_env=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+case "$linux_host" in
+    x86_64-unknown-linux-gnu) ;;
+    aarch64-unknown-linux-gnu)
+        linux_bootstrap_name=LLVM-22.1.8-Linux-ARM64.tar.xz
+        linux_bootstrap_root=LLVM-22.1.8-Linux-ARM64
+        linux_arm64_lock=$repository/toolchains/llvm-22.1.8-linux-arm64.lock.json
+        if [ ! -f "$linux_arm64_lock" ]; then
+            echo "missing $linux_arm64_lock" >&2
+            exit 66
+        fi
+        linux_bootstrap_expected_sha256=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha256"])' "$linux_arm64_lock")
+        linux_pack_id=llvm-22.1.8-linux-arm64-static
+        linux_pack_file=llvm-22.1.8-linux-arm64.rccpack
+        linux_engine_dir=llvm-engine-linux-arm64
+        linux_host_profile=host-linux-aarch64-gnu-glibc217
+        linux_linker_env=CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+        ;;
+    *)
+        echo "unsupported RCC_LINUX_HOST: $linux_host" >&2
+        exit 64
+        ;;
+esac
+host_machine=$(uname -m)
+case "$linux_host" in
+    aarch64-unknown-linux-gnu)
+        case "$host_machine" in
+            aarch64|arm64) ;;
+            *)
+                echo "RCC_LINUX_HOST=$linux_host requires an aarch64 host (got $host_machine)" >&2
+                exit 64
+                ;;
+        esac
+        ;;
+esac
+
 engine_patch=$script_directory/patches/clang-integrated-cc1-multijob.patch
 engine_patch_expected_sha256=41d5e092ac23ac44c90714e95425a3be25775bf0127d5f9539000f306863b759
 if [ ! -f "$engine_patch" ]; then
@@ -86,7 +130,7 @@ fi
 mkdir -p "$output"
 output=$(CDPATH= cd -- "$output" && pwd)
 
-temporary=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine-linux}
+temporary=${RCC_LLVM_WORK_DIR:-$repository/inner/$linux_engine_dir}
 mkdir -p "$temporary"
 temporary=$(CDPATH= cd -- "$temporary" && pwd)
 
@@ -114,10 +158,14 @@ else
     patch -d "$source_directory" -p1 < "$engine_patch"
 fi
 
-linux_bootstrap_archive=${RCC_LLVM_LINUX_BOOTSTRAP_ARCHIVE:-$(default_archive LLVM-22.1.8-Linux-X64.tar.xz)}
-linux_bootstrap_root=LLVM-22.1.8-Linux-X64
+linux_bootstrap_archive=${RCC_LLVM_LINUX_BOOTSTRAP_ARCHIVE:-$(default_archive "$linux_bootstrap_name")}
 bootstrap_prefix=
 if [ -f "$linux_bootstrap_archive" ]; then
+    bootstrap_actual_sha256=$(sha256sum "$linux_bootstrap_archive" | awk '{print $1}')
+    if [ "$bootstrap_actual_sha256" != "$linux_bootstrap_expected_sha256" ]; then
+        echo "LLVM Linux bootstrap digest mismatch: expected $linux_bootstrap_expected_sha256, got $bootstrap_actual_sha256" >&2
+        exit 65
+    fi
     if [ ! -x "$temporary/$linux_bootstrap_root/bin/clang++" ]; then
         echo "extracting Linux LLVM bootstrap archive"
         tar -xf "$linux_bootstrap_archive" -C "$temporary"
@@ -125,9 +173,9 @@ if [ -f "$linux_bootstrap_archive" ]; then
     if [ -x "$temporary/$linux_bootstrap_root/bin/clang++" ]; then
         if "$temporary/$linux_bootstrap_root/bin/clang++" --version >/dev/null 2>&1; then
             bootstrap_prefix=$temporary/$linux_bootstrap_root
-            echo "using official Linux-X64 clang as bootstrap"
+            echo "using official $linux_bootstrap_root clang as bootstrap"
         else
-            echo "official Linux-X64 clang does not run on this host; falling back to system clang" >&2
+            echo "official $linux_bootstrap_root clang does not run on this host; falling back to system clang" >&2
         fi
     fi
 fi
@@ -287,8 +335,12 @@ cargo build \
     -p rcc-pack
 
 stage=$output/stage
-pack=$output/llvm-22.1.8-linux-x64.rccpack
+pack=$output/$linux_pack_file
 "$script_directory/stage-llvm-macos-arm64.sh" "$resource_archive" "$stage"
+"$script_directory/stage-darwin-compiler-rt.sh" \
+    "$stage" \
+    "$source_directory" \
+    "$stage_bootstrap"
 "$script_directory/stage-linux-musl.sh" \
     x86_64 \
     "$musl_archive" \
@@ -349,9 +401,9 @@ set -- \
     "$repository/target/release/rcc-pack" create \
     "$stage" \
     "$pack" \
-    --pack-id llvm-22.1.8-linux-x64-static \
+    --pack-id "$linux_pack_id" \
     --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
-    --host x86_64-unknown-linux-gnu \
+    --host "$linux_host" \
     --profile macos-aarch64 \
     --profile host-macos-aarch64 \
     --profile linux-x86_64-musl-static
@@ -359,11 +411,12 @@ if [ "$musl_aarch64_in_payload" -eq 1 ]; then
     set -- "$@" --profile linux-aarch64-musl-static
 fi
 if [ "$gnu_in_payload" -eq 1 ]; then
-    set -- "$@" --profile linux-x86_64-gnu-glibc217
+    set -- "$@" --profile linux-x86_64-gnu-glibc217 --profile host-linux-x86_64-gnu-glibc217
 fi
 if [ "$gnu_aarch64_in_payload" -eq 1 ]; then
-    set -- "$@" --profile linux-aarch64-gnu-glibc217
+    set -- "$@" --profile linux-aarch64-gnu-glibc217 --profile host-linux-aarch64-gnu-glibc217
 fi
+# $linux_host_profile is packed only when that gnu sysroot was staged above.
 
 mingw_archive=${RCC_MINGW_ARCHIVE:-$(default_archive mingw-w64-v12.0.0.tar.bz2)}
 windows_x64_gnullvm_in_payload=0
@@ -402,8 +455,8 @@ fi
 if [ "$windows_gnu_in_payload" -eq 1 ]; then
     set -- "$@" --profile windows-x86_64-gnu
 fi
-set -- "$@" --profile windows-x86_64-msvc
-if [ -d "$stage/lib/clang/22/lib/darwin" ]; then
+set -- "$@" --profile windows-x86_64-msvc --profile windows-aarch64-msvc
+if [ -f "$stage/lib/clang/22/lib/darwin/.rcc-osx-x86_64" ]; then
     set -- "$@" --profile macos-x86_64 --profile host-macos-x86_64
 fi
 "$@"
@@ -415,18 +468,19 @@ if [ ! -x "$link_clang" ]; then
     exit 65
 fi
 
-RCC_LLVM_BUILD_DIR="$llvm_build_directory" \
-RCC_LLVM_SOURCE_DIR="$source_directory" \
-RCC_LLVM_BOOTSTRAP_PREFIX="$stage_bootstrap" \
-RCC_LLVM_SOURCE_SHA256="$source_expected_sha256" \
-RCC_ENGINE_BUILD_ID="$engine_build_id" \
-RCC_EMBED_PACK="$pack" \
-CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$link_clang" \
-cargo build \
-    --manifest-path "$repository/Cargo.toml" \
-    --release \
-    --offline \
-    -p rcc
+env \
+    RCC_LLVM_BUILD_DIR="$llvm_build_directory" \
+    RCC_LLVM_SOURCE_DIR="$source_directory" \
+    RCC_LLVM_BOOTSTRAP_PREFIX="$stage_bootstrap" \
+    RCC_LLVM_SOURCE_SHA256="$source_expected_sha256" \
+    RCC_ENGINE_BUILD_ID="$engine_build_id" \
+    RCC_EMBED_PACK="$pack" \
+    "$linux_linker_env=$link_clang" \
+    cargo build \
+        --manifest-path "$repository/Cargo.toml" \
+        --release \
+        --offline \
+        -p rcc
 
 cp -L "$repository/target/release/rcc" "$output/rcc"
 chmod 755 "$output/rcc"

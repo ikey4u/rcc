@@ -14,9 +14,9 @@
 | Linux 目标 | 复用现有 sysroot：musl-static / gnu-glibc217 × x86_64/aarch64 |
 | Windows 目标 | 复用现有 sysroot：gnu x64、gnullvm x64/arm64；MSVC 需自备 Windows SDK + MSVC toolset |
 | macOS 目标 | `macos-aarch64`（及资源够用时 `macos-x86_64`）；`RCC_APPLE_SDK_ROOT` 指向 phracker **MacOSX11.3.sdk**（摊平、无符号链接叶）；RCC **不分发** SDK |
-| `cargo-rcc` | 接受 `x86_64-unknown-linux-gnu` host；`--target` 覆盖上表 |
+| `cargo-rcc` | 接受 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu` host；`--target` 覆盖上表 |
 
-本机 `rcc` 本身链在 glibc 2.28 上（此主机），**用户** gnu 产物仍是 GLIBC_ ≤ 2.17。不做 `rcc-linux-aarch64`（ARCH Phase 2）。
+本机 `rcc` 本身链在 glibc 2.28 上（此主机），**用户** gnu 产物仍是 GLIBC_ ≤ 2.17。`rcc-linux-aarch64` 走 `scripts/build-linux-aarch64-release.sh`（须在 aarch64 Linux / Lima 上编）。
 
 ## 1. 主机事实
 

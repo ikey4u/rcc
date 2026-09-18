@@ -1,8 +1,8 @@
 # Linux / Windows / macOS：大型项目能力与正确性验收
 
-本文是当前 RCC release 对 Linux musl-static / gnu-glibc217（x86_64 与 aarch64）、Windows gnu/gnullvm，以及 macOS Mach-O 的能力边界、正确性定义和可重复验收入口。设计背景见 `docs/plan/IMPL_RCC_MACOS.md` 与 `docs/plan/IMPL_RCC_MACOS_CROSS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
+本文是当前 RCC release 对 Linux musl-static / gnu-glibc217（x86_64 与 aarch64）、Windows gnu/gnullvm/msvc，以及 macOS Mach-O 的能力边界、正确性定义和可重复验收入口。设计背景见 `docs/plan/IMPL_RCC_MACOS.md` 与 `docs/plan/IMPL_RCC_MACOS_CROSS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
 
-需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。`mise check` 在能找到这份 `rcc` 时会跑下面的验收脚本；没有执行器时跳过运行时而不是失败。
+需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。`mise check` 在能找到这份 `rcc` 时会跑下面的验收脚本；没有执行器时跳过运行时而不是失败。Apple SDK / Windows SDK 探测到才会跑对应的 macOS / MSVC 脚本。
 
 ```sh
 export RCC=/absolute/path/to/dist/rcc-release/rcc   # Windows: .../rcc.exe
@@ -15,11 +15,16 @@ mise check
 ./scripts/verify-windows.sh windows-x86_64-gnu
 ./scripts/verify-windows.sh windows-x86_64-gnullvm
 ./scripts/verify-windows.sh windows-aarch64-gnullvm
+./scripts/verify-windows.sh windows-x86_64-msvc
+./scripts/verify-windows.sh windows-aarch64-msvc
 ./scripts/verify-macos.sh macos-aarch64
 ./scripts/verify-macos.sh macos-x86_64
+./scripts/verify-sqlite.sh linux-x86_64-musl-static
 ```
 
 gnu 运行时使用 CentOS 7 Lima `rcc-x64-glibc217`（kernel 3.10 不能 virtiofs，验收脚本会把 ELF scp 到客户机 `/tmp` 再跑），**不要**在 Alpine 上跑 gnu 动态 ELF。要强制执行产物：先 `mise setup`，再 `RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh`（gnu 用 `verify-linux-x86_64-gnu.sh`）。
+
+交叉产物一般不能在编译宿主上执行：Windows 不跑 ELF/Mach-O，Linux 不跑 Mach-O。执行依赖匹配 OS 或模拟器（Linux：`qemu` / Lima；x64 PE：`wine64`；Mach-O：Darwin，x86_64 可用 Rosetta）。`RCC_REQUIRE_RUNTIME=1` 在没有执行器时失败。
 
 ## musl-static
 
@@ -82,12 +87,12 @@ musl-static 可执行文件拒绝 interpreter、`DT_NEEDED`、`GLIBC_`。gnu 可
 
 ### 3. 运行时冒烟
 
-Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x86_64`。musl 走 Alpine VM；gnu 走 CentOS 7（恰好 glibc 2.17）。新 glibc 发行版上的向前兼容是加分项，不能替代 2.17 基线。Windows host 上只做编译 + `rcc verify`，不执行 ELF。
+Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x86_64`。musl 走 Alpine VM；gnu 走 CentOS 7（恰好 glibc 2.17）。新 glibc 发行版上的向前兼容是加分项，不能替代 2.17 基线。Windows host 上只做编译 + `rcc verify`，不执行 ELF。Linux / Windows host 上不执行 Mach-O。
 
 ## 已知限制（验收失败时先看这里）
 
 - 必须使用 **release `rcc`**。
-- `cargo-rcc` 要求 rustc host 为 `aarch64-apple-darwin`、`x86_64-unknown-linux-gnu`、`x86_64-pc-windows-msvc` 或 `x86_64-pc-windows-gnu`。
+- `cargo-rcc` 要求 rustc host 为 `aarch64-apple-darwin`、`x86_64-apple-darwin`、`x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、`x86_64-pc-windows-msvc`、`aarch64-pc-windows-msvc` 或 `x86_64-pc-windows-gnu`。macOS x86_64 / Linux AArch64 / Windows AArch64 controller 是发布脚本已接线，不是本仓库随附的 zip。Windows AArch64 必须在 ARM64 Windows 上编。
 - 稳定 rustc 不能按组件关闭 `link-self-contained`；adapter 使用 `=no`，并把 rust-std 的 `libunwind.a` 放到隔离 `-L`。
 - 上游若强行 `--sysroot=/usr` 或冲突 `--target`，RCC 会 fail-closed。
 - gnu 产物在 musl Alpine 上会因动态 loader 失败，这不是 bug。
@@ -98,15 +103,19 @@ Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x
 
 ## Windows PE
 
-`scripts/verify-windows.sh <profile>` 编 `examples/windows-c`、`examples/windows-cxx` 和 `examples/windows-hello`，然后 `rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`。x86_64 gnu/gnullvm 在装了 `wine64` 时可跑 native C。profile：`windows-x86_64-gnu`、`windows-x86_64-gnullvm`、`windows-aarch64-gnullvm`、`windows-x86_64-msvc`。
+`scripts/verify-windows.sh <profile>` 编 `examples/windows-c`、`examples/windows-cxx` 和 `examples/windows-hello`，然后 `rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`。x86_64 gnu/gnullvm 在装了 `wine64` 时可跑 native C。profile：`windows-x86_64-gnu`、`windows-x86_64-gnullvm`、`windows-aarch64-gnullvm`、`windows-x86_64-msvc`、`windows-aarch64-msvc`。gnu/gnullvm 的 Clang 注入 `-lkernel32`，避免 Windows host 上缺 dllimport。
 
-`windows-x86_64-msvc` 在 Windows host 上可直接用已装的 VS / Kits；从其它 host 交叉需 `RCC_WINDOWS_SDK_ROOT` 与 `RCC_MSVC_TOOLS_ROOT`（或 `vendor/windows` 与 `vendor/msvc`）。clang-cl 注入 `/winsdkdir`、`/vctoolsdir` 和视图里的 `lld-link`。C++ 默认 `/EHsc`。验收：`./scripts/verify-windows.sh windows-x86_64-msvc`（不进默认 `mise check`）。细节：[RCC_WINDOWS.md](design/RCC_WINDOWS.md)。从 **Windows host** 链 gnu/gnullvm 的状态见同一文档。
+`windows-*-msvc` 在 Windows host 上可直接用已装的 VS / Kits；从其它 host 交叉需 `RCC_WINDOWS_SDK_ROOT` 与 `RCC_MSVC_TOOLS_ROOT`（或 `vendor/windows` 与 `vendor/msvc`）。clang-cl 注入 `/winsdkdir`、`/vctoolsdir` 和视图里的 `lld-link`。C++ 默认 `/EHsc`。`mise check` 在探测到 SDK + toolset 且 profile 在 pack 里时会跑 MSVC 验收；也可单独跑 `./scripts/verify-windows.sh windows-x86_64-msvc`。细节：[RCC_WINDOWS.md](design/RCC_WINDOWS.md)。
 
 ## macOS Mach-O
 
-`scripts/verify-macos.sh` 编 `examples/macos-c` / `macos-cxx` / `macos-hello`，然后 `rcc verify` 检查 Mach-O 架构。Apple SDK 发现顺序：`RCC_APPLE_SDK_ROOT`、`$RCC_HOME_DIR/vendor/macos`，仅 macOS 上再回落到 `xcrun`。Linux / Windows 上先 `./scripts/setup-env.sh`（或 `mise setup`）。
+`scripts/verify-macos.sh` 编 `examples/macos-c` / `macos-cxx` / `macos-hello`，然后 `rcc verify` 检查 Mach-O 架构。Apple SDK 发现顺序：`RCC_APPLE_SDK_ROOT`、`$RCC_HOME_DIR/vendor/macos`，仅 macOS 上再回落到 `xcrun`。Linux / Windows 上先 `./scripts/setup-env.sh`（或 `mise setup`）。`mise check` 在探测到 SDK 时会跑 `macos-aarch64`，pack 含 `macos-x86_64`（x86_64 compiler-rt slice）时再跑后者。macOS 发布时 `stage-darwin-compiler-rt.sh` 必须把 x86_64 slice 并进 `libclang_rt.osx.a`。
 
-不在 Linux 或 Windows 上执行 Mach-O。Windows 上编完后拷到 Mac 再跑（需要时 `codesign --sign -`；x86_64 用 Rosetta）。
+不在 Linux 或 Windows 上执行 Mach-O。Windows 上编完后拷到 Mac 再跑（需要时 `codesign --sign -`；x86_64 用 Rosetta）。Darwin 上若 arch 匹配（含 Rosetta）会执行 C hello；`RCC_REQUIRE_RUNTIME=1` 在非 Darwin 上失败。
+
+## SQLite amalgamation
+
+`scripts/verify-sqlite.sh <profile>` 用 `rcc cc` 编官方 amalgamation。仓库里没有 SQLite 源码：锁文件是 `toolchains/sqlite-amalgamation-3500400.lock.json`，脚本把 zip 拉到 `.cache/`（`RCC_ARCHIVE_CACHE`）、解压后再编译、链接、`rcc verify`。stdout 冒烟为 `sqlite=rcc-ok`。`mise check` 对 payload 里且 `rcc doctor` 能绑定的每个 C profile 跑一遍；缺 SDK / 不在 pack 里则 skip。这是对单翻译单元量级 C 的覆盖，补充 `rusqlite` bundled 那条路径。
 
 ## 扩展下一批大型项目时怎么加
 

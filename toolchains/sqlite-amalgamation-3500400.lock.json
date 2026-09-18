@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "name": "sqlite-amalgamation-3500400.zip",
+  "role": "verify_sqlite_amalgamation_fixture",
+  "source": "https://www.sqlite.org/2025/sqlite-amalgamation-3500400.zip",
+  "sha256": "1d3049dd0f830a025a53105fc79fd2ab9431aea99e137809d064d8ee8356b032",
+  "homepage": "https://www.sqlite.org/",
+  "version": "3.50.4",
+  "license": "blessing",
+  "note": "Official public-domain amalgamation (SQLite blessing) fetched into .cache by scripts/verify-sqlite.sh. Not an RCC toolchain pin."
+}

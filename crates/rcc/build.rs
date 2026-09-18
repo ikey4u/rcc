@@ -84,13 +84,14 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
 
     let target = env::var("TARGET").expect("Cargo sets TARGET");
     let host = match target.as_str() {
-        "aarch64-apple-darwin" => EngineHost::MacosAarch64,
-        "x86_64-unknown-linux-gnu" => EngineHost::LinuxX86_64,
-        "x86_64-pc-windows-msvc" => EngineHost::WindowsX86_64Msvc,
-        "x86_64-pc-windows-gnu" => EngineHost::WindowsX86_64Gnu,
+        "aarch64-apple-darwin" | "x86_64-apple-darwin" => EngineHost::Macos,
+        "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu" => EngineHost::Linux,
+        "x86_64-pc-windows-msvc" | "aarch64-pc-windows-msvc" => EngineHost::WindowsMsvc,
+        "x86_64-pc-windows-gnu" => EngineHost::WindowsGnu,
         other => panic!(
-            "static engine builds support aarch64-apple-darwin, x86_64-unknown-linux-gnu, \
-             x86_64-pc-windows-msvc, and x86_64-pc-windows-gnu; got {other}"
+            "static engine builds support aarch64-apple-darwin, x86_64-apple-darwin, \
+             x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, \
+             x86_64-pc-windows-msvc, aarch64-pc-windows-msvc, and x86_64-pc-windows-gnu; got {other}"
         ),
     };
     let build = PathBuf::from(variables[0].1.clone().expect("checked above"));
@@ -108,10 +109,8 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
     );
     validate_static_engine_patch(&source);
     let macos_sysroot = match host {
-        EngineHost::MacosAarch64 => Some(macos_build_sysroot()),
-        EngineHost::LinuxX86_64 | EngineHost::WindowsX86_64Msvc | EngineHost::WindowsX86_64Gnu => {
-            None
-        }
+        EngineHost::Macos => Some(macos_build_sysroot()),
+        EngineHost::Linux | EngineHost::WindowsMsvc | EngineHost::WindowsGnu => None,
     };
 
     let native_archive = compile_native_entries(
@@ -121,6 +120,7 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
         &build,
         &bootstrap,
         macos_sysroot.as_ref(),
+        &target,
         host,
     );
     emit_static_links(out_dir, &build, &bootstrap, &native_archive, host);
@@ -130,15 +130,15 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EngineHost {
-    MacosAarch64,
-    LinuxX86_64,
-    WindowsX86_64Msvc,
-    WindowsX86_64Gnu,
+    Macos,
+    Linux,
+    WindowsMsvc,
+    WindowsGnu,
 }
 
 impl EngineHost {
     fn is_windows(self) -> bool {
-        matches!(self, Self::WindowsX86_64Msvc | Self::WindowsX86_64Gnu)
+        matches!(self, Self::WindowsMsvc | Self::WindowsGnu)
     }
 }
 
@@ -185,6 +185,7 @@ fn validate_static_engine_patch(source: &Path) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_native_entries(
     manifest_directory: &Path,
     out_dir: &Path,
@@ -192,6 +193,7 @@ fn compile_native_entries(
     build: &Path,
     bootstrap: &Path,
     macos: Option<&MacosBuildSysroot>,
+    cargo_target: &str,
     host: EngineHost,
 ) -> PathBuf {
     let compiler = llvm_tool(bootstrap, "clang++");
@@ -270,6 +272,18 @@ fn compile_native_entries(
                 .arg("-isysroot")
                 .arg(&macos.sdk_root)
                 .arg(format!("-mmacosx-version-min={}", macos.deployment_target));
+            // The ARM64 LLVM bootstrap clang++ otherwise emits host arm64
+            // objects while CMAKE_OSX_ARCHITECTURES=x86_64 produced x86_64
+            // engine archives.
+            match cargo_target {
+                "x86_64-apple-darwin" => {
+                    command.args(["-arch", "x86_64", "--target=x86_64-apple-darwin"]);
+                }
+                "aarch64-apple-darwin" => {
+                    command.args(["-arch", "arm64", "--target=arm64-apple-darwin"]);
+                }
+                _ => {}
+            }
         }
         for directory in &include_directories {
             command.arg("-I").arg(directory);
@@ -278,7 +292,7 @@ fn compile_native_entries(
         objects.push(object);
     }
 
-    let archive = if matches!(host, EngineHost::WindowsX86_64Msvc) {
+    let archive = if matches!(host, EngineHost::WindowsMsvc) {
         out_dir.join("rcc_native_entries.lib")
     } else {
         out_dir.join("librcc_native_entries.a")
@@ -320,7 +334,7 @@ fn emit_static_links(
     // Keep the dependency order used by Clang's own statically linked driver.
     // Repeated archives are deliberate: Mach-O and COFF archive linking do not
     // group circular Clang dependencies the way an ELF --start-group does.
-    if matches!(host, EngineHost::LinuxX86_64) {
+    if matches!(host, EngineHost::Linux) {
         println!("cargo:rustc-link-arg=-Wl,--start-group");
     }
     let clang_libraries = [
@@ -402,7 +416,7 @@ fn emit_static_links(
     command.args(["--link-static", "--libs"]).args(&components);
     let llvm_libraries = command_output(&mut command, "query custom LLVM static libraries");
     emit_link_tokens(&llvm_libraries, &library_directory, true);
-    if matches!(host, EngineHost::LinuxX86_64) {
+    if matches!(host, EngineHost::Linux) {
         println!("cargo:rustc-link-arg=-Wl,--end-group");
     }
     let mut command = Command::new(&llvm_config);
@@ -412,11 +426,11 @@ fn emit_static_links(
     let system_libraries = command_output(&mut command, "query custom LLVM system libraries");
     emit_link_tokens(&system_libraries, &library_directory, false);
     match host {
-        EngineHost::MacosAarch64 => {
+        EngineHost::Macos => {
             println!("cargo:rustc-link-lib=c++");
             println!("cargo:rustc-link-arg=-Wl,-dead_strip");
         }
-        EngineHost::LinuxX86_64 => {
+        EngineHost::Linux => {
             // rustc passes -nodefaultlibs, so clang++ driver flags such as
             // -static-libstdc++ never pull in the C++ runtime. Link the static
             // archives explicitly after the LLVM group.
@@ -433,7 +447,7 @@ fn emit_static_links(
             println!("cargo:rustc-link-lib=dl");
             println!("cargo:rustc-link-lib=m");
         }
-        EngineHost::WindowsX86_64Msvc | EngineHost::WindowsX86_64Gnu => {
+        EngineHost::WindowsMsvc | EngineHost::WindowsGnu => {
             // rustc windows-msvc already pulls in the UCRT. LLVM still needs
             // the MSVC C++ standard library and a few Win32 libs llvm-config
             // does not always list when queried from MinGW-style tokens.

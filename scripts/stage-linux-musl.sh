@@ -351,7 +351,10 @@ cp -L \
     "$stage/provenance/$kernel_lock"
 test -f "$sysroot_destination/usr/include/linux/futex.h"
 
-cxx_build=${RCC_LINUX_MUSL_LIBCXX_BUILD:-$repository/inner/llvm-engine/libcxx-linux-$arch-musl}
+# Keep this cache next to the LLVM source tree so a second engine (Linux
+# aarch64 vs the macOS inner/ tree) does not reuse a CMake cache from a
+# different checkout.
+cxx_build=${RCC_LINUX_MUSL_LIBCXX_BUILD:-$(dirname "$llvm_source")/libcxx-linux-$arch-musl}
 "$script_directory/stage-linux-x86_64-libcxx.sh" \
     "$sysroot_destination" \
     "$stage/lib/clang/22" \

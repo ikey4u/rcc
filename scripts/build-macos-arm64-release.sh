@@ -71,6 +71,32 @@ fi
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository=$(CDPATH= cd -- "$script_directory/.." && pwd)
 archive_cache=${RCC_ARCHIVE_CACHE:-$repository/.cache}
+macos_host=${RCC_MACOS_HOST:-aarch64-apple-darwin}
+macos_cargo_target=
+macos_cmake_arch=
+macos_linker_env=CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER
+macos_pack_id=llvm-22.1.8-macos-arm64-static
+macos_pack_file=llvm-22.1.8-macos-arm64.rccpack
+macos_engine_dir=llvm-engine
+macos_host_profile=host-macos-aarch64
+case "$macos_host" in
+    aarch64-apple-darwin) ;;
+    x86_64-apple-darwin)
+        macos_pack_id=llvm-22.1.8-macos-x64-static
+        macos_pack_file=llvm-22.1.8-macos-x64.rccpack
+        macos_engine_dir=llvm-engine-macos-x64
+        macos_linker_env=CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER
+        macos_host_profile=host-macos-x86_64
+        if [ "$(uname -m)" != x86_64 ]; then
+            macos_cargo_target=x86_64-apple-darwin
+            macos_cmake_arch=x86_64
+        fi
+        ;;
+    *)
+        echo "unsupported RCC_MACOS_HOST: $macos_host" >&2
+        exit 64
+        ;;
+esac
 
 default_archive() {
     name=$1
@@ -99,7 +125,7 @@ output=$(CDPATH= cd -- "$output" && pwd)
 
 # Keep the patched LLVM tree and ninja build under inner/ so a later-stage
 # failure does not throw away a finished engine compile.
-temporary=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine}
+temporary=${RCC_LLVM_WORK_DIR:-$repository/inner/$macos_engine_dir}
 mkdir -p "$temporary"
 temporary=$(CDPATH= cd -- "$temporary" && pwd)
 
@@ -115,8 +141,18 @@ fi
 bootstrap_prefix=$temporary/$bootstrap_root
 source_directory=$temporary/$source_root
 llvm_build_directory=$temporary/llvm-build
-if [ ! -x "$bootstrap_prefix/bin/clang++" ]; then
-    echo "bootstrap clang++ is missing from $bootstrap_prefix" >&2
+if [ -x "$bootstrap_prefix/bin/clang++" ] \
+    && ! "$bootstrap_prefix/bin/clang++" --version >/dev/null 2>&1
+then
+    if [ "$macos_host" = x86_64-apple-darwin ] && command -v xcrun >/dev/null 2>&1; then
+        echo "ARM64 LLVM bootstrap cannot run on this host; using Xcode clang"
+        bootstrap_prefix=
+    else
+        echo "bootstrap clang++ at $temporary/$bootstrap_root/bin/clang++ cannot execute" >&2
+        exit 65
+    fi
+elif [ ! -x "$bootstrap_prefix/bin/clang++" ]; then
+    echo "bootstrap clang++ is missing from $temporary/$bootstrap_root" >&2
     exit 65
 fi
 if [ ! -d "$source_directory/llvm" ] || [ ! -d "$source_directory/clang" ] || [ ! -d "$source_directory/lld" ]; then
@@ -225,8 +261,6 @@ set -- \
     -G Ninja \
     "-DCMAKE_MAKE_PROGRAM=$ninja_command" \
     "-DCMAKE_BUILD_TYPE=$build_type" \
-    "-DCMAKE_C_COMPILER=$bootstrap_prefix/bin/clang" \
-    "-DCMAKE_CXX_COMPILER=$bootstrap_prefix/bin/clang++" \
     "-DCMAKE_OSX_DEPLOYMENT_TARGET=$deployment_target" \
     '-DLLVM_ENABLE_PROJECTS=clang;lld' \
     "-DLLVM_TARGETS_TO_BUILD=$targets_to_build" \
@@ -252,6 +286,18 @@ set -- \
     -DCLANG_ENABLE_STATIC_ANALYZER=OFF \
     -DCLANG_ENABLE_ARCMT=OFF \
     -DCLANG_INCLUDE_TESTS=OFF
+if [ -n "$bootstrap_prefix" ]; then
+    set -- "$@" \
+        "-DCMAKE_C_COMPILER=$bootstrap_prefix/bin/clang" \
+        "-DCMAKE_CXX_COMPILER=$bootstrap_prefix/bin/clang++"
+else
+    set -- "$@" \
+        "-DCMAKE_C_COMPILER=$(xcrun -f clang)" \
+        "-DCMAKE_CXX_COMPILER=$(xcrun -f clang++)"
+fi
+if [ -n "$macos_cmake_arch" ]; then
+    set -- "$@" "-DCMAKE_OSX_ARCHITECTURES=$macos_cmake_arch"
+fi
 if [ -n "${RCC_LLVM_CMAKE_INIT_CACHE:-}" ]; then
     if [ ! -f "$RCC_LLVM_CMAKE_INIT_CACHE" ]; then
         echo "RCC_LLVM_CMAKE_INIT_CACHE is not a regular file" >&2
@@ -268,6 +314,9 @@ echo "building static Clang, LLD and llvm-ar libraries"
 "$ninja_command" -C "$llvm_build_directory" -j "$build_jobs" \
     clang lld llvm-ar llvm-config \
     lib/libLLVMMCA.a lib/libLLVMX86TargetMCA.a lib/libLLVMDTLTO.a
+if [ -z "$bootstrap_prefix" ]; then
+    bootstrap_prefix=$llvm_build_directory
+fi
 
 cargo build \
     --manifest-path "$repository/Cargo.toml" \
@@ -276,8 +325,13 @@ cargo build \
     -p rcc-pack
 
 stage=$output/stage
-pack=$output/llvm-22.1.8-macos-arm64.rccpack
+pack=$output/$macos_pack_file
 "$script_directory/stage-llvm-macos-arm64.sh" "$bootstrap_archive" "$stage"
+stage_tools=${bootstrap_prefix:-$llvm_build_directory}
+"$script_directory/stage-darwin-compiler-rt.sh" \
+    "$stage" \
+    "$source_directory" \
+    "$stage_tools"
 "$script_directory/stage-linux-musl.sh" \
     x86_64 \
     "$musl_archive" \
@@ -345,11 +399,11 @@ set -- \
     "$repository/target/release/rcc-pack" create \
     "$stage" \
     "$pack" \
-    --pack-id llvm-22.1.8-macos-arm64-static \
+    --pack-id "$macos_pack_id" \
     --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
-    --host aarch64-apple-darwin \
+    --host "$macos_host" \
     --profile macos-aarch64 \
-    --profile host-macos-aarch64 \
+    --profile "$macos_host_profile" \
     --profile linux-x86_64-musl-static
 if [ "$musl_aarch64_in_payload" -eq 1 ]; then
     set -- "$@" --profile linux-aarch64-musl-static
@@ -399,25 +453,45 @@ fi
 if [ "$windows_gnu_in_payload" -eq 1 ]; then
     set -- "$@" --profile windows-x86_64-gnu
 fi
-set -- "$@" --profile windows-x86_64-msvc
+set -- "$@" --profile windows-x86_64-msvc --profile windows-aarch64-msvc
+if [ -f "$stage/lib/clang/22/lib/darwin/.rcc-osx-x86_64" ]; then
+    set -- "$@" --profile macos-x86_64
+    if [ "$macos_host_profile" != host-macos-x86_64 ]; then
+        set -- "$@" --profile host-macos-x86_64
+    fi
+fi
 "$@"
 "$repository/target/release/rcc-pack" verify "$pack"
 
-RCC_LLVM_BUILD_DIR="$llvm_build_directory" \
-RCC_LLVM_SOURCE_DIR="$source_directory" \
-RCC_LLVM_BOOTSTRAP_PREFIX="$bootstrap_prefix" \
-RCC_LLVM_SOURCE_SHA256="$source_expected_sha256" \
-RCC_ENGINE_BUILD_ID="$engine_build_id" \
-RCC_EMBED_PACK="$pack" \
-RCC_MACOS_DEPLOYMENT_TARGET="$deployment_target" \
-CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$bootstrap_prefix/bin/clang++" \
-cargo build \
-    --manifest-path "$repository/Cargo.toml" \
-    --release \
-    --offline \
-    -p rcc
+if [ -n "$bootstrap_prefix" ]; then
+    macos_link_clang=$bootstrap_prefix/bin/clang++
+else
+    macos_link_clang=$(xcrun -f clang++)
+fi
+set -- env \
+    RCC_LLVM_BUILD_DIR="$llvm_build_directory" \
+    RCC_LLVM_SOURCE_DIR="$source_directory" \
+    RCC_LLVM_BOOTSTRAP_PREFIX="${bootstrap_prefix:-$llvm_build_directory}" \
+    RCC_LLVM_SOURCE_SHA256="$source_expected_sha256" \
+    RCC_ENGINE_BUILD_ID="$engine_build_id" \
+    RCC_EMBED_PACK="$pack" \
+    RCC_MACOS_DEPLOYMENT_TARGET="$deployment_target" \
+    "$macos_linker_env=$macos_link_clang" \
+    cargo build \
+        --manifest-path "$repository/Cargo.toml" \
+        --release \
+        --offline \
+        -p rcc
+if [ -n "$macos_cargo_target" ]; then
+    set -- "$@" --target "$macos_cargo_target"
+fi
+"$@"
 
-cp -L "$repository/target/release/rcc" "$output/rcc"
+if [ -n "$macos_cargo_target" ]; then
+    cp -L "$repository/target/$macos_cargo_target/release/rcc" "$output/rcc"
+else
+    cp -L "$repository/target/release/rcc" "$output/rcc"
+fi
 chmod 755 "$output/rcc"
 
 echo "release executable: $output/rcc"

@@ -44,11 +44,48 @@ esac
 repository=$(CDPATH= cd -- "$script_directory/.." && pwd)
 archive_cache=${RCC_ARCHIVE_CACHE:-$repository/.cache}
 
+windows_host=${RCC_WINDOWS_HOST:-x86_64-pc-windows-msvc}
+windows_bootstrap_name=clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz
+windows_bootstrap_root=clang+llvm-22.1.8-x86_64-pc-windows-msvc
+windows_bootstrap_expected_sha256=d96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234
+windows_pack_id=llvm-22.1.8-windows-x64-static
+windows_pack_file=llvm-22.1.8-windows-x64.rccpack
+windows_engine_dir=llvm-engine-windows
+windows_host_profile=host-windows-x86_64-msvc
+windows_linker_env=CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
+case "$windows_host" in
+    x86_64-pc-windows-msvc) ;;
+    aarch64-pc-windows-msvc)
+        windows_bootstrap_name=clang+llvm-22.1.8-aarch64-pc-windows-msvc.tar.xz
+        windows_bootstrap_root=clang+llvm-22.1.8-aarch64-pc-windows-msvc
+        windows_bootstrap_expected_sha256=de718c58ebbc5f61d58c17b90457fcf42983bc2c4a4aba3c010d108713bfd7f1
+        windows_pack_id=llvm-22.1.8-windows-arm64-static
+        windows_pack_file=llvm-22.1.8-windows-arm64.rccpack
+        windows_engine_dir=llvm-engine-windows-arm64
+        windows_host_profile=host-windows-aarch64-msvc
+        windows_linker_env=CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER
+        ;;
+    *)
+        echo "unsupported RCC_WINDOWS_HOST: $windows_host" >&2
+        exit 64
+        ;;
+esac
+host_machine=$(uname -m)
+case "$windows_host" in
+    aarch64-pc-windows-msvc)
+        case "$host_machine" in
+            aarch64|arm64|ARM64) ;;
+            *)
+                echo "RCC_WINDOWS_HOST=$windows_host requires ARM64 Windows (got $host_machine)" >&2
+                exit 64
+                ;;
+        esac
+        ;;
+esac
+
 resource_expected_sha256=f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f
 source_expected_sha256=922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888
-windows_bootstrap_expected_sha256=d96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234
 source_root=llvm-project-22.1.8.src
-windows_bootstrap_root=clang+llvm-22.1.8-x86_64-pc-windows-msvc
 
 for archive in "$resource_archive" "$source_archive" "$musl_archive"; do
     if [ ! -f "$archive" ]; then
@@ -97,7 +134,7 @@ if [ "$engine_patch_sha256" != "$engine_patch_expected_sha256" ]; then
 fi
 output=$(CDPATH= cd -- "$output" && pwd)
 
-temporary=${RCC_LLVM_WORK_DIR:-$repository/inner/llvm-engine-windows}
+temporary=${RCC_LLVM_WORK_DIR:-$repository/inner/$windows_engine_dir}
 mkdir -p "$temporary"
 temporary=$(CDPATH= cd -- "$temporary" && pwd)
 
@@ -127,7 +164,7 @@ else
     tr -d '\r' < "$engine_patch" | patch -d "$source_directory" -p1
 fi
 
-windows_bootstrap_archive=${RCC_LLVM_WINDOWS_BOOTSTRAP_ARCHIVE:-$(default_archive clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz)}
+windows_bootstrap_archive=${RCC_LLVM_WINDOWS_BOOTSTRAP_ARCHIVE:-$(default_archive "$windows_bootstrap_name")}
 bootstrap_prefix=
 if [ -f "$windows_bootstrap_archive" ]; then
     windows_bootstrap_actual=$(file_sha256 "$windows_bootstrap_archive")
@@ -320,12 +357,16 @@ cargo build \
     -p rcc-pack
 
 stage=$output/stage
-pack=$output/llvm-22.1.8-windows-x64.rccpack
+pack=$output/$windows_pack_file
 if [ -d "$stage/lib/clang/22" ]; then
     echo "reusing staged LLVM resources at $stage"
 else
     "$script_directory/stage-llvm-macos-arm64.sh" "$resource_archive" "$stage"
 fi
+"$script_directory/stage-darwin-compiler-rt.sh" \
+    "$stage" \
+    "$source_directory" \
+    "$stage_bootstrap"
 "$script_directory/stage-linux-musl.sh" \
     x86_64 \
     "$musl_archive" \
@@ -387,12 +428,12 @@ set -- \
     "$(host_binary "$repository/target/release/rcc-pack")" create \
     "$stage" \
     "$pack" \
-    --pack-id llvm-22.1.8-windows-x64-static \
+    --pack-id "$windows_pack_id" \
     --revision ca7933e47d3a3451d81e72ac174dcb5aa28b59d1 \
-    --host x86_64-pc-windows-msvc \
+    --host "$windows_host" \
     --profile macos-aarch64 \
     --profile host-macos-aarch64 \
-    --profile host-windows-x86_64-msvc \
+    --profile "$windows_host_profile" \
     --profile linux-x86_64-musl-static
 if [ "$musl_aarch64_in_payload" -eq 1 ]; then
     set -- "$@" --profile linux-aarch64-musl-static
@@ -441,8 +482,8 @@ fi
 if [ "$windows_gnu_in_payload" -eq 1 ]; then
     set -- "$@" --profile windows-x86_64-gnu --profile host-windows-x86_64-gnu
 fi
-set -- "$@" --profile windows-x86_64-msvc
-if [ -d "$stage/lib/clang/22/lib/darwin" ]; then
+set -- "$@" --profile windows-x86_64-msvc --profile windows-aarch64-msvc
+if [ -f "$stage/lib/clang/22/lib/darwin/.rcc-osx-x86_64" ]; then
     set -- "$@" --profile macos-x86_64 --profile host-macos-x86_64
 fi
 "$@"
@@ -462,7 +503,7 @@ RCC_LLVM_BOOTSTRAP_PREFIX="$stage_bootstrap" \
 RCC_LLVM_SOURCE_SHA256="$source_expected_sha256" \
 RCC_ENGINE_BUILD_ID="$engine_build_id" \
 RCC_EMBED_PACK="$pack" \
-CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="$link_program" \
+"$windows_linker_env=$link_program" \
 cargo build \
     --manifest-path "$repository/Cargo.toml" \
     --release \

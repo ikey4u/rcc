@@ -6,6 +6,7 @@ repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repository"
 
 sh -n scripts/build-macos-arm64-release.sh
+sh -n scripts/build-macos-x64-release.sh
 sh -n scripts/package-release.sh
 sh -n scripts/relink-rcc.sh
 sh -n scripts/install.sh
@@ -46,14 +47,21 @@ sh -n scripts/verify-linux-aarch64-gnu.sh
 sh -n scripts/verify-windows.sh
 sh -n scripts/ensure-linux-aarch64-guest.sh
 sh -n scripts/build-linux-x86_64-release.sh
+sh -n scripts/build-linux-aarch64-release.sh
 sh -n scripts/build-windows-x64-release.sh
+sh -n scripts/build-windows-arm64-release.sh
+sh -n scripts/stage-darwin-compiler-rt.sh
 sh -n scripts/stage-apple-sdk.sh
 sh -n scripts/setup-env.sh
 sh -n scripts/verify-macos.sh
+sh -n scripts/verify-sqlite.sh
+python3 -m json.tool toolchains/sqlite-amalgamation-3500400.lock.json >/dev/null
 python3 -m py_compile scripts/lib/flatten-apple-sdk.py
 sh -n scripts/lib/posix.sh
 python3 -m py_compile scripts/extract-embedded-pack.py
 python3 -m json.tool toolchains/mingw-w64-12.0.0.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-22.1.8-linux-x64.lock.json >/dev/null
+python3 -m json.tool toolchains/llvm-22.1.8-linux-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/llvm-22.1.8-windows-x64.lock.json >/dev/null
+python3 -m json.tool toolchains/llvm-22.1.8-windows-arm64.lock.json >/dev/null
 python3 -m json.tool toolchains/macosx-11.3-sdk.lock.json >/dev/null

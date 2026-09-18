@@ -767,6 +767,7 @@ fn generated_view_files(manifest: &ViewManifest) -> Vec<String> {
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/")
     }));
+    files.extend(rcc_core::cross_bin::relative_paths(manifest));
     files
 }
 

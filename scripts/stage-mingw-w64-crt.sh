@@ -122,8 +122,16 @@ trap cleanup EXIT HUP INT TERM
 # Autotools on Git-for-Windows try to re-run automake via an unquoted
 # C:/Program Files/... path and fail with "C:/Program: No such file".
 export AUTOMAKE=: ACLOCAL=: AUTOCONF=: AUTOHEADER=: MAKEINFO=true
-export CONFIG_SHELL=sh.exe
-export SHELL=sh.exe
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        export CONFIG_SHELL=sh.exe
+        export SHELL=sh.exe
+        ;;
+    *)
+        export CONFIG_SHELL=/bin/sh
+        export SHELL=/bin/sh
+        ;;
+esac
 # MSYS make spawns native llvm-ar via CreateProcess (~32k argv).
 # Write object lists to a response file so the archive command stays short.
 rewrite_automake_ar_recipes() {
@@ -192,10 +200,17 @@ fi
 
 wrappers=$temporary/wrappers
 mkdir -p "$wrappers"
-win_tmp=C:/Windows/Temp
-if [ -n "${LOCALAPPDATA:-}" ]; then
-    win_tmp=$(cygpath -w "$LOCALAPPDATA/Temp")
-fi
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        win_tmp=C:/Windows/Temp
+        if [ -n "${LOCALAPPDATA:-}" ]; then
+            win_tmp=$(cygpath -w "$LOCALAPPDATA/Temp")
+        fi
+        ;;
+    *)
+        win_tmp=/tmp
+        ;;
+esac
 for name in gcc cc clang; do
     cat > "$wrappers/$mingw_host-$name" <<EOF
 #!/bin/sh

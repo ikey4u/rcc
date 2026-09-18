@@ -328,7 +328,8 @@ fn make_target_profiles() -> Vec<Profile> {
         windows_gnullvm("windows-aarch64-gnullvm", ProfileKind::Target, "aarch64"),
         macos("macos-x86_64", ProfileKind::Target, "x86_64", "10.12"),
         macos("macos-aarch64", ProfileKind::Target, "aarch64", "11.0"),
-        windows_msvc("windows-x86_64-msvc", ProfileKind::Target),
+        windows_msvc("windows-x86_64-msvc", ProfileKind::Target, "x86_64"),
+        windows_msvc("windows-aarch64-msvc", ProfileKind::Target, "aarch64"),
     ]
 }
 
@@ -348,7 +349,8 @@ fn make_host_profiles() -> Vec<Profile> {
         ),
         windows_gnu("host-windows-x86_64-gnu", ProfileKind::Host),
         windows_gnullvm("host-windows-x86_64-gnullvm", ProfileKind::Host, "x86_64"),
-        windows_msvc("host-windows-x86_64-msvc", ProfileKind::Host),
+        windows_msvc("host-windows-x86_64-msvc", ProfileKind::Host, "x86_64"),
+        windows_msvc("host-windows-aarch64-msvc", ProfileKind::Host, "aarch64"),
         macos("host-macos-aarch64", ProfileKind::Host, "aarch64", "11.0"),
         macos("host-macos-x86_64", ProfileKind::Host, "x86_64", "10.12"),
     ]
@@ -513,13 +515,14 @@ fn windows_gnullvm(id: &str, kind: ProfileKind, arch: &str) -> Profile {
     )
 }
 
-fn windows_msvc(id: &str, kind: ProfileKind) -> Profile {
+fn windows_msvc(id: &str, kind: ProfileKind, arch: &str) -> Profile {
+    let triple = format!("{arch}-pc-windows-msvc");
     profile(
         id,
         kind,
-        "x86_64-pc-windows-msvc",
-        "x86_64-pc-windows-msvc",
-        "x86_64",
+        &triple,
+        &triple,
+        arch,
         "pc",
         "windows",
         Some("msvc"),
@@ -592,8 +595,8 @@ mod tests {
     #[test]
     fn builtins_are_valid_and_have_stable_counts() {
         validate_builtin_registry().unwrap();
-        assert_eq!(builtin_target_profiles().len(), 10);
-        assert_eq!(builtin_host_profiles().len(), 7);
+        assert_eq!(builtin_target_profiles().len(), 11);
+        assert_eq!(builtin_host_profiles().len(), 8);
     }
 
     #[test]
@@ -670,6 +673,12 @@ mod tests {
                 .unwrap()
                 .profile_id,
             "host-windows-x86_64-msvc"
+        );
+        assert_eq!(
+            resolve_host_profile("aarch64-pc-windows-msvc")
+                .unwrap()
+                .profile_id,
+            "host-windows-aarch64-msvc"
         );
     }
 }

@@ -409,10 +409,9 @@ fn darwin_clang_target_family(target: &str) -> Option<(&'static str, &'static st
         ("aarch64", rest)
     } else if let Some(rest) = target.strip_prefix("aarch64-apple-") {
         ("aarch64", rest)
-    } else if let Some(rest) = target.strip_prefix("x86_64-apple-") {
-        ("x86_64", rest)
     } else {
-        return None;
+        let rest = target.strip_prefix("x86_64-apple-")?;
+        ("x86_64", rest)
     };
     for os in ["macosx", "ios", "tvos", "watchos"] {
         if rest == os {
@@ -584,10 +583,7 @@ pub fn validate_forbidden_path_arguments(
             continue;
         }
         if let Some((payload, after)) = take_clang_forward(arguments, index)? {
-            let next_payload = match take_clang_forward(arguments, after)? {
-                Some((payload, _)) => Some(payload),
-                None => None,
-            };
+            let next_payload = take_clang_forward(arguments, after)?.map(|(payload, _)| payload);
             if let Some((path, uses_next)) = include_path_option(payload, next_payload)? {
                 reject_forbidden_path(&path, forbidden_roots, working_directory)?;
                 index = if uses_next {
@@ -698,10 +694,7 @@ const INCLUDE_PATH_OPTIONS: &[&str] = &[
     "-F",
 ];
 
-fn take_clang_forward<'a>(
-    arguments: &'a [OsString],
-    index: usize,
-) -> Result<Option<(&'a str, usize)>> {
+fn take_clang_forward(arguments: &[OsString], index: usize) -> Result<Option<(&str, usize)>> {
     if index >= arguments.len() {
         return Ok(None);
     }

@@ -132,6 +132,7 @@ RCC 不负责：
 | macos-x86_64 | x86_64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host；Linux/Windows 交叉为尽最大努力（自备 SDK） |
 | macos-aarch64 | aarch64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host；Linux/Windows 交叉为尽最大努力（自备 SDK） |
 | windows-x86_64-msvc | x86_64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | 已交付 | Windows host 可发现已装 VS/Kits；其它 host 自备两棵树 |
+| windows-aarch64-msvc | aarch64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | 已接线 | 与 x86_64-msvc 相同；toolset 需 `lib/arm64` |
 
 glibc 2.17 是候选 baseline，必须在 Phase 0 完成来源、补丁、许可证和真实发行环境验证后冻结。musl、MinGW、GCC runtime、LLVM 和 libc++ 均必须固定到精确版本，不能只写 1.2.x 或 latest。
 
@@ -141,12 +142,12 @@ glibc 2.17 是候选 baseline，必须在 Phase 0 完成来源、补丁、许可
 
 | Host | 发行物 | 说明 |
 |---|---|---|
-| Linux x86_64 | rcc-linux-x86_64 | 第一优先级 |
+| Linux x86_64 | rcc-linux-x86_64 | 已交付 |
 | Windows x86_64 | rcc-windows-x86_64.exe | 已交付：MSVC 宿主编 PE（需 VS 编 controller）；gnu/gnullvm **目标**不要求最终用户装 VS |
-| macOS AArch64 | rcc-macos-aarch64 | Apple Silicon 主路径 |
-| Linux AArch64 | rcc-linux-aarch64 | Phase 2 前补齐 |
-| macOS x86_64 | rcc-macos-x86_64 | Phase 2 前补齐 |
-| Windows AArch64 | rcc-windows-aarch64.exe | Phase 3 |
+| macOS AArch64 | rcc-macos-aarch64 | 已交付 |
+| Linux AArch64 | rcc-linux-aarch64 | 已接线：`scripts/build-linux-aarch64-release.sh`（须在 aarch64 Linux 上编） |
+| macOS x86_64 | rcc-macos-x86_64 | 已接线：`scripts/build-macos-x64-release.sh`（Apple Silicon 交叉或 Intel + Xcode clang；LLVM 22.1.8 无官方 macOS x64 包） |
+| Windows AArch64 | rcc-windows-aarch64.exe | 已接线：`scripts/build-windows-arm64-release.sh`；须在 ARM64 Windows 上编，本仓库不产出该二进制 |
 
 每个 host 发行物中的静态 Clang/LLD engine 必须拥有闭合的 host runtime：不得依赖系统 libstdc++、共享 LLVM dylib 或开发工具安装。依赖基础 libc、UCRT 或 macOS system runtime 是 host ABI 依赖，不是开发 toolchain 依赖。
 
@@ -157,12 +158,13 @@ HostNativeProfile 面向消费者生成的 host 原生代码，不等同于“RC
 | Host profile ID | Consumer host alias | Native runtime | Provider | 阶段 |
 |---|---|---|---|:---:|
 | host-linux-x86_64-gnu-glibc217 | x86_64-unknown-linux-gnu | RCC glibc/GNU runtime closure | 无 | MVP |
-| host-linux-aarch64-gnu-glibc217 | aarch64-unknown-linux-gnu | RCC glibc/GNU runtime closure | 无 | Phase 2 |
+| host-linux-aarch64-gnu-glibc217 | aarch64-unknown-linux-gnu | RCC glibc/GNU runtime closure | 无 | 已交付 |
 | host-windows-x86_64-gnu | x86_64-pc-windows-gnu | RCC MinGW/GNU runtime closure | 无 | MVP |
 | host-windows-x86_64-gnullvm | x86_64-pc-windows-gnullvm | RCC LLVM-MinGW runtime closure | 无 | Phase 2 |
 | host-windows-x86_64-msvc | x86_64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | 已交付（Windows host） |
+| host-windows-aarch64-msvc | aarch64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | 已接线 |
 | host-macos-aarch64 | aarch64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | MVP |
-| host-macos-x86_64 | x86_64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | Phase 2 |
+| host-macos-x86_64 | x86_64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | 已交付 |
 
 默认解析规则：
 
@@ -767,7 +769,7 @@ Windows SDK 只提供 UCRT/UM/shared 等部分，不能替代 MSVC Toolset 的 S
 
 不同 CRT、exception model、C++ ABI 或 library format 不得混用。PE verifier 需要检查 machine、subsystem、imports、runtime DLL、API-set/import symbol baseline 和路径泄漏；只检查 DLL 名称不够。
 
-MVP 自包含路线为 windows-gnu。gnullvm 在 Phase 2；MSVC 在 Phase 3 且需要合法 external providers。
+MVP 自包含路线为 windows-gnu 与 windows-gnullvm。MSVC 是 Managed SDK：clang-cl/lld-link 已交付，Windows SDK 与 MSVC Toolset 由调用方提供。
 
 ### 10.4 macOS
 
@@ -906,28 +908,28 @@ rcc doctor 应执行：
 
 - [x] Rust controller、profile registry、pack materializer、immutable view。
 - [x] rcc print/env/cc/cxx/ar/ranlib/link/sysroot/doctor/verify/cache/licenses。
-- [x] macOS AArch64 static engine bridge、multicall dispatch/self-reexec 与 response-file 兼容；其他 host 待交付。
-- [ ] 首批 Rust target 的最小 versioned consumer contract、host+target Cargo/cc-rs 配置输出；只输出，不启动 Cargo。
-- [ ] Linux x86_64/AArch64 musl 与固定 glibc profile。
-- [ ] Windows x86_64 GNU/MinGW profile。
-- [ ] macOS host 的 x86_64/AArch64 Apple SDK provider。
-- [ ] C/C++ STL、exception、RTTI、integrated assembly、static/shared/executable fixture。
-- [ ] ELF、PE/COFF、Mach-O verifier。
-- [ ] 负面测试证明正式路径零系统 compiler/linker/binutils。
+- [x] macOS AArch64 / Linux x86_64 / Windows x86_64-msvc static engine 已交付。macOS x86_64 / Linux AArch64 / Windows AArch64 的 build.rs 与发布脚本已接线（后两者须在匹配 arch 的 host 上编）。
+- [x] 首批 Rust target 的最小 versioned consumer contract、host+target Cargo/cc-rs 配置输出；只输出，不启动 Cargo。
+- [x] Linux x86_64/AArch64 musl 与固定 glibc profile。
+- [x] Windows x86_64 GNU/MinGW 与 gnullvm x86_64/AArch64。
+- [x] macOS host 的 x86_64/AArch64 Apple SDK provider。
+- [x] C/C++ STL、exception、RTTI、integrated assembly、static/shared/executable fixture。
+- [x] ELF、PE/COFF、Mach-O verifier。
+- [x] 负面测试证明正式路径零系统 compiler/linker/binutils。
 
 ### Phase 2：消费者契约扩展与第二批 Profile
 
-- [ ] 扩展 Rust consumer contract 的 rustc 版本范围、gnullvm profile 与负面兼容矩阵。
-- [ ] 扩展 Cargo/cc-rs 配置格式和 diagnostics；仍不启动 Cargo。
-- [ ] CMake toolchain 和 pkg-config metadata 输出；不携带 build tool binary。
-- [ ] Windows gnullvm x86_64/AArch64。
-- [ ] Linux AArch64、macOS x86_64 host 发行物。
+- [x] 扩展 Rust consumer contract 的 rustc 版本范围、gnullvm profile 与负面兼容矩阵。
+- [x] 扩展 Cargo/cc-rs 配置格式和 diagnostics；仍不启动 Cargo。
+- [x] CMake toolchain 和 pkg-config metadata 输出；不携带 build tool binary。
+- [x] Windows gnullvm x86_64/AArch64。
+- [x] Linux AArch64、macOS x86_64、Windows AArch64 host 发行脚本（在对应机器上 `mise release`）。
 - [ ] sysroot overlay manifest 和派生 profile。
 
 ### Phase 3：专有 SDK 与生态扩展
 
-- [ ] Windows SDK Provider 与 MSVC Toolset Provider。
-- [ ] clang-cl/lld-link/MSVC ABI fixture。
+- [x] Windows SDK Provider 与 MSVC Toolset Provider。
+- [x] clang-cl/lld-link/MSVC ABI fixture（`windows-x86_64-msvc`；`windows-aarch64-msvc` 已注册）。
 - [ ] macOS universal2 工具与 ad-hoc signature 复验。
 - [ ] 评估独立 libclang pack；不自动并入 RCC core。
 - [ ] 评估签名 remote pack 和 slim edition，不改变 full edition 离线承诺。
@@ -949,10 +951,10 @@ CI 按 host × profile × capability 建矩阵：
 | C/C++ | C、C++ STL、exception、RTTI、templates |
 | Assembly | Clang integrated assembler 的 .s/.S |
 | Archive/link | static archive、shared library、executable、response files |
-| Profile | Linux glibc/musl x86_64+AArch64、Windows GNU x86_64、macOS 双架构 |
+| Profile | Linux glibc/musl x86_64+AArch64、Windows GNU/gnullvm/MSVC、macOS 双架构 |
 | Runtime | static/dynamic closure、loader、libgcc/libstdc++/unwind/winpthreads 策略 |
 | Artifact | ELF、PE、Mach-O metadata 和最低 ABI/OS |
-| Runtime test | 真实目标机；受控 QEMU/Wine 只作补充 |
+| Runtime test | 真实目标机；编译宿主一般不执行交叉产物（Windows 不跑 ELF/Mach-O，Linux 不跑 Mach-O）。补充：Linux qemu/Lima、x64 PE wine64、Mach-O Darwin（含 Rosetta）。`RCC_REQUIRE_RUNTIME=1` 无执行器则失败 |
 | Negative | host GCC 探测、PATH linker、污染环境、错误 SDK、ABI 混用、overlay 提升 baseline |
 | Operations | 并发展开、中断恢复、cache 损坏、版本并存、离线、只读安装目录 |
 | Integration | hardlink alias path、query flags、host+target env、Rust split-runtime fixture |
