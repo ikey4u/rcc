@@ -1,8 +1,11 @@
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
+
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
 
 pub fn bytes_sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -24,14 +27,20 @@ pub fn reader_sha256(mut reader: impl Read) -> Result<String> {
 }
 
 pub fn file_sha256(path: &Path) -> Result<String> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open {} for digest", path.display()))?;
+    let file = File::open(path).with_context(|| {
+        format!("failed to open {} for digest", path.display())
+    })?;
     reader_sha256(file)
 }
 
-pub fn file_region_sha256(path: &Path, offset: u64, length: u64) -> Result<String> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open {} for digest", path.display()))?;
+pub fn file_region_sha256(
+    path: &Path,
+    offset: u64,
+    length: u64,
+) -> Result<String> {
+    let mut file = File::open(path).with_context(|| {
+        format!("failed to open {} for digest", path.display())
+    })?;
     file.seek(SeekFrom::Start(offset))
         .with_context(|| format!("failed to seek {}", path.display()))?;
     reader_sha256(file.take(length))

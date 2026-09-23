@@ -1,15 +1,21 @@
-use crate::digest::bytes_sha256;
-use crate::pack::PackInspection;
-use crate::policy::BUILTIN_FORBIDDEN_ENV;
-use crate::schema::{
-    launcher_name, DriverKind, LinkerFlavor, PackFile, Profile, RuntimeContract, ToolKind,
-    ViewManifest, ViewTool, SCHEMA_VERSION,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
 };
-use crate::view::{strip_verbatim_prefix, ControllerExecutable, ViewMaterializer};
+
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+
+use crate::{
+    digest::bytes_sha256,
+    pack::PackInspection,
+    policy::BUILTIN_FORBIDDEN_ENV,
+    schema::{
+        launcher_name, DriverKind, LinkerFlavor, PackFile, Profile,
+        RuntimeContract, ToolKind, ViewManifest, ViewTool, SCHEMA_VERSION,
+    },
+    view::{strip_verbatim_prefix, ControllerExecutable, ViewMaterializer},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalSysroot {
@@ -167,7 +173,8 @@ pub fn build_view_manifest(
         pack_sha256: &pack.sha256,
         profile,
         runtime_contract,
-        external_sysroot_identity: external_sysroot.map(|value| value.identity.as_str()),
+        external_sysroot_identity: external_sysroot
+            .map(|value| value.identity.as_str()),
         policy_revision: POLICY_REVISION,
     })
     .context("failed to encode toolchain identity input")?;
@@ -181,19 +188,25 @@ pub fn build_view_manifest(
     let resource_relative = resource_directory(&pack.manifest.files)?;
     let resource_dir = root.join(resource_relative);
     let sysroot = match external_sysroot {
-        Some(external) => {
-            strip_verbatim_prefix(external.path.canonicalize().with_context(|| {
-                format!("failed to resolve SDK sysroot {}", external.path.display())
-            })?)
-        }
+        Some(external) => strip_verbatim_prefix(
+            external.path.canonicalize().with_context(|| {
+                format!(
+                    "failed to resolve SDK sysroot {}",
+                    external.path.display()
+                )
+            })?,
+        ),
         None => root.join(sysroot_directory(&pack.manifest.files, profile)?),
     };
-    let msvc_toolset = match external_sysroot.and_then(|value| value.msvc_toolset.as_ref()) {
-        Some(path) => Some(strip_verbatim_prefix(path.canonicalize().with_context(
-            || format!("failed to resolve MSVC toolset {}", path.display()),
-        )?)),
-        None => None,
-    };
+    let msvc_toolset =
+        match external_sysroot.and_then(|value| value.msvc_toolset.as_ref()) {
+            Some(path) => Some(strip_verbatim_prefix(
+                path.canonicalize().with_context(|| {
+                    format!("failed to resolve MSVC toolset {}", path.display())
+                })?,
+            )),
+            None => None,
+        };
     let cxx_headers = if profile.tool_kinds.contains(&ToolKind::Cxx) {
         cxx_header_directories(&pack.manifest.files, profile, &root, &sysroot)?
     } else {
@@ -234,7 +247,8 @@ pub fn build_view_manifest(
         controller_sha256: controller_sha256.to_owned(),
         engine_build_id: engine_build_id.to_owned(),
         pack_sha256: pack.sha256.clone(),
-        external_sysroot_identity: external_sysroot.map(|value| value.identity.clone()),
+        external_sysroot_identity: external_sysroot
+            .map(|value| value.identity.clone()),
         profile: profile.clone(),
         runtime_contract: runtime_contract.clone(),
         root: root.to_string_lossy().into_owned(),
@@ -252,7 +266,8 @@ pub fn build_view_manifest(
         .context("generated view manifest is invalid")?;
     let bound_identity = recompute_view_identity(&manifest)?;
     rebase_view_manifest(&mut manifest, materializer, &bound_identity)?;
-    validate_view_binding(&manifest).context("generated view binding is invalid")?;
+    validate_view_binding(&manifest)
+        .context("generated view binding is invalid")?;
     Ok(manifest)
 }
 
@@ -290,7 +305,9 @@ pub fn recompute_view_identity(view: &ViewManifest) -> Result<String> {
                 *kind,
                 arguments
                     .iter()
-                    .map(|argument| argument.replace(&view.root, ROOT_BINDING_TOKEN))
+                    .map(|argument| {
+                        argument.replace(&view.root, ROOT_BINDING_TOKEN)
+                    })
                     .collect(),
             ))
         })
@@ -367,7 +384,10 @@ fn bind_path(root: &Path, path: &Path) -> Result<BoundPath> {
                 std::path::Component::Normal(value) => {
                     components.push(value.to_string_lossy().into_owned())
                 }
-                _ => bail!("view-bound path is not normalized: {}", path.display()),
+                _ => bail!(
+                    "view-bound path is not normalized: {}",
+                    path.display()
+                ),
             }
         }
         return Ok(BoundPath::View(components.join("/")));
@@ -395,9 +415,10 @@ fn rebase_view_manifest(
     view.sysroot = rebase_path(&old_root, &new_root, Path::new(&view.sysroot))?
         .to_string_lossy()
         .into_owned();
-    view.resource_dir = rebase_path(&old_root, &new_root, Path::new(&view.resource_dir))?
-        .to_string_lossy()
-        .into_owned();
+    view.resource_dir =
+        rebase_path(&old_root, &new_root, Path::new(&view.resource_dir))?
+            .to_string_lossy()
+            .into_owned();
     let old_text = old_root.to_string_lossy();
     let new_text = new_root.to_string_lossy();
     for arguments in view.injected_args.values_mut() {
@@ -414,7 +435,11 @@ fn rebase_view_manifest(
     Ok(())
 }
 
-fn rebase_path(old_root: &Path, new_root: &Path, path: &Path) -> Result<PathBuf> {
+fn rebase_path(
+    old_root: &Path,
+    new_root: &Path,
+    path: &Path,
+) -> Result<PathBuf> {
     match path.strip_prefix(old_root) {
         Ok(relative) => Ok(new_root.join(relative)),
         Err(_) if path.is_absolute() => Ok(path.to_owned()),
@@ -426,7 +451,11 @@ pub fn launcher_path(view: &ViewManifest, kind: ToolKind) -> PathBuf {
     launcher_path_from_root(Path::new(&view.root), &view.profile, kind)
 }
 
-fn launcher_path_from_root(root: &Path, profile: &Profile, kind: ToolKind) -> PathBuf {
+fn launcher_path_from_root(
+    root: &Path,
+    profile: &Profile,
+    kind: ToolKind,
+) -> PathBuf {
     root.join("launchers").join(launcher_name(profile, kind))
 }
 
@@ -466,7 +495,9 @@ fn ensure_resource_only_pack(files: &[PackFile]) -> Result<()> {
                 && file.path != "launchers"
                 && !file.path.starts_with("launchers/")
                 && file.path != crate::CROSS_BIN_DIR
-                && !file.path.starts_with(&format!("{}/", crate::CROSS_BIN_DIR))
+                && !file
+                    .path
+                    .starts_with(&format!("{}/", crate::CROSS_BIN_DIR))
                 && file.path != "view.json"
                 && !file.path.starts_with("view.json/")
                 && file.path != "toolchain.cmake"
@@ -573,7 +604,8 @@ fn trusted_arguments(
         format!("-resource-dir={}", resource_dir.display()),
     ];
     if profile.driver_kind == DriverKind::ClangCl {
-        let toolset = msvc_toolset.context("MSVC profile has no bound toolset")?;
+        let toolset =
+            msvc_toolset.context("MSVC profile has no bound toolset")?;
         arguments.insert(0, "--driver-mode=cl".into());
         arguments.push(format!("/winsdkdir:{}", sysroot.display()));
         arguments.push(format!("/vctoolsdir:{}", toolset.display()));
@@ -581,7 +613,8 @@ fn trusted_arguments(
             arguments.push("/EHsc".into());
         }
         if profile.tool_kinds.contains(&ToolKind::Linker) {
-            let linker = launcher_path_from_root(root, profile, ToolKind::Linker);
+            let linker =
+                launcher_path_from_root(root, profile, ToolKind::Linker);
             arguments.push(format!("/clang:--ld-path={}", linker.display()));
         }
         return Ok(arguments);
@@ -665,7 +698,8 @@ fn validate_digest(label: &str, value: &str) -> Result<()> {
         value.len() == 64
             && value
                 .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                .all(|byte| byte.is_ascii_digit()
+                    || (b'a'..=b'f').contains(&byte)),
         "{label} is not a canonical lowercase SHA-256"
     );
     Ok(())
@@ -673,18 +707,23 @@ fn validate_digest(label: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::contracts;
-    use crate::pack::{create_pack, PackOptions};
-    use crate::registry;
     use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        contracts,
+        pack::{create_pack, PackOptions},
+        registry,
+    };
 
     #[test]
     fn binds_every_tool_to_the_static_controller_and_resource_pack() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
-        let profile = registry::resolve_target_profile("macos-aarch64").unwrap();
+        let profile =
+            registry::resolve_target_profile("macos-aarch64").unwrap();
         for directory in ["lib/clang/22", "lib/c++/v1"] {
             fs::create_dir_all(source.join(directory)).unwrap();
         }
@@ -702,8 +741,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
         let sdk = temporary.path().join("MacOSX.sdk");
         fs::create_dir(&sdk).unwrap();
         let external = ExternalSysroot {
@@ -748,7 +789,9 @@ mod tests {
     fn binds_linux_musl_sysroot_from_the_resource_pack() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
-        let profile = registry::resolve_target_profile("linux-x86_64-musl-static").unwrap();
+        let profile =
+            registry::resolve_target_profile("linux-x86_64-musl-static")
+                .unwrap();
         for directory in [
             "lib/clang/22",
             "sysroots/linux-x86_64-musl-static/usr/include",
@@ -759,12 +802,15 @@ mod tests {
         }
         fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
         fs::write(
-            source.join("sysroots/linux-x86_64-musl-static/include/c++/v1/vector"),
+            source.join(
+                "sysroots/linux-x86_64-musl-static/include/c++/v1/vector",
+            ),
             b"header",
         )
         .unwrap();
         fs::write(
-            source.join("sysroots/linux-x86_64-musl-static/usr/include/stdio.h"),
+            source
+                .join("sysroots/linux-x86_64-musl-static/usr/include/stdio.h"),
             b"stdio",
         )
         .unwrap();
@@ -784,8 +830,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::RUSTC_LINUX_MUSL_V0).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::RUSTC_LINUX_MUSL_V0)
+                .unwrap();
         let controller = materializer
             .persist_controller(&controller_fixture(temporary.path()))
             .unwrap();
@@ -822,7 +871,9 @@ mod tests {
     fn binds_linux_gnu_sysroot_without_static() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
-        let profile = registry::resolve_target_profile("linux-x86_64-gnu-glibc217").unwrap();
+        let profile =
+            registry::resolve_target_profile("linux-x86_64-gnu-glibc217")
+                .unwrap();
         for directory in [
             "lib/clang/22",
             "sysroots/linux-x86_64-gnu-glibc217/usr/include",
@@ -833,12 +884,15 @@ mod tests {
         }
         fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
         fs::write(
-            source.join("sysroots/linux-x86_64-gnu-glibc217/include/c++/v1/vector"),
+            source.join(
+                "sysroots/linux-x86_64-gnu-glibc217/include/c++/v1/vector",
+            ),
             b"header",
         )
         .unwrap();
         fs::write(
-            source.join("sysroots/linux-x86_64-gnu-glibc217/usr/include/stdio.h"),
+            source
+                .join("sysroots/linux-x86_64-gnu-glibc217/usr/include/stdio.h"),
             b"stdio",
         )
         .unwrap();
@@ -858,8 +912,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
         let controller = materializer
             .persist_controller(&controller_fixture(temporary.path()))
             .unwrap();
@@ -896,7 +952,9 @@ mod tests {
     fn linux_cxx_uses_shared_headers_and_profile_config_site() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
-        let profile = registry::resolve_target_profile("linux-x86_64-gnu-glibc217").unwrap();
+        let profile =
+            registry::resolve_target_profile("linux-x86_64-gnu-glibc217")
+                .unwrap();
         for directory in [
             "lib/clang/22",
             "lib/c++/linux/v1",
@@ -914,7 +972,8 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            source.join("sysroots/linux-x86_64-gnu-glibc217/usr/include/stdio.h"),
+            source
+                .join("sysroots/linux-x86_64-gnu-glibc217/usr/include/stdio.h"),
             b"stdio",
         )
         .unwrap();
@@ -934,8 +993,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
         let controller = materializer
             .persist_controller(&controller_fixture(temporary.path()))
             .unwrap();
@@ -971,7 +1032,8 @@ mod tests {
     fn binds_windows_gnullvm_sysroot_without_linux_headers() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
-        let profile = registry::resolve_target_profile("windows-x86_64-gnullvm").unwrap();
+        let profile =
+            registry::resolve_target_profile("windows-x86_64-gnullvm").unwrap();
         for directory in [
             "lib/clang/22",
             "lib/c++/linux/v1",
@@ -981,9 +1043,11 @@ mod tests {
             fs::create_dir_all(source.join(directory)).unwrap();
         }
         fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
-        fs::write(source.join("lib/c++/linux/v1/vector"), b"linux-vector").unwrap();
+        fs::write(source.join("lib/c++/linux/v1/vector"), b"linux-vector")
+            .unwrap();
         fs::write(
-            source.join("sysroots/windows-x86_64-gnullvm/include/c++/v1/vector"),
+            source
+                .join("sysroots/windows-x86_64-gnullvm/include/c++/v1/vector"),
             b"windows-vector",
         )
         .unwrap();
@@ -1008,8 +1072,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
         let controller = materializer
             .persist_controller(&controller_fixture(temporary.path()))
             .unwrap();
@@ -1043,9 +1109,8 @@ mod tests {
             .filter(|pair| pair[0] == "-isystem")
             .map(|pair| pair[1].as_str())
             .collect();
-        assert!(isystem_dirs
-            .iter()
-            .any(|path| path.contains("sysroots/windows-x86_64-gnullvm/include/c++/v1")));
+        assert!(isystem_dirs.iter().any(|path| path
+            .contains("sysroots/windows-x86_64-gnullvm/include/c++/v1")));
         assert!(!isystem_dirs
             .iter()
             .any(|path| path.contains("lib/c++/linux/v1")));
@@ -1056,7 +1121,8 @@ mod tests {
     fn windows_gnu_cxx_injects_ucrt_for_libcxx() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
-        let profile = registry::resolve_target_profile("windows-x86_64-gnu").unwrap();
+        let profile =
+            registry::resolve_target_profile("windows-x86_64-gnu").unwrap();
         for directory in [
             "lib/clang/22",
             "sysroots/windows-x86_64-gnu/include/c++/v1",
@@ -1091,8 +1157,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
         let controller = materializer
             .persist_controller(&controller_fixture(temporary.path()))
             .unwrap();
@@ -1120,7 +1188,8 @@ mod tests {
     fn binds_windows_msvc_clang_cl_flags() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
-        let profile = registry::resolve_target_profile("windows-x86_64-msvc").unwrap();
+        let profile =
+            registry::resolve_target_profile("windows-x86_64-msvc").unwrap();
         fs::create_dir_all(source.join("lib/clang/22")).unwrap();
         fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
         let pack = create_pack(
@@ -1134,8 +1203,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
         let sdk = temporary.path().join("Kits/10");
         let toolset = temporary.path().join("VC/Tools/MSVC/14.44.35207");
         fs::create_dir_all(&sdk).unwrap();
@@ -1191,7 +1262,8 @@ mod tests {
         fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
         fs::write(source.join("lib/c++/v1/vector"), b"header").unwrap();
         fs::write(source.join("bin/clang"), b"old payload tool").unwrap();
-        let profile = registry::resolve_target_profile("macos-aarch64").unwrap();
+        let profile =
+            registry::resolve_target_profile("macos-aarch64").unwrap();
         let pack = create_pack(
             &source,
             &temporary.path().join("fixture.rccpack"),
@@ -1203,8 +1275,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
-        let contract = contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::NATIVE_RCC_OWNED).unwrap();
         let sdk = temporary.path().join("MacOSX.sdk");
         fs::create_dir(&sdk).unwrap();
         let external = ExternalSysroot {
@@ -1234,7 +1308,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .unwrap();
         }
         path
     }

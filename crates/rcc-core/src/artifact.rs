@@ -1,9 +1,9 @@
-use crate::digest::bytes_sha256;
+use std::{collections::BTreeSet, fs, path::Path};
+
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
-use std::fs;
-use std::path::Path;
+
+use crate::digest::bytes_sha256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -53,7 +53,10 @@ impl ArtifactReport {
             return violations;
         }
         if self.architecture != "x86_64" && self.architecture != "aarch64" {
-            violations.push(format!("unexpected ELF architecture {}", self.architecture));
+            violations.push(format!(
+                "unexpected ELF architecture {}",
+                self.architecture
+            ));
         }
         if self.elf_file_type == Some(ElfFileType::Relocatable) {
             return violations;
@@ -87,14 +90,18 @@ impl ArtifactReport {
             return violations;
         }
         if self.architecture != "x86_64" && self.architecture != "aarch64" {
-            violations.push(format!("unexpected ELF architecture {}", self.architecture));
+            violations.push(format!(
+                "unexpected ELF architecture {}",
+                self.architecture
+            ));
         }
         if self.elf_file_type == Some(ElfFileType::Relocatable) {
             return violations;
         }
 
-        let looks_like_executable =
-            self.elf_file_type == Some(ElfFileType::Executable) || self.interpreter.is_some();
+        let looks_like_executable = self.elf_file_type
+            == Some(ElfFileType::Executable)
+            || self.interpreter.is_some();
         if looks_like_executable {
             match &self.interpreter {
                 None => violations.push("missing dynamic interpreter".into()),
@@ -120,7 +127,8 @@ impl ArtifactReport {
                 .iter()
                 .any(|needed| needed == forbidden)
             {
-                violations.push(format!("GNU C++ runtime dependency {forbidden}"));
+                violations
+                    .push(format!("GNU C++ runtime dependency {forbidden}"));
             }
         }
         for forbidden in ["libc++.so.1", "libc++abi.so.1"] {
@@ -129,7 +137,8 @@ impl ArtifactReport {
                 .iter()
                 .any(|needed| needed == forbidden)
             {
-                violations.push(format!("shared C++ runtime dependency {forbidden}"));
+                violations
+                    .push(format!("shared C++ runtime dependency {forbidden}"));
             }
         }
 
@@ -156,7 +165,10 @@ impl ArtifactReport {
             return violations;
         }
         if self.architecture != "x86_64" && self.architecture != "aarch64" {
-            violations.push(format!("unexpected PE architecture {}", self.architecture));
+            violations.push(format!(
+                "unexpected PE architecture {}",
+                self.architecture
+            ));
         }
         let forbidden = [
             "libgcc_s_seh-1.dll",
@@ -175,7 +187,9 @@ impl ArtifactReport {
             for dll in &self.needed_libraries {
                 let lower = dll.to_ascii_lowercase();
                 if lower == "msvcrt.dll" || lower.starts_with("msvcr") {
-                    violations.push(format!("MSVC/MSVCRT import {dll} on gnullvm profile"));
+                    violations.push(format!(
+                        "MSVC/MSVCRT import {dll} on gnullvm profile"
+                    ));
                 }
             }
         }
@@ -184,8 +198,9 @@ impl ArtifactReport {
 }
 
 pub fn inspect(path: &Path) -> Result<ArtifactReport> {
-    let bytes =
-        fs::read(path).with_context(|| format!("failed to read artifact {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| {
+        format!("failed to read artifact {}", path.display())
+    })?;
     inspect_from_bytes(&bytes)
 }
 
@@ -221,7 +236,8 @@ fn inspect_non_elf(bytes: &[u8]) -> Result<(ArtifactFormat, String)> {
         return Ok((ArtifactFormat::Pe, architecture));
     }
     if bytes.len() >= 8 {
-        let magic = u32::from_be_bytes(bytes[0..4].try_into().expect("four bytes"));
+        let magic =
+            u32::from_be_bytes(bytes[0..4].try_into().expect("four bytes"));
         return match magic {
             0xfeedfacf | 0xfeedface => inspect_macho(bytes, true),
             0xcffaedfe | 0xcefaedfe => inspect_macho(bytes, false),
@@ -251,7 +267,9 @@ fn inspect_elf_report(bytes: &[u8]) -> Result<ArtifactReport> {
     })
 }
 
-fn inspect_elf(bytes: &[u8]) -> Result<(String, ElfFileType, Option<String>, Vec<String>)> {
+fn inspect_elf(
+    bytes: &[u8],
+) -> Result<(String, ElfFileType, Option<String>, Vec<String>)> {
     if bytes.len() < 64 {
         bail!("truncated ELF header");
     }
@@ -293,7 +311,9 @@ fn inspect_elf(bytes: &[u8]) -> Result<(String, ElfFileType, Option<String>, Vec
     let mut loads = Vec::new();
     for index in 0..phnum {
         let start = phoff
-            .checked_add(index.checked_mul(phentsize).context("ELF phdr overflow")?)
+            .checked_add(
+                index.checked_mul(phentsize).context("ELF phdr overflow")?,
+            )
             .context("ELF phdr overflow")?;
         let end = start.checked_add(56).context("ELF phdr overflow")?;
         if end > bytes.len() {
@@ -316,8 +336,12 @@ fn inspect_elf(bytes: &[u8]) -> Result<(String, ElfFileType, Option<String>, Vec
                     .is_some_and(|end| end <= bytes.len())
                 {
                     let raw = &bytes[offset..offset + size];
-                    let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
-                    interpreter = Some(String::from_utf8_lossy(&raw[..end]).into_owned());
+                    let end = raw
+                        .iter()
+                        .position(|&byte| byte == 0)
+                        .unwrap_or(raw.len());
+                    interpreter =
+                        Some(String::from_utf8_lossy(&raw[..end]).into_owned());
                 }
             }
             _ => {}
@@ -325,7 +349,9 @@ fn inspect_elf(bytes: &[u8]) -> Result<(String, ElfFileType, Option<String>, Vec
     }
 
     let needed = match dynamic {
-        Some((offset, size)) => read_needed_libraries(bytes, offset, size, little, &loads)?,
+        Some((offset, size)) => {
+            read_needed_libraries(bytes, offset, size, little, &loads)?
+        }
         None => Vec::new(),
     };
     Ok((architecture, file_type, interpreter, needed))
@@ -378,7 +404,10 @@ fn read_needed_libraries(
     Ok(needed)
 }
 
-fn virtual_to_file(address: u64, loads: &[(u64, u64, u64, u64)]) -> Option<usize> {
+fn virtual_to_file(
+    address: u64,
+    loads: &[(u64, u64, u64, u64)],
+) -> Option<usize> {
     for &(vaddr, memsz, offset, filesz) in loads {
         if address >= vaddr && address < vaddr.saturating_add(memsz) {
             let delta = address - vaddr;
@@ -394,7 +423,10 @@ fn contains_glibc_marker(bytes: &[u8]) -> bool {
     bytes.windows(6).any(|window| window == b"GLIBC_")
 }
 
-fn collect_glibc_versions(bytes: &[u8], _needed: &[String]) -> Result<Vec<String>> {
+fn collect_glibc_versions(
+    bytes: &[u8],
+    _needed: &[String],
+) -> Result<Vec<String>> {
     Ok(scan_glibc_version_strings(bytes))
 }
 
@@ -406,7 +438,9 @@ fn scan_glibc_version_strings(bytes: &[u8]) -> Vec<String> {
         if bytes[index..].starts_with(prefix) {
             let rest = &bytes[index + prefix.len()..];
             let mut len = 0;
-            while len < rest.len() && (rest[len].is_ascii_digit() || rest[len] == b'.') {
+            while len < rest.len()
+                && (rest[len].is_ascii_digit() || rest[len] == b'.')
+            {
                 len += 1;
             }
             while len > 0 && rest[len - 1] == b'.' {
@@ -466,14 +500,18 @@ fn inspect_pe(bytes: &[u8]) -> Result<(String, Vec<String>)> {
     if bytes.len() < 0x40 {
         bail!("truncated DOS header");
     }
-    let offset = u32::from_le_bytes(bytes[0x3c..0x40].try_into().expect("four bytes")) as usize;
+    let offset =
+        u32::from_le_bytes(bytes[0x3c..0x40].try_into().expect("four bytes"))
+            as usize;
     if offset.checked_add(24).is_none() || offset + 24 > bytes.len() {
         bail!("PE header offset is out of bounds");
     }
     if &bytes[offset..offset + 4] != b"PE\0\0" {
         bail!("invalid PE signature");
     }
-    let machine = u16::from_le_bytes(bytes[offset + 4..offset + 6].try_into().expect("two bytes"));
+    let machine = u16::from_le_bytes(
+        bytes[offset + 4..offset + 6].try_into().expect("two bytes"),
+    );
     let architecture = match machine {
         0x014c => "x86",
         0x8664 => "x86_64",
@@ -482,8 +520,9 @@ fn inspect_pe(bytes: &[u8]) -> Result<(String, Vec<String>)> {
         _ => "unknown",
     }
     .to_owned();
-    let number_of_sections =
-        u16::from_le_bytes(bytes[offset + 6..offset + 8].try_into().expect("two bytes")) as usize;
+    let number_of_sections = u16::from_le_bytes(
+        bytes[offset + 6..offset + 8].try_into().expect("two bytes"),
+    ) as usize;
     let size_of_optional = u16::from_le_bytes(
         bytes[offset + 20..offset + 22]
             .try_into()
@@ -497,7 +536,8 @@ fn inspect_pe(bytes: &[u8]) -> Result<(String, Vec<String>)> {
         return Ok((architecture, Vec::new()));
     }
     let optional = &bytes[optional_start..optional_end];
-    let magic = u16::from_le_bytes(optional[0..2].try_into().expect("two bytes"));
+    let magic =
+        u16::from_le_bytes(optional[0..2].try_into().expect("two bytes"));
     let data_directory_offset = match magic {
         0x10b => 96usize,
         0x20b => 112usize,
@@ -529,8 +569,9 @@ fn inspect_pe(bytes: &[u8]) -> Result<(String, Vec<String>)> {
         if end > bytes.len() {
             break;
         }
-        let virtual_size =
-            u32::from_le_bytes(bytes[start + 8..start + 12].try_into().expect("four bytes"));
+        let virtual_size = u32::from_le_bytes(
+            bytes[start + 8..start + 12].try_into().expect("four bytes"),
+        );
         let virtual_address = u32::from_le_bytes(
             bytes[start + 12..start + 16]
                 .try_into()
@@ -584,9 +625,14 @@ fn inspect_pe(bytes: &[u8]) -> Result<(String, Vec<String>)> {
     Ok((architecture, needed))
 }
 
-fn pe_rva_to_offset(rva: u32, sections: &[(u32, u32, u32, u32)]) -> Option<usize> {
+fn pe_rva_to_offset(
+    rva: u32,
+    sections: &[(u32, u32, u32, u32)],
+) -> Option<usize> {
     for &(virtual_address, mapped, raw_ptr, raw_size) in sections {
-        if rva >= virtual_address && rva < virtual_address.saturating_add(mapped) {
+        if rva >= virtual_address
+            && rva < virtual_address.saturating_add(mapped)
+        {
             let delta = rva - virtual_address;
             if delta < raw_size {
                 return Some((raw_ptr.saturating_add(delta)) as usize);
@@ -609,7 +655,10 @@ fn read_cstring(bytes: &[u8], offset: usize) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn inspect_macho(bytes: &[u8], big_endian: bool) -> Result<(ArtifactFormat, String)> {
+fn inspect_macho(
+    bytes: &[u8],
+    big_endian: bool,
+) -> Result<(ArtifactFormat, String)> {
     if bytes.len() < 8 {
         bail!("truncated Mach-O header");
     }
@@ -725,10 +774,16 @@ mod tests {
         report.needed_libraries = vec!["libc.so.6".into()];
         assert!(
             report
-                .linux_gnu_glibc_violations("/lib64/ld-linux-x86-64.so.2", (2, 17, 0))
+                .linux_gnu_glibc_violations(
+                    "/lib64/ld-linux-x86-64.so.2",
+                    (2, 17, 0)
+                )
                 .is_empty(),
             "{:?}",
-            report.linux_gnu_glibc_violations("/lib64/ld-linux-x86-64.so.2", (2, 17, 0))
+            report.linux_gnu_glibc_violations(
+                "/lib64/ld-linux-x86-64.so.2",
+                (2, 17, 0)
+            )
         );
     }
 
@@ -745,10 +800,13 @@ mod tests {
         })
         .unwrap();
         report.interpreter = Some("/lib64/ld-linux-x86-64.so.2".into());
-        report.needed_libraries = vec!["libc.so.6".into(), "libstdc++.so.6".into()];
+        report.needed_libraries =
+            vec!["libc.so.6".into(), "libstdc++.so.6".into()];
         report.glibc_symbol_versions = vec!["GLIBC_2.18".into()];
-        let violations =
-            report.linux_gnu_glibc_violations("/lib64/ld-linux-x86-64.so.2", (2, 17, 0));
+        let violations = report.linux_gnu_glibc_violations(
+            "/lib64/ld-linux-x86-64.so.2",
+            (2, 17, 0),
+        );
         assert!(violations.iter().any(|item| item.contains("2.18")));
         assert!(violations.iter().any(|item| item.contains("libstdc++")));
     }
@@ -766,9 +824,12 @@ mod tests {
         })
         .unwrap();
         report.interpreter = Some("/lib64/ld-linux-x86-64.so.2".into());
-        report.needed_libraries = vec!["libc.so.6".into(), "libc++.so.1".into()];
-        let violations =
-            report.linux_gnu_glibc_violations("/lib64/ld-linux-x86-64.so.2", (2, 17, 0));
+        report.needed_libraries =
+            vec!["libc.so.6".into(), "libc++.so.1".into()];
+        let violations = report.linux_gnu_glibc_violations(
+            "/lib64/ld-linux-x86-64.so.2",
+            (2, 17, 0),
+        );
         assert!(violations.iter().any(|item| item.contains("libc++.so.1")));
     }
 
@@ -803,7 +864,8 @@ mod tests {
             bytes
         })
         .unwrap();
-        report.needed_libraries = vec!["KERNEL32.dll".into(), "libstdc++-6.dll".into()];
+        report.needed_libraries =
+            vec!["KERNEL32.dll".into(), "libstdc++-6.dll".into()];
         let violations = report.windows_pe_violations("gnullvm");
         assert!(violations.iter().any(|item| item.contains("libstdc++")));
     }
@@ -819,7 +881,8 @@ mod tests {
             bytes
         })
         .unwrap();
-        report.needed_libraries = vec!["KERNEL32.dll".into(), "msvcrt.dll".into()];
+        report.needed_libraries =
+            vec!["KERNEL32.dll".into(), "msvcrt.dll".into()];
         let gnullvm = report.windows_pe_violations("gnullvm");
         assert!(gnullvm.iter().any(|item| item.contains("msvcrt")));
         assert!(report.windows_pe_violations("mingw-w64").is_empty());

@@ -1,21 +1,27 @@
-use crate::engine;
-use anyhow::{bail, Context, Result};
-use rcc_core::cross_bin::{tool_kind_from_multicall_name, CROSS_BIN_DIR};
-use rcc_core::digest::file_sha256;
-use rcc_core::layout::{launcher_path as bound_launcher_path, validate_view_binding};
-use rcc_core::policy::{
-    expand_response_files, parse_driver_query, prepare_invocation_with_forbidden,
-    reject_polluting_environment, validate_direct_linker_arguments,
-    validate_forbidden_path_arguments, validate_manifest_forbidden_arguments, DriverQuery,
-    PreparedInvocation,
-};
-use rcc_core::{ToolKind, ViewManifest};
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    fs,
+    path::{Component, Path, PathBuf},
+};
+
+use anyhow::{bail, Context, Result};
+use rcc_core::{
+    cross_bin::{tool_kind_from_multicall_name, CROSS_BIN_DIR},
+    digest::file_sha256,
+    layout::{launcher_path as bound_launcher_path, validate_view_binding},
+    policy::{
+        expand_response_files, parse_driver_query,
+        prepare_invocation_with_forbidden, reject_polluting_environment,
+        validate_direct_linker_arguments, validate_forbidden_path_arguments,
+        validate_manifest_forbidden_arguments, DriverQuery, PreparedInvocation,
+    },
+    ToolKind, ViewManifest,
+};
+
+use crate::engine;
 
 pub const DISPATCH_ERROR_EXIT: i32 = 78;
 
@@ -35,7 +41,10 @@ pub fn try_run_from_environment() -> Option<Result<i32>> {
     ))
 }
 
-fn execute_bound_launcher(launcher_path: &Path, user_arguments: &[OsString]) -> Result<i32> {
+fn execute_bound_launcher(
+    launcher_path: &Path,
+    user_arguments: &[OsString],
+) -> Result<i32> {
     let tool_kind = tool_kind_from_launcher(launcher_path)?;
     let (manifest, root) = load_bound_manifest(launcher_path)?;
     validate_bound_entry(&manifest, &root, launcher_path, tool_kind)?;
@@ -43,32 +52,40 @@ fn execute_bound_launcher(launcher_path: &Path, user_arguments: &[OsString]) -> 
         bail!("profile selected unsupported static tool kind {tool_kind}");
     }
 
-    let extra_forbidden = manifest.forbidden_env.iter().cloned().collect::<Vec<_>>();
+    let extra_forbidden =
+        manifest.forbidden_env.iter().cloned().collect::<Vec<_>>();
     reject_polluting_environment(&extra_forbidden)?;
     set_hermetic_path(&root)?;
 
-    let working_directory = env::current_dir().context("failed to determine working directory")?;
+    let working_directory =
+        env::current_dir().context("failed to determine working directory")?;
     let expanded = expand_response_files(user_arguments, &working_directory)?;
     if let Some(query) = parse_driver_query(&expanded)? {
         return handle_query(query, &manifest, &root, launcher_path, tool_kind);
     }
 
-    let prepared = prepare_bound_invocation(&manifest, tool_kind, &expanded, &working_directory)?;
+    let prepared = prepare_bound_invocation(
+        &manifest,
+        tool_kind,
+        &expanded,
+        &working_directory,
+    )?;
     engine::run(tool_kind, launcher_path.as_os_str(), &prepared.arguments)
 }
 
 fn set_hermetic_path(root: &Path) -> Result<()> {
-    let safe_path = env::join_paths([root.join(CROSS_BIN_DIR), root.join("launchers")])
-        .context("failed to construct hermetic static-engine PATH")?;
+    let safe_path =
+        env::join_paths([root.join(CROSS_BIN_DIR), root.join("launchers")])
+            .context("failed to construct hermetic static-engine PATH")?;
     env::set_var("PATH", safe_path);
     Ok(())
 }
 
 fn tool_kind_from_launcher(path: &Path) -> Result<ToolKind> {
-    let file_name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .with_context(|| format!("launcher path has no UTF-8 file name: {}", path.display()))?;
+    let file_name =
+        path.file_name().and_then(OsStr::to_str).with_context(|| {
+            format!("launcher path has no UTF-8 file name: {}", path.display())
+        })?;
     let file_name = if Path::new(file_name)
         .extension()
         .and_then(OsStr::to_str)
@@ -81,8 +98,9 @@ fn tool_kind_from_launcher(path: &Path) -> Result<ToolKind> {
     } else {
         file_name
     };
-    tool_kind_from_multicall_name(file_name)
-        .ok_or_else(|| anyhow::anyhow!("unsupported static multicall name {file_name}"))
+    tool_kind_from_multicall_name(file_name).ok_or_else(|| {
+        anyhow::anyhow!("unsupported static multicall name {file_name}")
+    })
 }
 
 fn is_bound_launcher_directory(parent: Option<&Path>) -> bool {
@@ -92,10 +110,12 @@ fn is_bound_launcher_directory(parent: Option<&Path>) -> bool {
     )
 }
 
-fn load_bound_manifest(launcher_path: &Path) -> Result<(ViewManifest, PathBuf)> {
-    let launcher_directory = launcher_path
-        .parent()
-        .with_context(|| format!("launcher has no parent: {}", launcher_path.display()))?;
+fn load_bound_manifest(
+    launcher_path: &Path,
+) -> Result<(ViewManifest, PathBuf)> {
+    let launcher_directory = launcher_path.parent().with_context(|| {
+        format!("launcher has no parent: {}", launcher_path.display())
+    })?;
     if !is_bound_launcher_directory(Some(launcher_directory)) {
         bail!(
             "launcher must be inside a launchers or cross-bin directory: {}",
@@ -110,20 +130,30 @@ fn load_bound_manifest(launcher_path: &Path) -> Result<(ViewManifest, PathBuf)> 
     })?;
     validate_published_view_root(view_directory)?;
     let manifest_path = view_directory.join("view.json");
-    let bytes = fs::read(&manifest_path)
-        .with_context(|| format!("failed to read bound manifest {}", manifest_path.display()))?;
-    let manifest: ViewManifest = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse bound manifest {}", manifest_path.display()))?;
-    manifest
-        .validate()
-        .with_context(|| format!("invalid bound manifest {}", manifest_path.display()))?;
-    validate_view_binding(&manifest)
-        .with_context(|| format!("invalid view binding {}", manifest_path.display()))?;
+    let bytes = fs::read(&manifest_path).with_context(|| {
+        format!("failed to read bound manifest {}", manifest_path.display())
+    })?;
+    let manifest: ViewManifest =
+        serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "failed to parse bound manifest {}",
+                manifest_path.display()
+            )
+        })?;
+    manifest.validate().with_context(|| {
+        format!("invalid bound manifest {}", manifest_path.display())
+    })?;
+    validate_view_binding(&manifest).with_context(|| {
+        format!("invalid view binding {}", manifest_path.display())
+    })?;
 
-    let actual_root = fs::canonicalize(view_directory)
-        .with_context(|| format!("failed to resolve view root {}", view_directory.display()))?;
-    let declared_root = fs::canonicalize(&manifest.root)
-        .with_context(|| format!("failed to resolve declared view root {}", manifest.root))?;
+    let actual_root = fs::canonicalize(view_directory).with_context(|| {
+        format!("failed to resolve view root {}", view_directory.display())
+    })?;
+    let declared_root =
+        fs::canonicalize(&manifest.root).with_context(|| {
+            format!("failed to resolve declared view root {}", manifest.root)
+        })?;
     if actual_root != declared_root {
         bail!(
             "manifest root {} does not match launcher view {}",
@@ -135,8 +165,9 @@ fn load_bound_manifest(launcher_path: &Path) -> Result<(ViewManifest, PathBuf)> 
 }
 
 fn validate_published_view_root(view_directory: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(view_directory)
-        .with_context(|| format!("failed to inspect view root {}", view_directory.display()))?;
+    let metadata = fs::symlink_metadata(view_directory).with_context(|| {
+        format!("failed to inspect view root {}", view_directory.display())
+    })?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
         bail!(
             "view root is not a regular directory: {}",
@@ -159,18 +190,19 @@ fn validate_bound_entry(
     launcher_path: &Path,
     kind: ToolKind,
 ) -> Result<()> {
-    let tool = manifest
-        .tools
-        .get(&kind)
-        .with_context(|| format!("profile does not provide tool kind {kind}"))?;
+    let tool = manifest.tools.get(&kind).with_context(|| {
+        format!("profile does not provide tool kind {kind}")
+    })?;
     let declared = Path::new(&tool.path);
     if !declared.is_absolute() {
         bail!("bound tool path is not absolute: {}", declared.display());
     }
-    let actual = fs::canonicalize(launcher_path)
-        .with_context(|| format!("failed to resolve launcher {}", launcher_path.display()))?;
-    let declared = fs::canonicalize(declared)
-        .with_context(|| format!("failed to resolve bound tool {}", declared.display()))?;
+    let actual = fs::canonicalize(launcher_path).with_context(|| {
+        format!("failed to resolve launcher {}", launcher_path.display())
+    })?;
+    let declared = fs::canonicalize(declared).with_context(|| {
+        format!("failed to resolve bound tool {}", declared.display())
+    })?;
     if !actual.starts_with(root) {
         bail!(
             "launcher {} is outside view root {}",
@@ -306,7 +338,8 @@ fn validate_and_sanitize_linker_binding(
                 let value = arguments
                     .get(index + 1)
                     .context("-lto_library requires a path")?;
-                let expected = Path::new(&manifest.root).join("lib/libLTO.dylib");
+                let expected =
+                    Path::new(&manifest.root).join("lib/libLTO.dylib");
                 if Path::new(value) != expected {
                     bail!(
                         "linker LTO plugin path is not bound to this view: {}",
@@ -361,9 +394,13 @@ fn validate_and_sanitize_linker_binding(
                         Path::new(value).display()
                     )
                 })?;
-                let expected = fs::canonicalize(&manifest.sysroot).with_context(|| {
-                    format!("failed to resolve bound sysroot {}", manifest.sysroot)
-                })?;
+                let expected = fs::canonicalize(&manifest.sysroot)
+                    .with_context(|| {
+                        format!(
+                            "failed to resolve bound sysroot {}",
+                            manifest.sysroot
+                        )
+                    })?;
                 if actual != expected {
                     bail!(
                         "linker sysroot {} does not match bound sysroot {}",
@@ -382,7 +419,10 @@ fn validate_and_sanitize_linker_binding(
                 output.extend_from_slice(&arguments[index..index + 2]);
                 index += 2;
             }
-            value if value.starts_with("--sysroot=") || value.starts_with("-sysroot=") => {
+            value
+                if value.starts_with("--sysroot=")
+                    || value.starts_with("-sysroot=") =>
+            {
                 let path = value
                     .split_once('=')
                     .map(|(_, path)| path)
@@ -408,11 +448,9 @@ fn validate_and_sanitize_linker_binding(
                 if platform != expected_platform
                     || normalize_version(minimum)
                         != normalize_version(
-                            manifest
-                                .profile
-                                .minimum_os
-                                .as_deref()
-                                .context("profile has no minimum platform version")?,
+                            manifest.profile.minimum_os.as_deref().context(
+                                "profile has no minimum platform version",
+                            )?,
                         )
                     || !valid_numeric_version(sdk)
                 {
@@ -473,11 +511,16 @@ fn validate_and_sanitize_linker_binding(
     Ok(output)
 }
 
-fn ensure_bound_linker_sysroot(manifest: &ViewManifest, value: &Path) -> Result<()> {
-    let actual = fs::canonicalize(value)
-        .with_context(|| format!("failed to resolve linker sysroot {}", value.display()))?;
-    let expected = fs::canonicalize(&manifest.sysroot)
-        .with_context(|| format!("failed to resolve bound sysroot {}", manifest.sysroot))?;
+fn ensure_bound_linker_sysroot(
+    manifest: &ViewManifest,
+    value: &Path,
+) -> Result<()> {
+    let actual = fs::canonicalize(value).with_context(|| {
+        format!("failed to resolve linker sysroot {}", value.display())
+    })?;
+    let expected = fs::canonicalize(&manifest.sysroot).with_context(|| {
+        format!("failed to resolve bound sysroot {}", manifest.sysroot)
+    })?;
     if actual != expected {
         bail!(
             "linker sysroot {} does not match bound sysroot {}",
@@ -488,7 +531,10 @@ fn ensure_bound_linker_sysroot(manifest: &ViewManifest, value: &Path) -> Result<
     Ok(())
 }
 
-fn ensure_bound_dynamic_linker(manifest: &ViewManifest, value: &str) -> Result<()> {
+fn ensure_bound_dynamic_linker(
+    manifest: &ViewManifest,
+    value: &str,
+) -> Result<()> {
     let expected = manifest
         .profile
         .dynamic_loader
@@ -507,9 +553,9 @@ fn ensure_bound_dynamic_linker(manifest: &ViewManifest, value: &str) -> Result<(
 
 fn valid_numeric_version(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && value.split('.').all(|part| {
+            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn normalize_version(value: &str) -> Vec<u64> {
@@ -569,7 +615,10 @@ fn handle_query(
             Ok(0)
         }
         DriverQuery::PrintFileName(name) => {
-            println!("{}", resolve_query_file(manifest, root, &name)?.display());
+            println!(
+                "{}",
+                resolve_query_file(manifest, root, &name)?.display()
+            );
             Ok(0)
         }
         DriverQuery::PrintProgramName(name) => {
@@ -602,7 +651,11 @@ fn tool_kind_from_program_query(name: &str) -> Result<ToolKind> {
         .ok_or_else(|| anyhow::anyhow!("unsupported program query {name}"))
 }
 
-fn resolve_query_file(manifest: &ViewManifest, root: &Path, name: &str) -> Result<PathBuf> {
+fn resolve_query_file(
+    manifest: &ViewManifest,
+    root: &Path,
+    name: &str,
+) -> Result<PathBuf> {
     if name.is_empty()
         || Path::new(name).is_absolute()
         || Path::new(name)
@@ -658,31 +711,43 @@ mod tests {
     #[test]
     fn recognizes_only_static_multicall_aliases() {
         assert_eq!(
-            tool_kind_from_launcher(Path::new("/view/launchers/c++.exe")).unwrap(),
+            tool_kind_from_launcher(Path::new("/view/launchers/c++.exe"))
+                .unwrap(),
             ToolKind::Cxx
         );
         assert_eq!(
-            tool_kind_from_launcher(Path::new("/view/launchers/ld64.lld")).unwrap(),
+            tool_kind_from_launcher(Path::new("/view/launchers/ld64.lld"))
+                .unwrap(),
             ToolKind::Linker
         );
         assert_eq!(
-            tool_kind_from_launcher(Path::new("/view/cross-bin/x86_64-unknown-linux-gnu-gcc"))
-                .unwrap(),
+            tool_kind_from_launcher(Path::new(
+                "/view/cross-bin/x86_64-unknown-linux-gnu-gcc"
+            ))
+            .unwrap(),
             ToolKind::Cc
         );
         assert_eq!(
-            tool_kind_from_launcher(Path::new("/view/cross-bin/ranlib")).unwrap(),
+            tool_kind_from_launcher(Path::new("/view/cross-bin/ranlib"))
+                .unwrap(),
             ToolKind::Ranlib
         );
         assert_eq!(
-            tool_kind_from_launcher(Path::new("/view/cross-bin/x86_64-linux-gnu-as")).unwrap(),
+            tool_kind_from_launcher(Path::new(
+                "/view/cross-bin/x86_64-linux-gnu-as"
+            ))
+            .unwrap(),
             ToolKind::Cc
         );
         assert_eq!(
-            tool_kind_from_launcher(Path::new("/view/launchers/objcopy")).unwrap(),
+            tool_kind_from_launcher(Path::new("/view/launchers/objcopy"))
+                .unwrap(),
             ToolKind::Objcopy
         );
-        assert!(tool_kind_from_launcher(Path::new("/view/launchers/unknown-tool")).is_err());
+        assert!(tool_kind_from_launcher(Path::new(
+            "/view/launchers/unknown-tool"
+        ))
+        .is_err());
         assert!(is_bound_launcher_directory(Some(Path::new(
             "/view/cross-bin"
         ))));
@@ -720,10 +785,18 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         assert!(validate_published_view_root(temporary.path()).is_err());
 
-        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(
+            temporary.path(),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
         assert!(validate_published_view_root(temporary.path()).is_ok());
 
-        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            temporary.path(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
     }
 
     #[test]

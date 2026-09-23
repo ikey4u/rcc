@@ -1,6 +1,9 @@
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
+
 use anyhow::{ensure, Context, Result};
-use std::env;
-use std::path::{Path, PathBuf};
 
 pub const HOME_ENV: &str = "RCC_HOME_DIR";
 pub const APPLE_SDK_ROOT_ENV: &str = "RCC_APPLE_SDK_ROOT";

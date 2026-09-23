@@ -1,9 +1,12 @@
+use std::{
+    collections::HashSet,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
+    path::{Component, Path, PathBuf},
+};
+
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::path::{Component, Path, PathBuf};
 
 /// Environment variables which can make Clang or one of its child tools search
 /// outside the selected RCC view.
@@ -200,7 +203,12 @@ pub fn prepare_invocation(
     injected_arguments: &[String],
     working_directory: &Path,
 ) -> Result<PreparedInvocation> {
-    prepare_invocation_with_forbidden(user_arguments, injected_arguments, &[], working_directory)
+    prepare_invocation_with_forbidden(
+        user_arguments,
+        injected_arguments,
+        &[],
+        working_directory,
+    )
 }
 
 pub fn prepare_invocation_with_forbidden(
@@ -220,13 +228,18 @@ pub fn prepare_invocation_with_forbidden(
     }
 
     let expanded = strip_profile_owned_driver_flags(&expanded);
-    let expanded = strip_user_flags_that_restate_injected(&expanded, injected_arguments);
+    let expanded =
+        strip_user_flags_that_restate_injected(&expanded, injected_arguments);
     // rustc 1.90+ on GNU hosts injects `-B rustlib/.../gcc-ld -fuse-ld=lld`.
     // RCC already binds LLD; drop the rustc self-contained linker prefix.
     let expanded = strip_rustc_self_contained_linker(&expanded);
     validate_user_arguments(&expanded)?;
-    validate_manifest_forbidden_arguments(&expanded, manifest_forbidden_arguments)?;
-    let mut arguments = Vec::with_capacity(injected_arguments.len() + expanded.len());
+    validate_manifest_forbidden_arguments(
+        &expanded,
+        manifest_forbidden_arguments,
+    )?;
+    let mut arguments =
+        Vec::with_capacity(injected_arguments.len() + expanded.len());
     arguments.extend(injected_arguments.iter().map(OsString::from));
     arguments.extend(expanded);
     Ok(PreparedInvocation {
@@ -238,7 +251,9 @@ pub fn prepare_invocation_with_forbidden(
 /// Architecture and Apple SDK sysroot are profile-owned. The launcher injects
 /// `--target` / `--sysroot`; user `-arch` and `-isysroot` (CMake, cc-rs, and
 /// Darwin host defaults) are never forwarded.
-fn strip_profile_owned_driver_flags(user_arguments: &[OsString]) -> Vec<OsString> {
+fn strip_profile_owned_driver_flags(
+    user_arguments: &[OsString],
+) -> Vec<OsString> {
     let mut stripped = Vec::with_capacity(user_arguments.len());
     let mut index = 0usize;
     while index < user_arguments.len() {
@@ -316,7 +331,9 @@ fn strip_user_flags_that_restate_injected(
                 continue;
             }
         }
-        if (text == "--target" || text == "-target") && index + 1 < user_arguments.len() {
+        if (text == "--target" || text == "-target")
+            && index + 1 < user_arguments.len()
+        {
             if let Some(target) = user_arguments[index + 1].to_str() {
                 if restates_injected_clang_target(target, &injected_targets) {
                     index += 2;
@@ -336,7 +353,9 @@ fn strip_user_flags_that_restate_injected(
                 continue;
             }
         }
-        if text.strip_prefix("-mmacosx-version-min=").is_some() && !injected_macos_min.is_empty() {
+        if text.strip_prefix("-mmacosx-version-min=").is_some()
+            && !injected_macos_min.is_empty()
+        {
             // RCC owns the deployment target. cc-rs on x86_64 Darwin often
             // restates 10.7; that must not override or fail the profile floor.
             index += 1;
@@ -350,7 +369,8 @@ fn strip_user_flags_that_restate_injected(
         }
         if is_sysroot_flag(text) && index + 1 < user_arguments.len() {
             if let Some(sysroot) = user_arguments[index + 1].to_str() {
-                if injected_sysroots.contains(&normalize_sysroot_path(sysroot)) {
+                if injected_sysroots.contains(&normalize_sysroot_path(sysroot))
+                {
                     index += 2;
                     continue;
                 }
@@ -388,23 +408,27 @@ fn normalize_sysroot_path(path: &str) -> String {
     path.trim_end_matches('/').to_owned()
 }
 
-fn restates_injected_clang_target(user: &str, injected_targets: &HashSet<&str>) -> bool {
+fn restates_injected_clang_target(
+    user: &str,
+    injected_targets: &HashSet<&str>,
+) -> bool {
     if injected_targets.contains(user) {
         return true;
     }
     let Some(user_family) = darwin_clang_target_family(user) else {
         return false;
     };
-    injected_targets
-        .iter()
-        .copied()
-        .any(|injected| darwin_clang_target_family(injected) == Some(user_family))
+    injected_targets.iter().copied().any(|injected| {
+        darwin_clang_target_family(injected) == Some(user_family)
+    })
 }
 
 /// cc-rs on Darwin emits Apple's Clang spelling (`arm64-apple-macosx`) while
 /// RCC injects the LLVM triple (`aarch64-apple-macosx11.0`). Same arch+OS is
 /// a restatement; a different arch remains forbidden.
-fn darwin_clang_target_family(target: &str) -> Option<(&'static str, &'static str)> {
+fn darwin_clang_target_family(
+    target: &str,
+) -> Option<(&'static str, &'static str)> {
     let (arch, rest) = if let Some(rest) = target.strip_prefix("arm64-apple-") {
         ("aarch64", rest)
     } else if let Some(rest) = target.strip_prefix("aarch64-apple-") {
@@ -434,7 +458,9 @@ fn normalize_dotted_version(value: &str) -> String {
     parts.join(".")
 }
 
-fn strip_rustc_self_contained_linker(user_arguments: &[OsString]) -> Vec<OsString> {
+fn strip_rustc_self_contained_linker(
+    user_arguments: &[OsString],
+) -> Vec<OsString> {
     let mut stripped = Vec::with_capacity(user_arguments.len());
     let mut index = 0usize;
     while index < user_arguments.len() {
@@ -502,7 +528,10 @@ pub fn validate_manifest_forbidden_arguments(
             let forwarded = arguments
                 .get(index + 1)
                 .context("-Xlinker requires an argument")?;
-            reject_if_manifest_forbidden(option_text(forwarded)?, forbidden_arguments)?;
+            reject_if_manifest_forbidden(
+                option_text(forwarded)?,
+                forbidden_arguments,
+            )?;
             index += 2;
             continue;
         }
@@ -522,7 +551,10 @@ pub fn validate_manifest_forbidden_arguments(
             let forwarded = arguments
                 .get(index + 1)
                 .context("-Xclang requires an argument")?;
-            reject_if_manifest_forbidden(option_text(forwarded)?, forbidden_arguments)?;
+            reject_if_manifest_forbidden(
+                option_text(forwarded)?,
+                forbidden_arguments,
+            )?;
             index += 2;
             continue;
         }
@@ -538,7 +570,9 @@ pub fn validate_manifest_forbidden_arguments(
         }
         if linker_mode {
             reject_if_manifest_forbidden(argument, forbidden_arguments)?;
-        } else if let Some(clang_argument) = strip_ascii_case_prefix(argument, "/clang:") {
+        } else if let Some(clang_argument) =
+            strip_ascii_case_prefix(argument, "/clang:")
+        {
             reject_if_manifest_forbidden(clang_argument, forbidden_arguments)?;
         } else {
             reject_if_manifest_forbidden(argument, forbidden_arguments)?;
@@ -548,7 +582,10 @@ pub fn validate_manifest_forbidden_arguments(
     Ok(())
 }
 
-fn reject_if_manifest_forbidden(argument: &str, forbidden_arguments: &[String]) -> Result<()> {
+fn reject_if_manifest_forbidden(
+    argument: &str,
+    forbidden_arguments: &[String],
+) -> Result<()> {
     for forbidden in forbidden_arguments {
         let joined_prefix = format!("{forbidden}=");
         if argument == forbidden || argument.starts_with(&joined_prefix) {
@@ -583,13 +620,22 @@ pub fn validate_forbidden_path_arguments(
             continue;
         }
         if let Some((payload, after)) = take_clang_forward(arguments, index)? {
-            let next_payload = take_clang_forward(arguments, after)?.map(|(payload, _)| payload);
-            if let Some((path, uses_next)) = include_path_option(payload, next_payload)? {
-                reject_forbidden_path(&path, forbidden_roots, working_directory)?;
+            let next_payload = take_clang_forward(arguments, after)?
+                .map(|(payload, _)| payload);
+            if let Some((path, uses_next)) =
+                include_path_option(payload, next_payload)?
+            {
+                reject_forbidden_path(
+                    &path,
+                    forbidden_roots,
+                    working_directory,
+                )?;
                 index = if uses_next {
                     take_clang_forward(arguments, after)?
                         .map(|(_, end)| end)
-                        .context("forwarded Clang include path is missing its value")?
+                        .context(
+                            "forwarded Clang include path is missing its value",
+                        )?
                 } else {
                     after
                 };
@@ -607,53 +653,81 @@ pub fn validate_forbidden_path_arguments(
                         .context("forwarded linker search path is missing its value marker")?;
                     let marker = option_text(marker)?;
                     let path = if marker == "-Xlinker" {
-                        option_text(
-                            arguments
-                                .get(index + 3)
-                                .context("forwarded linker search path is missing its value")?,
-                        )?
-                    } else if let Some(path) = marker.strip_prefix("-Xlinker=") {
+                        option_text(arguments.get(index + 3).context(
+                            "forwarded linker search path is missing its value",
+                        )?)?
+                    } else if let Some(path) = marker.strip_prefix("-Xlinker=")
+                    {
                         path
                     } else {
                         bail!("forwarded linker search path must forward its value explicitly");
                     };
-                    reject_forbidden_path(path, forbidden_roots, working_directory)?;
+                    reject_forbidden_path(
+                        path,
+                        forbidden_roots,
+                        working_directory,
+                    )?;
                     index += if marker == "-Xlinker" { 4 } else { 3 };
                     continue;
                 }
-                validate_forwarded_path_option(value_text, forbidden_roots, working_directory)?;
+                validate_forwarded_path_option(
+                    value_text,
+                    forbidden_roots,
+                    working_directory,
+                )?;
             }
             index += 2;
             continue;
         }
         if let Some(value) = argument.strip_prefix("-Xlinker=") {
             if forwarded_path_needs_value(value) {
-                let marker = arguments
-                    .get(index + 1)
-                    .context("forwarded linker search path is missing its value")?;
+                let marker = arguments.get(index + 1).context(
+                    "forwarded linker search path is missing its value",
+                )?;
                 let marker = option_text(marker)?;
-                let path = marker
-                    .strip_prefix("-Xlinker=")
-                    .context("forwarded linker search path must use -Xlinker=<path>")?;
-                reject_forbidden_path(path, forbidden_roots, working_directory)?;
+                let path = marker.strip_prefix("-Xlinker=").context(
+                    "forwarded linker search path must use -Xlinker=<path>",
+                )?;
+                reject_forbidden_path(
+                    path,
+                    forbidden_roots,
+                    working_directory,
+                )?;
                 index += 2;
                 continue;
             }
-            validate_forwarded_path_option(value, forbidden_roots, working_directory)?;
+            validate_forwarded_path_option(
+                value,
+                forbidden_roots,
+                working_directory,
+            )?;
             index += 1;
             continue;
         }
         if let Some(values) = argument.strip_prefix("-Wl,") {
-            validate_comma_linker_paths(values, forbidden_roots, working_directory)?;
+            validate_comma_linker_paths(
+                values,
+                forbidden_roots,
+                working_directory,
+            )?;
             index += 1;
             continue;
         }
         if linker_mode {
-            validate_forwarded_path_option(argument, forbidden_roots, working_directory)?;
+            validate_forwarded_path_option(
+                argument,
+                forbidden_roots,
+                working_directory,
+            )?;
         }
-        validate_forwarded_path_option(argument, forbidden_roots, working_directory)?;
+        validate_forwarded_path_option(
+            argument,
+            forbidden_roots,
+            working_directory,
+        )?;
 
-        if let Some((path, consumes_next)) = driver_search_path(argument, arguments.get(index + 1))?
+        if let Some((path, consumes_next)) =
+            driver_search_path(argument, arguments.get(index + 1))?
         {
             reject_forbidden_path(&path, forbidden_roots, working_directory)?;
             if consumes_next {
@@ -694,7 +768,10 @@ const INCLUDE_PATH_OPTIONS: &[&str] = &[
     "-F",
 ];
 
-fn take_clang_forward(arguments: &[OsString], index: usize) -> Result<Option<(&str, usize)>> {
+fn take_clang_forward(
+    arguments: &[OsString],
+    index: usize,
+) -> Result<Option<(&str, usize)>> {
     if index >= arguments.len() {
         return Ok(None);
     }
@@ -717,10 +794,14 @@ fn take_clang_forward(arguments: &[OsString], index: usize) -> Result<Option<(&s
     Ok(None)
 }
 
-fn include_path_option(argument: &str, next: Option<&str>) -> Result<Option<(String, bool)>> {
+fn include_path_option(
+    argument: &str,
+    next: Option<&str>,
+) -> Result<Option<(String, bool)>> {
     for option in INCLUDE_PATH_OPTIONS {
         if argument == *option {
-            let value = next.context("include path option requires an argument")?;
+            let value =
+                next.context("include path option requires an argument")?;
             return Ok(Some((value.to_owned(), true)));
         }
         if let Some(value) = argument
@@ -733,7 +814,10 @@ fn include_path_option(argument: &str, next: Option<&str>) -> Result<Option<(Str
     Ok(None)
 }
 
-fn driver_search_path(argument: &str, next: Option<&OsString>) -> Result<Option<(String, bool)>> {
+fn driver_search_path(
+    argument: &str,
+    next: Option<&OsString>,
+) -> Result<Option<(String, bool)>> {
     let next = match next {
         Some(value) => Some(option_text(value)?),
         None => None,
@@ -768,11 +852,19 @@ fn validate_forwarded_path_option(
             .strip_prefix(option)
             .filter(|value| !value.is_empty())
         {
-            return reject_forbidden_path(value, forbidden_roots, working_directory);
+            return reject_forbidden_path(
+                value,
+                forbidden_roots,
+                working_directory,
+            );
         }
     }
     if let Some(value) = strip_ascii_case_prefix(argument, "/libpath:") {
-        return reject_forbidden_path(value, forbidden_roots, working_directory);
+        return reject_forbidden_path(
+            value,
+            forbidden_roots,
+            working_directory,
+        );
     }
     Ok(())
 }
@@ -794,7 +886,11 @@ fn validate_comma_linker_paths(
             index += 2;
             continue;
         }
-        validate_forwarded_path_option(value, forbidden_roots, working_directory)?;
+        validate_forwarded_path_option(
+            value,
+            forbidden_roots,
+            working_directory,
+        )?;
         index += 1;
     }
     Ok(())
@@ -805,9 +901,13 @@ fn reject_forbidden_path(
     forbidden_roots: &[String],
     working_directory: &Path,
 ) -> Result<()> {
-    let candidate = normalized_absolute_path(Path::new(value), working_directory);
+    let candidate =
+        normalized_absolute_path(Path::new(value), working_directory);
     for forbidden_root in forbidden_roots {
-        let forbidden = normalized_absolute_path(Path::new(forbidden_root), working_directory);
+        let forbidden = normalized_absolute_path(
+            Path::new(forbidden_root),
+            working_directory,
+        );
         if path_starts_with(&candidate, &forbidden) {
             bail!(
                 "search path {} enters forbidden profile root {}",
@@ -845,11 +945,15 @@ fn path_starts_with(path: &Path, root: &Path) -> bool {
     if cfg!(windows) {
         let path = path
             .components()
-            .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .map(|component| {
+                component.as_os_str().to_string_lossy().to_ascii_lowercase()
+            })
             .collect::<Vec<_>>();
         let root = root
             .components()
-            .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .map(|component| {
+                component.as_os_str().to_string_lossy().to_ascii_lowercase()
+            })
             .collect::<Vec<_>>();
         path.len() >= root.len()
             && path
@@ -865,7 +969,11 @@ pub fn expand_response_files(
     arguments: &[OsString],
     working_directory: &Path,
 ) -> Result<Vec<OsString>> {
-    expand_response_files_with_limits(arguments, working_directory, ResponseFileLimits::default())
+    expand_response_files_with_limits(
+        arguments,
+        working_directory,
+        ResponseFileLimits::default(),
+    )
 }
 
 pub fn expand_response_files_with_limits(
@@ -933,8 +1041,9 @@ fn expand_arguments(
         } else {
             working_directory.join(candidate)
         };
-        let canonical = fs::canonicalize(&candidate)
-            .with_context(|| format!("failed to resolve response file {}", candidate.display()))?;
+        let canonical = fs::canonicalize(&candidate).with_context(|| {
+            format!("failed to resolve response file {}", candidate.display())
+        })?;
         if !active_files.insert(canonical.clone()) {
             bail!(
                 "recursive response-file cycle involving {}",
@@ -942,8 +1051,9 @@ fn expand_arguments(
             );
         }
 
-        let bytes = fs::read(&canonical)
-            .with_context(|| format!("failed to read response file {}", canonical.display()))?;
+        let bytes = fs::read(&canonical).with_context(|| {
+            format!("failed to read response file {}", canonical.display())
+        })?;
         *total_bytes = total_bytes
             .checked_add(bytes.len())
             .context("response-file byte count overflow")?;
@@ -953,11 +1063,15 @@ fn expand_arguments(
                 limits.maximum_bytes
             );
         }
-        let text =
-            std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
-                .with_context(|| format!("response file {} is not UTF-8", canonical.display()))?;
-        let nested = parse_gcc_response_file(text)
-            .with_context(|| format!("failed to parse response file {}", canonical.display()))?;
+        let text = std::str::from_utf8(
+            bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes),
+        )
+        .with_context(|| {
+            format!("response file {} is not UTF-8", canonical.display())
+        })?;
+        let nested = parse_gcc_response_file(text).with_context(|| {
+            format!("failed to parse response file {}", canonical.display())
+        })?;
         expand_arguments(
             &nested,
             working_directory,
@@ -987,9 +1101,9 @@ fn reject_forwarded_response_files(arguments: &[OsString]) -> Result<()> {
         if argument
             .strip_prefix("-Xlinker=")
             .is_some_and(|value| value.starts_with('@'))
-            || argument
-                .strip_prefix("-Wl,")
-                .is_some_and(|values| values.split(',').any(|value| value.starts_with('@')))
+            || argument.strip_prefix("-Wl,").is_some_and(|values| {
+                values.split(',').any(|value| value.starts_with('@'))
+            })
             || strip_ascii_case_prefix(argument, "/clang:")
                 .is_some_and(|value| value.starts_with('@'))
             || argument
@@ -999,9 +1113,9 @@ fn reject_forwarded_response_files(arguments: &[OsString]) -> Result<()> {
                 .strip_prefix("-Xclang ")
                 .is_some_and(|value| value.starts_with('@'))
             || (argument == "-Xclang"
-                && arguments
-                    .get(index + 1)
-                    .is_some_and(|value| value.to_string_lossy().starts_with('@')))
+                && arguments.get(index + 1).is_some_and(|value| {
+                    value.to_string_lossy().starts_with('@')
+                }))
         {
             bail!("nested linker response files must not bypass RCC response-file validation");
         }
@@ -1130,7 +1244,9 @@ pub fn validate_user_arguments(arguments: &[OsString]) -> Result<()> {
             index += 1;
             continue;
         }
-        if let Some(clang_argument) = strip_ascii_case_prefix(argument, "/clang:") {
+        if let Some(clang_argument) =
+            strip_ascii_case_prefix(argument, "/clang:")
+        {
             validate_forwarded_clang_argument(clang_argument)?;
             index += 1;
             continue;
@@ -1173,7 +1289,8 @@ fn is_cc1_toolchain_escape(argument: &str) -> bool {
         "-darwin-target-variant-triple",
         "-target-abi",
     ];
-    const PLUGIN: &[&str] = &["-load", "-load-plugin", "-add-plugin", "-plugin"];
+    const PLUGIN: &[&str] =
+        &["-load", "-load-plugin", "-add-plugin", "-plugin"];
     const EXTRA_INPUT: &[&str] = &[
         "-ivfsoverlay",
         "-fmodules-cache-path",
@@ -1255,19 +1372,26 @@ fn is_forbidden_msvc_root_option(argument: &str) -> bool {
     ];
     NAMES.iter().any(|name| {
         argument.eq_ignore_ascii_case(name)
-            || strip_ascii_case_prefix(argument, name)
-                .is_some_and(|rest| rest.starts_with(':') || rest.starts_with('='))
+            || strip_ascii_case_prefix(argument, name).is_some_and(|rest| {
+                rest.starts_with(':') || rest.starts_with('=')
+            })
     })
 }
 
-fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    value
-        .get(..prefix.len())
-        .filter(|head| head.eq_ignore_ascii_case(prefix))
-        .map(|_| &value[prefix.len()..])
+fn strip_ascii_case_prefix<'a>(
+    value: &'a str,
+    prefix: &str,
+) -> Option<&'a str> {
+    let head = value.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    value.get(prefix.len()..)
 }
 
-pub fn parse_driver_query(arguments: &[OsString]) -> Result<Option<DriverQuery>> {
+pub fn parse_driver_query(
+    arguments: &[OsString],
+) -> Result<Option<DriverQuery>> {
     let mut query = None;
     let mut has_non_query_argument = false;
     for argument in arguments {
@@ -1282,9 +1406,9 @@ pub fn parse_driver_query(arguments: &[OsString]) -> Result<Option<DriverQuery>>
                 .strip_prefix("-print-file-name=")
                 .map(|name| DriverQuery::PrintFileName(name.to_owned()))
                 .or_else(|| {
-                    argument
-                        .strip_prefix("-print-prog-name=")
-                        .map(|name| DriverQuery::PrintProgramName(name.to_owned()))
+                    argument.strip_prefix("-print-prog-name=").map(|name| {
+                        DriverQuery::PrintProgramName(name.to_owned())
+                    })
                 }),
         };
         if let Some(candidate) = candidate {
@@ -1303,7 +1427,10 @@ pub fn parse_driver_query(arguments: &[OsString]) -> Result<Option<DriverQuery>>
 
 /// Return all forbidden variables present in `variables`. Variable matching is
 /// case-insensitive on Windows, matching the host environment semantics.
-pub fn find_polluting_environment<I, K, V>(variables: I, extra_forbidden: &[String]) -> Vec<String>
+pub fn find_polluting_environment<I, K, V>(
+    variables: I,
+    extra_forbidden: &[String],
+) -> Vec<String>
 where
     I: IntoIterator<Item = (K, V)>,
     K: AsRef<OsStr>,
@@ -1353,9 +1480,11 @@ fn normalize_environment_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     fn os(arguments: &[&str]) -> Vec<OsString> {
         arguments.iter().map(OsString::from).collect()
@@ -1390,7 +1519,9 @@ mod tests {
         .unwrap();
         fs::write(directory.path().join("outer.rsp"), "@inner.rsp -c").unwrap();
 
-        let expanded = expand_response_files(&os(&["@outer.rsp"]), directory.path()).unwrap();
+        let expanded =
+            expand_response_files(&os(&["@outer.rsp"]), directory.path())
+                .unwrap();
         assert_eq!(expanded, os(&["-DVALUE=1", "source file.c", "-c"]));
     }
 
@@ -1399,7 +1530,8 @@ mod tests {
         let directory = tempdir().unwrap();
         fs::write(directory.path().join("a.rsp"), "@b.rsp").unwrap();
         fs::write(directory.path().join("b.rsp"), "@a.rsp").unwrap();
-        let error = expand_response_files(&os(&["@a.rsp"]), directory.path()).unwrap_err();
+        let error = expand_response_files(&os(&["@a.rsp"]), directory.path())
+            .unwrap_err();
         assert!(error.to_string().contains("cycle"));
 
         fs::write(directory.path().join("single.rsp"), "-c").unwrap();
@@ -1407,9 +1539,12 @@ mod tests {
             maximum_depth: 0,
             ..ResponseFileLimits::default()
         };
-        let error =
-            expand_response_files_with_limits(&os(&["@single.rsp"]), directory.path(), limits)
-                .unwrap_err();
+        let error = expand_response_files_with_limits(
+            &os(&["@single.rsp"]),
+            directory.path(),
+            limits,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("maximum depth"));
     }
 
@@ -1433,8 +1568,10 @@ mod tests {
     #[test]
     fn rejects_response_files_forwarded_beyond_the_policy_boundary() {
         let directory = tempdir().unwrap();
-        fs::write(directory.path().join("link.rsp"), "--plugin=/tmp/evil.so").unwrap();
-        fs::write(directory.path().join("driver.rsp"), "-Wl,@link.rsp").unwrap();
+        fs::write(directory.path().join("link.rsp"), "--plugin=/tmp/evil.so")
+            .unwrap();
+        fs::write(directory.path().join("driver.rsp"), "-Wl,@link.rsp")
+            .unwrap();
 
         for arguments in [
             os(&["-Wl,@link.rsp"]),
@@ -1521,7 +1658,8 @@ mod tests {
             os(&["-Xclang=-nostdlib"]),
         ] {
             assert!(
-                validate_manifest_forbidden_arguments(&arguments, &forbidden).is_err(),
+                validate_manifest_forbidden_arguments(&arguments, &forbidden)
+                    .is_err(),
                 "{arguments:?}"
             );
         }
@@ -1535,7 +1673,8 @@ mod tests {
         fs::create_dir_all(host_root.join("lib")).unwrap();
         let forbidden = vec![host_root.to_string_lossy().into_owned()];
         let include = format!("-I{}", host_root.join("include").display());
-        let host_include = host_root.join("include").to_string_lossy().into_owned();
+        let host_include =
+            host_root.join("include").to_string_lossy().into_owned();
         let library = host_root.join("lib").to_string_lossy().into_owned();
         let joined_library = format!("-L{library}");
         let forwarded_library = format!("-Wl,-L,{library}");
@@ -1559,8 +1698,12 @@ mod tests {
             os(&["-Xclang", "-internal-isystem", "-Xclang", &host_include]),
         ] {
             assert!(
-                validate_forbidden_path_arguments(&arguments, &forbidden, directory.path())
-                    .is_err(),
+                validate_forbidden_path_arguments(
+                    &arguments,
+                    &forbidden,
+                    directory.path()
+                )
+                .is_err(),
                 "{arguments:?}"
             );
         }
@@ -1632,7 +1775,10 @@ mod tests {
 
     #[test]
     fn rejects_xclang_without_an_argument() {
-        assert!(validate_user_arguments(&os(&["-c", "source.cc", "-Xclang"])).is_err());
+        assert!(
+            validate_user_arguments(&os(&["-c", "source.cc", "-Xclang"]))
+                .is_err()
+        );
     }
 
     #[test]
@@ -1648,10 +1794,12 @@ mod tests {
             prepared.arguments,
             os(&["--target=x86_64-unknown-linux-gnu", "-c", "source.c",])
         );
-        assert!(
-            prepare_invocation(&os(&["-c", "source.c", "-B/usr/bin"]), &[], Path::new("."),)
-                .is_err()
-        );
+        assert!(prepare_invocation(
+            &os(&["-c", "source.c", "-B/usr/bin"]),
+            &[],
+            Path::new("."),
+        )
+        .is_err());
         assert!(prepare_invocation(
             &os(&["-c", "source.c", "-fuse-ld=/usr/bin/ld"]),
             &[],
@@ -1913,7 +2061,9 @@ mod tests {
             parse_driver_query(&os(&["-print-file-name=crt1.o"])).unwrap(),
             Some(DriverQuery::PrintFileName("crt1.o".into()))
         );
-        assert!(parse_driver_query(&os(&["--print-sysroot", "source.c"])).is_err());
+        assert!(
+            parse_driver_query(&os(&["--print-sysroot", "source.c"])).is_err()
+        );
     }
 
     #[test]
@@ -1926,7 +2076,8 @@ mod tests {
                 OsString::from("/poison"),
             ),
         ];
-        let found = find_polluting_environment(variables, &["CUSTOM_TOOL_PATH".into()]);
+        let found =
+            find_polluting_environment(variables, &["CUSTOM_TOOL_PATH".into()]);
         assert_eq!(found, vec!["CPATH", "CUSTOM_TOOL_PATH"]);
     }
 }

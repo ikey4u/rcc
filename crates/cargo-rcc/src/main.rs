@@ -5,17 +5,20 @@
 //! variables, and execs Cargo. `cargo rcc` is `cargo build`, including the
 //! default artifact directory when `--target` is omitted.
 
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rcc_core::{
-    EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0, RUSTC_MACOS_V0,
-    RUSTC_WINDOWS_V0,
+    EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0,
+    RUSTC_LINUX_MUSL_V0, RUSTC_MACOS_V0, RUSTC_WINDOWS_V0,
 };
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 const LINUX_X64_MUSL: &str = "x86_64-unknown-linux-musl";
 const LINUX_X64_MUSL_PROFILE: &str = "linux-x86_64-musl-static";
@@ -205,13 +208,18 @@ pub struct TargetPlan {
     pub rustflags: Vec<String>,
 }
 
-pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Result<TargetPlan> {
+pub fn plan_for_rust_target(
+    target: &str,
+    profile_override: Option<&str>,
+) -> Result<TargetPlan> {
     let rust_target = canonical_rust_target(target)?;
 
     if rust_target == HOST_MACOS_AARCH64 {
         return Ok(TargetPlan {
             rust_target,
-            profile_id: profile_override.unwrap_or(MACOS_AARCH64_PROFILE).to_owned(),
+            profile_id: profile_override
+                .unwrap_or(MACOS_AARCH64_PROFILE)
+                .to_owned(),
             runtime_contract: RUSTC_MACOS_V0.to_owned(),
             rustflags: Vec::new(),
         });
@@ -220,7 +228,9 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
     if rust_target == MACOS_X86_64 {
         return Ok(TargetPlan {
             rust_target,
-            profile_id: profile_override.unwrap_or(MACOS_X86_64_PROFILE).to_owned(),
+            profile_id: profile_override
+                .unwrap_or(MACOS_X86_64_PROFILE)
+                .to_owned(),
             runtime_contract: RUSTC_MACOS_V0.to_owned(),
             rustflags: Vec::new(),
         });
@@ -256,12 +266,13 @@ pub fn plan_for_rust_target(target: &str, profile_override: Option<&str>) -> Res
     }
 
     if let Some(profile_id) = windows_profile(&rust_target) {
-        let runtime_contract =
-            if rust_target == WINDOWS_X64_MSVC || rust_target == WINDOWS_AARCH64_MSVC {
-                NATIVE_RCC_OWNED
-            } else {
-                RUSTC_WINDOWS_V0
-            };
+        let runtime_contract = if rust_target == WINDOWS_X64_MSVC
+            || rust_target == WINDOWS_AARCH64_MSVC
+        {
+            NATIVE_RCC_OWNED
+        } else {
+            RUSTC_WINDOWS_V0
+        };
         return Ok(TargetPlan {
             rust_target,
             profile_id: profile_override.unwrap_or(profile_id).to_owned(),
@@ -307,30 +318,48 @@ fn windows_profile(rust_target: &str) -> Option<&'static str> {
 
 fn canonical_rust_target(target: &str) -> Result<String> {
     match target {
-        "linux-x86_64-gnu" | "linux-x64-gnu" | LINUX_X64_GNU | LINUX_X64_GNU_PROFILE => {
+        "linux-x86_64-gnu"
+        | "linux-x64-gnu"
+        | LINUX_X64_GNU
+        | LINUX_X64_GNU_PROFILE => {
             return Ok(LINUX_X64_GNU.to_owned());
         }
-        "linux-x86_64" | "linux-x64" | LINUX_X64_MUSL | LINUX_X64_MUSL_PROFILE => {
+        "linux-x86_64"
+        | "linux-x64"
+        | LINUX_X64_MUSL
+        | LINUX_X64_MUSL_PROFILE => {
             return Ok(LINUX_X64_MUSL.to_owned());
         }
-        "linux-aarch64-gnu" | "linux-arm64-gnu" | LINUX_AARCH64_GNU | LINUX_AARCH64_GNU_PROFILE => {
+        "linux-aarch64-gnu"
+        | "linux-arm64-gnu"
+        | LINUX_AARCH64_GNU
+        | LINUX_AARCH64_GNU_PROFILE => {
             return Ok(LINUX_AARCH64_GNU.to_owned());
         }
-        "linux-aarch64" | "linux-arm64" | LINUX_AARCH64_MUSL | LINUX_AARCH64_MUSL_PROFILE => {
+        "linux-aarch64"
+        | "linux-arm64"
+        | LINUX_AARCH64_MUSL
+        | LINUX_AARCH64_MUSL_PROFILE => {
             return Ok(LINUX_AARCH64_MUSL.to_owned());
         }
-        WINDOWS_X64_GNU | WINDOWS_X64_GNU_PROFILE => return Ok(WINDOWS_X64_GNU.to_owned()),
+        WINDOWS_X64_GNU | WINDOWS_X64_GNU_PROFILE => {
+            return Ok(WINDOWS_X64_GNU.to_owned())
+        }
         WINDOWS_X64_GNULLVM | WINDOWS_X64_GNULLVM_PROFILE => {
             return Ok(WINDOWS_X64_GNULLVM.to_owned());
         }
         WINDOWS_AARCH64_GNULLVM | WINDOWS_AARCH64_GNULLVM_PROFILE => {
             return Ok(WINDOWS_AARCH64_GNULLVM.to_owned());
         }
-        WINDOWS_X64_MSVC | WINDOWS_X64_MSVC_PROFILE => return Ok(WINDOWS_X64_MSVC.to_owned()),
+        WINDOWS_X64_MSVC | WINDOWS_X64_MSVC_PROFILE => {
+            return Ok(WINDOWS_X64_MSVC.to_owned())
+        }
         WINDOWS_AARCH64_MSVC | WINDOWS_AARCH64_MSVC_PROFILE => {
             return Ok(WINDOWS_AARCH64_MSVC.to_owned());
         }
-        HOST_MACOS_AARCH64 | MACOS_AARCH64_PROFILE | HOST_MACOS_AARCH64_PROFILE => {
+        HOST_MACOS_AARCH64
+        | MACOS_AARCH64_PROFILE
+        | HOST_MACOS_AARCH64_PROFILE => {
             return Ok(HOST_MACOS_AARCH64.to_owned());
         }
         MACOS_X86_64 | MACOS_X86_64_PROFILE | HOST_MACOS_X86_64_PROFILE => {
@@ -399,7 +428,11 @@ fn run() -> Result<()> {
     match cli.command {
         Opt::Build(mut build) => {
             canonicalize_targets(&mut build.cargo.common.target)?;
-            execute_rcc(&cli.rcc, &build.cargo.common.target, build.cargo.command())
+            execute_rcc(
+                &cli.rcc,
+                &build.cargo.common.target,
+                build.cargo.command(),
+            )
         }
         Opt::Clippy(mut clippy) => {
             canonicalize_targets(&mut clippy.cargo.common.target)?;
@@ -411,7 +444,11 @@ fn run() -> Result<()> {
         }
         Opt::Check(mut check) => {
             canonicalize_targets(&mut check.cargo.common.target)?;
-            execute_rcc(&cli.rcc, &check.cargo.common.target, check.cargo.command())
+            execute_rcc(
+                &cli.rcc,
+                &check.cargo.common.target,
+                check.cargo.command(),
+            )
         }
         Opt::Doc(mut doc) => {
             canonicalize_targets(&mut doc.cargo.common.target)?;
@@ -427,7 +464,11 @@ fn run() -> Result<()> {
         }
         Opt::Rustc(mut rustc) => {
             canonicalize_targets(&mut rustc.cargo.common.target)?;
-            execute_rcc(&cli.rcc, &rustc.cargo.common.target, rustc.cargo.command())
+            execute_rcc(
+                &cli.rcc,
+                &rustc.cargo.common.target,
+                rustc.cargo.command(),
+            )
         }
         Opt::Run(mut run) => {
             canonicalize_targets(&mut run.cargo.common.target)?;
@@ -435,10 +476,16 @@ fn run() -> Result<()> {
         }
         Opt::Test(mut test) => {
             canonicalize_targets(&mut test.cargo.common.target)?;
-            execute_rcc(&cli.rcc, &test.cargo.common.target, test.cargo.command())
+            execute_rcc(
+                &cli.rcc,
+                &test.cargo.common.target,
+                test.cargo.command(),
+            )
         }
         Opt::External(args) => {
-            let mut cargo = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+            let mut cargo = Command::new(
+                env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            );
             cargo.args(args).env_remove("CARGO");
             spawn_cargo(cargo)
         }
@@ -452,7 +499,11 @@ fn canonicalize_targets(targets: &mut [String]) -> Result<()> {
     Ok(())
 }
 
-fn execute_rcc(rcc_args: &RccArgs, targets: &[String], mut cargo: Command) -> Result<()> {
+fn execute_rcc(
+    rcc_args: &RccArgs,
+    targets: &[String],
+    mut cargo: Command,
+) -> Result<()> {
     let host = detect_rustc_host()?;
     host_profile_for(&host)?;
 
@@ -501,7 +552,12 @@ fn execute_rcc(rcc_args: &RccArgs, targets: &[String], mut cargo: Command) -> Re
     let manifest: EnvironmentManifest = serde_json::from_slice(&output.stdout)
         .context("failed to parse `rcc env --format json`")?;
 
-    apply_rcc_environment(&mut cargo, &manifest, &plans, rcc_args.cache_dir.as_deref())?;
+    apply_rcc_environment(
+        &mut cargo,
+        &manifest,
+        &plans,
+        rcc_args.cache_dir.as_deref(),
+    )?;
     spawn_cargo(cargo)
 }
 
@@ -551,9 +607,14 @@ fn cargo_home_bin() -> Option<PathBuf> {
     )
 }
 
-fn cargo_home_bin_from(cargo_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+fn cargo_home_bin_from(
+    cargo_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<PathBuf> {
     match cargo_home {
-        Some(value) if !value.is_empty() => Some(PathBuf::from(value).join("bin")),
+        Some(value) if !value.is_empty() => {
+            Some(PathBuf::from(value).join("bin"))
+        }
         _ => home
             .filter(|value| !value.is_empty())
             .map(|value| PathBuf::from(value).join(".cargo").join("bin")),
@@ -591,7 +652,8 @@ fn detect_rustc_host() -> Result<String> {
     if !output.status.success() {
         bail!("rustc -vV failed");
     }
-    let stdout = String::from_utf8(output.stdout).context("rustc -vV was not UTF-8")?;
+    let stdout =
+        String::from_utf8(output.stdout).context("rustc -vV was not UTF-8")?;
     for line in stdout.lines() {
         if let Some(host) = line.strip_prefix("host: ") {
             return Ok(host.trim().to_owned());
@@ -634,7 +696,9 @@ fn apply_rcc_environment(
     // on Linux. RCC already resolved the SDK into the view sysroot
     // (`RCC_APPLE_SDK_ROOT` off macOS; `xcrun` only as a macOS fallback).
     // Clang still strips SDKROOT at driver start.
-    if let Some(sdkroot) = rustc_sdkroot_for_apple_targets(plans, &manifest.target.sysroot) {
+    if let Some(sdkroot) =
+        rustc_sdkroot_for_apple_targets(plans, &manifest.target.sysroot)
+    {
         cargo.env("SDKROOT", sdkroot);
     }
 
@@ -654,7 +718,8 @@ fn apply_rcc_environment(
         let unwind_dir = isolate_rustc_unwind(&plan.rust_target, cache_dir)?;
         let mut rustflags = plan.rustflags.clone();
         if plan.runtime_contract == RUSTC_LINUX_GNU_V0 {
-            let compat_obj = ensure_glibc217_compat(cache_dir, cc, &plan.rust_target)?;
+            let compat_obj =
+                ensure_glibc217_compat(cache_dir, cc, &plan.rust_target)?;
             rustflags.push("-C".into());
             rustflags.push(format!("link-arg={}", compat_obj.display()));
         }
@@ -732,8 +797,9 @@ fn ensure_glibc217_compat(
     {
         return Ok(obj);
     }
-    fs::write(&src, source)
-        .with_context(|| format!("failed to write glibc 2.17 compat source {}", src.display()))?;
+    fs::write(&src, source).with_context(|| {
+        format!("failed to write glibc 2.17 compat source {}", src.display())
+    })?;
     let output = Command::new(cc)
         .args(["-c", "-O2", "-fPIC", "-fvisibility=hidden", "-o"])
         .arg(&obj)
@@ -753,7 +819,10 @@ fn ensure_glibc217_compat(
     Ok(obj)
 }
 
-fn isolate_rustc_unwind(rust_target: &str, cache_dir: Option<&Path>) -> Result<Option<PathBuf>> {
+fn isolate_rustc_unwind(
+    rust_target: &str,
+    cache_dir: Option<&Path>,
+) -> Result<Option<PathBuf>> {
     let sysroot = rustc_sysroot()?;
     let libunwind = sysroot
         .join("lib/rustlib")
@@ -795,7 +864,8 @@ fn rustc_sysroot() -> Result<PathBuf> {
     if !output.status.success() {
         bail!("rustc --print sysroot failed");
     }
-    let stdout = String::from_utf8(output.stdout).context("rustc sysroot was not UTF-8")?;
+    let stdout = String::from_utf8(output.stdout)
+        .context("rustc sysroot was not UTF-8")?;
     let sysroot = stdout.trim();
     if sysroot.is_empty() {
         bail!("rustc --print sysroot returned an empty path");
@@ -812,8 +882,9 @@ fn sync_file(source: &Path, destination: &Path) -> Result<()> {
         {
             return Ok(());
         }
-        fs::remove_file(destination)
-            .with_context(|| format!("failed to replace {}", destination.display()))?;
+        fs::remove_file(destination).with_context(|| {
+            format!("failed to replace {}", destination.display())
+        })?;
     }
     match fs::hard_link(source, destination) {
         Ok(()) => Ok(()),
@@ -913,13 +984,15 @@ mod tests {
         let gnu = plan_for_rust_target(WINDOWS_X64_GNU, None).unwrap();
         assert_eq!(gnu.profile_id, WINDOWS_X64_GNU_PROFILE);
         assert_eq!(gnu.runtime_contract, RUSTC_WINDOWS_V0);
-        let gnullvm = plan_for_rust_target(WINDOWS_AARCH64_GNULLVM, None).unwrap();
+        let gnullvm =
+            plan_for_rust_target(WINDOWS_AARCH64_GNULLVM, None).unwrap();
         assert_eq!(gnullvm.profile_id, WINDOWS_AARCH64_GNULLVM_PROFILE);
         assert_eq!(gnullvm.runtime_contract, RUSTC_WINDOWS_V0);
         let msvc = plan_for_rust_target(WINDOWS_X64_MSVC, None).unwrap();
         assert_eq!(msvc.profile_id, WINDOWS_X64_MSVC_PROFILE);
         assert_eq!(msvc.runtime_contract, NATIVE_RCC_OWNED);
-        let arm_msvc = plan_for_rust_target(WINDOWS_AARCH64_MSVC, None).unwrap();
+        let arm_msvc =
+            plan_for_rust_target(WINDOWS_AARCH64_MSVC, None).unwrap();
         assert_eq!(arm_msvc.profile_id, WINDOWS_AARCH64_MSVC_PROFILE);
     }
 
@@ -983,7 +1056,10 @@ mod tests {
     #[test]
     fn cargo_home_bin_uses_cargo_home_then_dot_cargo() {
         assert_eq!(
-            cargo_home_bin_from(Some(OsStr::new("/opt/cargo")), Some(OsStr::new("/home/me"))),
+            cargo_home_bin_from(
+                Some(OsStr::new("/opt/cargo")),
+                Some(OsStr::new("/home/me"))
+            ),
             Some(PathBuf::from("/opt/cargo/bin"))
         );
         assert_eq!(
@@ -1030,7 +1106,8 @@ mod tests {
 
     #[test]
     fn prepends_cross_bin_ahead_of_existing_path() {
-        let joined = join_path_prepend("/view/cross-bin", Some(OsStr::new("/usr/bin")));
+        let joined =
+            join_path_prepend("/view/cross-bin", Some(OsStr::new("/usr/bin")));
         let expected = if cfg!(windows) {
             OsString::from("/view/cross-bin;/usr/bin")
         } else {
@@ -1050,7 +1127,9 @@ mod tests {
             Some(LINUX_X64_MUSL.into())
         );
         assert_eq!(
-            cargo_target_from_args(&[OsString::from(format!("--target={LINUX_X64_MUSL}"))]),
+            cargo_target_from_args(&[OsString::from(format!(
+                "--target={LINUX_X64_MUSL}"
+            ))]),
             Some(LINUX_X64_MUSL.into())
         );
     }

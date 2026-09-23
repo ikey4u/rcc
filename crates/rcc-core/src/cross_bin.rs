@@ -1,5 +1,6 @@
-use crate::schema::{ToolKind, ViewManifest};
 use std::collections::BTreeSet;
+
+use crate::schema::{ToolKind, ViewManifest};
 
 pub const CROSS_BIN_DIR: &str = "cross-bin";
 
@@ -36,9 +37,8 @@ fn tool_kind_from_basename(name: &str) -> Option<ToolKind> {
     match name {
         "cc" | "gcc" | "clang" | "as" | "cpp" => Some(ToolKind::Cc),
         "c++" | "g++" | "clang++" | "cxx" => Some(ToolKind::Cxx),
-        "linker" | "ld" | "ld.lld" | "ld64.lld" | "lld-link" | "link" | "lld" => {
-            Some(ToolKind::Linker)
-        }
+        "linker" | "ld" | "ld.lld" | "ld64.lld" | "lld-link" | "link"
+        | "lld" => Some(ToolKind::Linker),
         "ar" | "llvm-ar" | "gcc-ar" => Some(ToolKind::Ar),
         "ranlib" | "llvm-ranlib" | "gcc-ranlib" => Some(ToolKind::Ranlib),
         "nm" => Some(ToolKind::Nm),
@@ -124,7 +124,9 @@ pub fn relative_paths_for(
     for kind in tool_kinds {
         for program in gnu_program_names(*kind) {
             for prefix in &prefixes {
-                paths.insert(format!("{CROSS_BIN_DIR}/{prefix}-{program}{suffix}"));
+                paths.insert(format!(
+                    "{CROSS_BIN_DIR}/{prefix}-{program}{suffix}"
+                ));
             }
         }
         for program in unprefixed_path_names(*kind) {
@@ -166,14 +168,20 @@ mod tests {
 
     #[test]
     fn linux_gnu_has_autoconf_and_debian_prefixes() {
-        let prefixes = tool_prefixes("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu");
+        let prefixes = tool_prefixes(
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+        );
         assert!(prefixes.iter().any(|p| p == "x86_64-unknown-linux-gnu"));
         assert!(prefixes.iter().any(|p| p == "x86_64-linux-gnu"));
     }
 
     #[test]
     fn relative_paths_include_unprefixed_ar_not_gcc() {
-        let prefixes = tool_prefixes("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu");
+        let prefixes = tool_prefixes(
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+        );
         assert!(!prefixes.is_empty());
         let names = gnu_program_names(ToolKind::Cc);
         assert!(names.contains(&"gcc"));
@@ -218,7 +226,8 @@ mod tests {
         let suffix = executable_suffix();
         assert!(paths
             .iter()
-            .any(|p| p == &format!("cross-bin/x86_64-unknown-linux-gnu-gcc{suffix}")));
+            .any(|p| p
+                == &format!("cross-bin/x86_64-unknown-linux-gnu-gcc{suffix}")));
         assert!(paths
             .iter()
             .any(|p| p == &format!("cross-bin/x86_64-linux-gnu-gcc{suffix}")));
@@ -236,11 +245,17 @@ mod tests {
     #[test]
     fn primary_prefix_drops_unknown_vendor() {
         assert_eq!(
-            primary_gnu_prefix("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"),
+            primary_gnu_prefix(
+                "x86_64-unknown-linux-gnu",
+                "x86_64-unknown-linux-gnu"
+            ),
             "x86_64-linux-gnu"
         );
         assert_eq!(
-            primary_gnu_prefix("x86_64-pc-windows-gnu", "x86_64-w64-windows-gnu"),
+            primary_gnu_prefix(
+                "x86_64-pc-windows-gnu",
+                "x86_64-w64-windows-gnu"
+            ),
             "x86_64-pc-windows-gnu"
         );
     }

@@ -21,6 +21,8 @@ case "$profile" in
 esac
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=lib/posix.sh
+. "$repository/scripts/lib/posix.sh"
 cache_dir=${RCC_CACHE_DIR:-$repository/inner/rcc-cache}
 out_dir=$repository/examples/windows-c/out-$profile
 cxx_out_dir=$repository/examples/windows-cxx/out-$profile
@@ -79,7 +81,7 @@ case "$profile" in
     windows-aarch64-msvc) rust_target=aarch64-pc-windows-msvc ;;
 esac
 
-if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ] && [ -n "$rust_target" ]; then
+if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ] && [ -n "$rust_target" ] && rust_std_ready "$rust_target"; then
     echo "==> cargo-rcc windows-hello ($rust_target)"
     "$CARGO_RCC" --rcc "$RCC" --cache-dir "$cache_dir" build \
         --manifest-path "$repository/examples/windows-hello/Cargo.toml" \
@@ -90,6 +92,8 @@ if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ] && [ -n "$rust_target" ]; then
         hello_bin=$repository/examples/windows-hello/target/$rust_target/release/windows-hello
     fi
     "$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$hello_bin"
+elif [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ] && [ -n "$rust_target" ]; then
+    echo "skip cargo-rcc: rust-std for $rust_target is missing; run \`rustup target add $rust_target\`" >&2
 fi
 
 if [ "$profile" = "windows-x86_64-gnu" ] || [ "$profile" = "windows-x86_64-gnullvm" ]; then

@@ -1,6 +1,10 @@
-use crate::schema::{Profile, RuntimeContract, RuntimeOwnership, SCHEMA_VERSION};
-use anyhow::{bail, Result};
 use std::collections::BTreeMap;
+
+use anyhow::{bail, Result};
+
+use crate::schema::{
+    Profile, RuntimeContract, RuntimeOwnership, SCHEMA_VERSION,
+};
 
 pub const NATIVE_RCC_OWNED: &str = "native-rcc-owned";
 pub const RUSTC_LINUX_MUSL_V0: &str = "rustc-linux-musl-v0";
@@ -14,7 +18,10 @@ pub const RUSTC_MACOS_V0: &str = "rustc-macos-v0";
 /// targets differ in which CRT, libc, unwind, and linker components are
 /// carried by rust-std, so accepting an unknown contract would risk duplicate
 /// runtimes.
-pub fn resolve(profile: &Profile, contract_id: &str) -> Result<RuntimeContract> {
+pub fn resolve(
+    profile: &Profile,
+    contract_id: &str,
+) -> Result<RuntimeContract> {
     match contract_id {
         NATIVE_RCC_OWNED => native_rcc_owned(profile),
         RUSTC_LINUX_MUSL_V0 => rustc_linux_musl_v0(profile),
@@ -84,7 +91,11 @@ fn rustc_linux_musl_v0(profile: &Profile) -> Result<RuntimeContract> {
         // rust-std's libunwind.a on an isolated search path; RCC still
         // injects musl CRT and compiler-rt. -nostdlib would drop those
         // driver defaults.
-        forbidden_link_args: vec!["-nostdlib".into(), "-nolibc".into(), "/nodefaultlib".into()],
+        forbidden_link_args: vec![
+            "-nostdlib".into(),
+            "-nolibc".into(),
+            "/nodefaultlib".into(),
+        ],
     };
     contract.validate()?;
     Ok(contract)
@@ -115,14 +126,20 @@ fn rustc_linux_gnu_v0(profile: &Profile) -> Result<RuntimeContract> {
         consumer_version_requirement: Some(">=1.85".into()),
         component_owners,
         injected_link_args: Vec::new(),
-        forbidden_link_args: vec!["-nostdlib".into(), "-nolibc".into(), "/nodefaultlib".into()],
+        forbidden_link_args: vec![
+            "-nostdlib".into(),
+            "-nolibc".into(),
+            "/nodefaultlib".into(),
+        ],
     };
     contract.validate()?;
     Ok(contract)
 }
 
 fn rustc_windows_v0(profile: &Profile) -> Result<RuntimeContract> {
-    if profile.os != "windows" || profile.driver_kind != crate::schema::DriverKind::ClangGcc {
+    if profile.os != "windows"
+        || profile.driver_kind != crate::schema::DriverKind::ClangGcc
+    {
         bail!(
             "{RUSTC_WINDOWS_V0} is only valid for Windows gnu/gnullvm profiles, not {}",
             profile.profile_id
@@ -180,7 +197,11 @@ fn rustc_macos_v0(profile: &Profile) -> Result<RuntimeContract> {
         component_owners,
         injected_link_args: Vec::new(),
         // rustc Darwin always passes -nodefaultlibs and names libSystem itself.
-        forbidden_link_args: vec!["-nostdlib".into(), "-nolibc".into(), "/nodefaultlib".into()],
+        forbidden_link_args: vec![
+            "-nostdlib".into(),
+            "-nolibc".into(),
+            "/nodefaultlib".into(),
+        ],
     };
     contract.validate()?;
     Ok(contract)
@@ -202,7 +223,9 @@ mod tests {
 
     #[test]
     fn rustc_musl_contract_is_split_and_linux_only() {
-        let profile = registry::resolve_target_profile("linux-x86_64-musl-static").unwrap();
+        let profile =
+            registry::resolve_target_profile("linux-x86_64-musl-static")
+                .unwrap();
         let contract = resolve(profile, RUSTC_LINUX_MUSL_V0).unwrap();
         assert_eq!(contract.ownership, RuntimeOwnership::SplitContract);
         assert_eq!(contract.consumer.as_deref(), Some("rustc"));
@@ -222,7 +245,9 @@ mod tests {
 
     #[test]
     fn rustc_gnu_contract_is_split_and_linux_glibc_only() {
-        let profile = registry::resolve_target_profile("linux-x86_64-gnu-glibc217").unwrap();
+        let profile =
+            registry::resolve_target_profile("linux-x86_64-gnu-glibc217")
+                .unwrap();
         let contract = resolve(profile, RUSTC_LINUX_GNU_V0).unwrap();
         assert_eq!(contract.ownership, RuntimeOwnership::SplitContract);
         assert_eq!(
@@ -230,14 +255,16 @@ mod tests {
             Some(&RuntimeOwnership::RccOwned)
         );
 
-        let musl = registry::resolve_target_profile("linux-x86_64-musl-static").unwrap();
+        let musl = registry::resolve_target_profile("linux-x86_64-musl-static")
+            .unwrap();
         let error = resolve(musl, RUSTC_LINUX_GNU_V0).unwrap_err();
         assert!(error.to_string().contains("linux glibc"));
     }
 
     #[test]
     fn rustc_windows_contract_is_gnu_gnullvm_only() {
-        let gnu = registry::resolve_target_profile("windows-x86_64-gnu").unwrap();
+        let gnu =
+            registry::resolve_target_profile("windows-x86_64-gnu").unwrap();
         let contract = resolve(gnu, RUSTC_WINDOWS_V0).unwrap();
         assert_eq!(contract.ownership, RuntimeOwnership::SplitContract);
         assert!(!contract
@@ -245,10 +272,13 @@ mod tests {
             .iter()
             .any(|argument| argument == "-nodefaultlibs"));
 
-        let gnullvm = registry::resolve_target_profile("windows-aarch64-gnullvm").unwrap();
+        let gnullvm =
+            registry::resolve_target_profile("windows-aarch64-gnullvm")
+                .unwrap();
         resolve(gnullvm, RUSTC_WINDOWS_V0).unwrap();
 
-        let msvc = registry::resolve_target_profile("windows-x86_64-msvc").unwrap();
+        let msvc =
+            registry::resolve_target_profile("windows-x86_64-msvc").unwrap();
         let error = resolve(msvc, RUSTC_WINDOWS_V0).unwrap_err();
         assert!(error.to_string().contains("gnu/gnullvm"));
     }
@@ -263,7 +293,9 @@ mod tests {
             .iter()
             .any(|argument| argument == "-nodefaultlibs"));
 
-        let linux = registry::resolve_target_profile("linux-x86_64-gnu-glibc217").unwrap();
+        let linux =
+            registry::resolve_target_profile("linux-x86_64-gnu-glibc217")
+                .unwrap();
         let error = resolve(linux, RUSTC_MACOS_V0).unwrap_err();
         assert!(error.to_string().contains("macOS"));
     }

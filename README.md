@@ -92,8 +92,8 @@ and `x86_64-pc-windows-gnu`. It locates `rcc` from
 `--rcc`, `$RCC`, a sibling of `cargo-rcc`, `$PATH`, then `$CARGO_HOME/bin`.
 
 ```sh
-rustup target add x86_64-unknown-linux-musl
-rustup target add x86_64-unknown-linux-gnu
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 
 cargo rcc --release \
   --manifest-path examples/openssl-linux/Cargo.toml \
@@ -140,7 +140,9 @@ installed Kits and VS. Details: [RCC_WINDOWS.md](docs/design/RCC_WINDOWS.md).
 mise check
 ```
 
-Runs rustfmt, `cargo test`, Clippy, and script/lock metadata. If a release
+Runs nightly rustfmt (`mise format`; `mise check` runs `format:check`),
+`cargo test`, Clippy, and script/lock metadata. `rustfmt.toml` needs
+unstable rustfmt. If a release
 `rcc` is on disk, it also runs the product verify scripts (runtime is skipped
 when no guest exists). To require execution on macOS:
 

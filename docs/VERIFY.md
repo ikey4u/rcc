@@ -2,7 +2,7 @@
 
 本文是当前 RCC release 对 Linux musl-static / gnu-glibc217（x86_64 与 aarch64）、Windows gnu/gnullvm/msvc，以及 macOS Mach-O 的能力边界、正确性定义和可重复验收入口。设计背景见 `docs/plan/IMPL_RCC_MACOS.md` 与 `docs/plan/IMPL_RCC_MACOS_CROSS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
 
-需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。`mise check` 在能找到这份 `rcc` 时会跑下面的验收脚本；没有执行器时跳过运行时而不是失败。Apple SDK / Windows SDK 探测到才会跑对应的 macOS / MSVC 脚本。
+需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。`mise check` 在能找到这份 `rcc` 时会跑下面的验收脚本；没有执行器时跳过运行时而不是失败。Apple SDK / Windows SDK 探测到才会跑对应的 macOS / MSVC 脚本。`cargo-rcc` 段落在本机 rust-std 未安装时 skip（`rustup target add <triple>`），不把 `mise check` 打挂。
 
 ```sh
 export RCC=/absolute/path/to/dist/rcc-release/rcc   # Windows: .../rcc.exe

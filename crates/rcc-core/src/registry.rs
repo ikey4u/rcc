@@ -1,11 +1,10 @@
+use std::{collections::BTreeSet, error::Error, fmt, sync::OnceLock};
+
 use crate::schema::{
-    DriverKind, LinkerFlavor, ObjectFormat, Profile, ProfileKind, ResponseFileDialect, ToolKind,
-    ValidationError, ValidationResult, SCHEMA_VERSION,
+    DriverKind, LinkerFlavor, ObjectFormat, Profile, ProfileKind,
+    ResponseFileDialect, ToolKind, ValidationError, ValidationResult,
+    SCHEMA_VERSION,
 };
-use std::collections::BTreeSet;
-use std::error::Error;
-use std::fmt;
-use std::sync::OnceLock;
 
 pub const APPLE_DEVELOPER_PROVIDER: &str = "apple-developer";
 pub const WINDOWS_MSVC_PROVIDER: &str = "windows-msvc";
@@ -32,11 +31,15 @@ pub fn find_profile(profile_id: &str) -> Option<&'static Profile> {
     builtin_profiles().find(|profile| profile.profile_id == profile_id)
 }
 
-pub fn resolve_target_profile(query: &str) -> Result<&'static Profile, RegistryError> {
+pub fn resolve_target_profile(
+    query: &str,
+) -> Result<&'static Profile, RegistryError> {
     resolve_profile(ProfileKind::Target, query)
 }
 
-pub fn resolve_host_profile(query: &str) -> Result<&'static Profile, RegistryError> {
+pub fn resolve_host_profile(
+    query: &str,
+) -> Result<&'static Profile, RegistryError> {
     resolve_profile(ProfileKind::Host, query)
 }
 
@@ -44,12 +47,17 @@ pub fn validate_builtin_registry() -> ValidationResult {
     validate_registry(builtin_target_profiles(), builtin_host_profiles())
 }
 
-fn resolve_profile(kind: ProfileKind, query: &str) -> Result<&'static Profile, RegistryError> {
+fn resolve_profile(
+    kind: ProfileKind,
+    query: &str,
+) -> Result<&'static Profile, RegistryError> {
     let profiles = match kind {
         ProfileKind::Target => builtin_target_profiles(),
         ProfileKind::Host => builtin_host_profiles(),
     };
-    if let Some(profile) = profiles.iter().find(|profile| profile.profile_id == query) {
+    if let Some(profile) =
+        profiles.iter().find(|profile| profile.profile_id == query)
+    {
         return Ok(profile);
     }
     let mut matches = profiles
@@ -70,7 +78,10 @@ fn resolve_profile(kind: ProfileKind, query: &str) -> Result<&'static Profile, R
     Ok(profile)
 }
 
-fn validate_registry(targets: &[Profile], hosts: &[Profile]) -> ValidationResult {
+fn validate_registry(
+    targets: &[Profile],
+    hosts: &[Profile],
+) -> ValidationResult {
     if targets.is_empty() || hosts.is_empty() {
         return Err(ValidationError::new(
             "the built-in registry requires target and host profiles",
@@ -214,8 +225,14 @@ fn profile(
         sysroot_pack: sysroot_pack.map(str::to_owned),
         sdk_provider: sdk_provider.map(str::to_owned),
         tool_kinds: tool_kinds.iter().copied().collect(),
-        include_roots: include_roots.iter().map(|value| (*value).into()).collect(),
-        library_roots: library_roots.iter().map(|value| (*value).into()).collect(),
+        include_roots: include_roots
+            .iter()
+            .map(|value| (*value).into())
+            .collect(),
+        library_roots: library_roots
+            .iter()
+            .map(|value| (*value).into())
+            .collect(),
         framework_roots: framework_roots
             .iter()
             .map(|value| (*value).into())
@@ -226,7 +243,9 @@ fn profile(
 
 fn forbidden_roots(os: &str) -> Vec<String> {
     match os {
-        "windows" => vec![r"C:\Program Files".into(), r"C:\Program Files (x86)".into()],
+        "windows" => {
+            vec![r"C:\Program Files".into(), r"C:\Program Files (x86)".into()]
+        }
         "macos" => vec![
             "/usr/include".into(),
             "/usr/lib".into(),
@@ -324,8 +343,16 @@ fn make_target_profiles() -> Vec<Profile> {
             "4.1",
         ),
         windows_gnu("windows-x86_64-gnu", ProfileKind::Target),
-        windows_gnullvm("windows-x86_64-gnullvm", ProfileKind::Target, "x86_64"),
-        windows_gnullvm("windows-aarch64-gnullvm", ProfileKind::Target, "aarch64"),
+        windows_gnullvm(
+            "windows-x86_64-gnullvm",
+            ProfileKind::Target,
+            "x86_64",
+        ),
+        windows_gnullvm(
+            "windows-aarch64-gnullvm",
+            ProfileKind::Target,
+            "aarch64",
+        ),
         macos("macos-x86_64", ProfileKind::Target, "x86_64", "10.12"),
         macos("macos-aarch64", ProfileKind::Target, "aarch64", "11.0"),
         windows_msvc("windows-x86_64-msvc", ProfileKind::Target, "x86_64"),
@@ -348,7 +375,11 @@ fn make_host_profiles() -> Vec<Profile> {
             "4.1",
         ),
         windows_gnu("host-windows-x86_64-gnu", ProfileKind::Host),
-        windows_gnullvm("host-windows-x86_64-gnullvm", ProfileKind::Host, "x86_64"),
+        windows_gnullvm(
+            "host-windows-x86_64-gnullvm",
+            ProfileKind::Host,
+            "x86_64",
+        ),
         windows_msvc("host-windows-x86_64-msvc", ProfileKind::Host, "x86_64"),
         windows_msvc("host-windows-aarch64-msvc", ProfileKind::Host, "aarch64"),
         macos("host-macos-aarch64", ProfileKind::Host, "aarch64", "11.0"),
@@ -356,7 +387,12 @@ fn make_host_profiles() -> Vec<Profile> {
     ]
 }
 
-fn linux_musl(id: &str, kind: ProfileKind, arch: &str, minimum_os: &str) -> Profile {
+fn linux_musl(
+    id: &str,
+    kind: ProfileKind,
+    arch: &str,
+    minimum_os: &str,
+) -> Profile {
     let triple = format!("{arch}-unknown-linux-musl");
     let loader = format!("/lib/ld-musl-{arch}.so.1");
     profile(
@@ -393,12 +429,19 @@ fn linux_musl(id: &str, kind: ProfileKind, arch: &str, minimum_os: &str) -> Prof
     )
 }
 
-fn linux_glibc(id: &str, kind: ProfileKind, arch: &str, minimum_os: &str) -> Profile {
+fn linux_glibc(
+    id: &str,
+    kind: ProfileKind,
+    arch: &str,
+    minimum_os: &str,
+) -> Profile {
     let triple = format!("{arch}-unknown-linux-gnu");
     let loader = match arch {
         "x86_64" => "/lib64/ld-linux-x86-64.so.2",
         "aarch64" => "/lib/ld-linux-aarch64.so.1",
-        _ => unreachable!("registry only declares supported Linux architectures"),
+        _ => {
+            unreachable!("registry only declares supported Linux architectures")
+        }
     };
     profile(
         id,

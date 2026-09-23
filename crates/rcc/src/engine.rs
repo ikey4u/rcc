@@ -1,10 +1,11 @@
 #[cfg(rcc_static_llvm)]
+use std::ffi::CString;
+use std::ffi::{OsStr, OsString};
+
+#[cfg(rcc_static_llvm)]
 use anyhow::Context;
 use anyhow::{bail, Result};
 use rcc_core::ToolKind;
-#[cfg(rcc_static_llvm)]
-use std::ffi::CString;
-use std::ffi::{OsStr, OsString};
 
 pub const BUILD_ID: &str = env!("RCC_ENGINE_BUILD_ID");
 
@@ -15,11 +16,19 @@ pub fn is_available() -> bool {
 pub fn supports(kind: ToolKind) -> bool {
     matches!(
         kind,
-        ToolKind::Cc | ToolKind::Cxx | ToolKind::Linker | ToolKind::Ar | ToolKind::Ranlib
+        ToolKind::Cc
+            | ToolKind::Cxx
+            | ToolKind::Linker
+            | ToolKind::Ar
+            | ToolKind::Ranlib
     )
 }
 
-pub fn run(kind: ToolKind, argv0: &OsStr, arguments: &[OsString]) -> Result<i32> {
+pub fn run(
+    kind: ToolKind,
+    argv0: &OsStr,
+    arguments: &[OsString],
+) -> Result<i32> {
     if !supports(kind) {
         bail!("the statically integrated engine does not provide tool kind {kind}");
     }
@@ -38,16 +47,22 @@ pub fn run(kind: ToolKind, argv0: &OsStr, arguments: &[OsString]) -> Result<i32>
 }
 
 #[cfg(rcc_static_llvm)]
-fn run_static(kind: ToolKind, argv0: &OsStr, arguments: &[OsString]) -> Result<i32> {
+fn run_static(
+    kind: ToolKind,
+    argv0: &OsStr,
+    arguments: &[OsString],
+) -> Result<i32> {
     let mut storage = Vec::with_capacity(arguments.len() + 1);
-    storage.push(os_string_to_c_string(argv0).context("invalid multicall argv[0]")?);
+    storage.push(
+        os_string_to_c_string(argv0).context("invalid multicall argv[0]")?,
+    );
     for (index, argument) in arguments.iter().enumerate() {
-        storage.push(
-            os_string_to_c_string(argument)
-                .with_context(|| format!("tool argument {index} contains an interior NUL byte"))?,
-        );
+        storage.push(os_string_to_c_string(argument).with_context(|| {
+            format!("tool argument {index} contains an interior NUL byte")
+        })?);
     }
-    let argc = i32::try_from(storage.len()).context("too many native tool arguments")?;
+    let argc = i32::try_from(storage.len())
+        .context("too many native tool arguments")?;
     let mut mutable_argv = storage
         .iter()
         .map(|argument| argument.as_ptr().cast_mut())
@@ -57,12 +72,16 @@ fn run_static(kind: ToolKind, argv0: &OsStr, arguments: &[OsString]) -> Result<i
 
     let code = unsafe {
         match kind {
-            ToolKind::Cc | ToolKind::Cxx => rcc_clang_main(argc, mutable_argv.as_mut_ptr()),
+            ToolKind::Cc | ToolKind::Cxx => {
+                rcc_clang_main(argc, mutable_argv.as_mut_ptr())
+            }
             ToolKind::Linker => rcc_lld_main(
                 argc,
                 mutable_argv.as_ptr().cast::<*const std::ffi::c_char>(),
             ),
-            ToolKind::Ar | ToolKind::Ranlib => rcc_llvm_ar_main(argc, mutable_argv.as_mut_ptr()),
+            ToolKind::Ar | ToolKind::Ranlib => {
+                rcc_llvm_ar_main(argc, mutable_argv.as_mut_ptr())
+            }
             _ => unreachable!("unsupported tool kind was rejected above"),
         }
     };
@@ -85,9 +104,9 @@ fn os_string_to_c_string(value: &OsStr) -> Result<CString> {
 
 #[cfg(all(rcc_static_llvm, not(any(unix, windows))))]
 fn os_string_to_c_string(value: &OsStr) -> Result<CString> {
-    let value = value
-        .to_str()
-        .context("native tool arguments must be valid UTF-8 on this platform")?;
+    let value = value.to_str().context(
+        "native tool arguments must be valid UTF-8 on this platform",
+    )?;
     Ok(CString::new(value)?)
 }
 

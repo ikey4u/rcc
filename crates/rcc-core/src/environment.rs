@@ -1,10 +1,15 @@
-use crate::schema::{
-    launcher_name, DriverKind, ProfileKind, ToolKind, ViewManifest, SCHEMA_VERSION,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt::{self, Write as _},
 };
+
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt::{self, Write as _};
+
+use crate::schema::{
+    launcher_name, DriverKind, ProfileKind, ToolKind, ViewManifest,
+    SCHEMA_VERSION,
+};
 
 pub const ENVIRONMENT_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
@@ -71,9 +76,13 @@ impl EnvironmentContext {
         self.tools.get(&kind)
     }
 
-    fn from_view(role: EnvironmentRole, view: &ViewManifest) -> Result<Self, EnvironmentError> {
-        view.validate()
-            .map_err(|error| EnvironmentError::new(format!("invalid view manifest: {error}")))?;
+    fn from_view(
+        role: EnvironmentRole,
+        view: &ViewManifest,
+    ) -> Result<Self, EnvironmentError> {
+        view.validate().map_err(|error| {
+            EnvironmentError::new(format!("invalid view manifest: {error}"))
+        })?;
         let expected_kind = match role {
             EnvironmentRole::Host => ProfileKind::Host,
             EnvironmentRole::Target => ProfileKind::Target,
@@ -94,7 +103,11 @@ impl EnvironmentContext {
                         implementation_path: tool.path.clone(),
                         implementation_sha256: tool.sha256.clone(),
                         driver_kind: tool.driver_kind,
-                        injected_args: view.injected_args.get(kind).cloned().unwrap_or_default(),
+                        injected_args: view
+                            .injected_args
+                            .get(kind)
+                            .cloned()
+                            .unwrap_or_default(),
                     },
                 )
             })
@@ -136,8 +149,14 @@ impl EnvironmentContext {
             validate_text(field, value)?;
         }
         validate_absolute_environment_path("environment root", &self.root)?;
-        validate_absolute_environment_path("environment sysroot", &self.sysroot)?;
-        validate_absolute_environment_path("environment resource_dir", &self.resource_dir)?;
+        validate_absolute_environment_path(
+            "environment sysroot",
+            &self.sysroot,
+        )?;
+        validate_absolute_environment_path(
+            "environment resource_dir",
+            &self.resource_dir,
+        )?;
         let mut controller_sha256 = None;
         for (kind, tool) in &self.tools {
             validate_absolute_environment_path("tool path", &tool.path)?;
@@ -145,7 +164,8 @@ impl EnvironmentContext {
                 "tool implementation path",
                 &tool.implementation_path,
             )?;
-            let expected_launchers = launcher_paths_from_context(&self.root, *kind);
+            let expected_launchers =
+                launcher_paths_from_context(&self.root, *kind);
             if !expected_launchers.contains(&tool.path) {
                 return Err(EnvironmentError::new(format!(
                     "{kind} launcher path does not match immutable view layout"
@@ -156,7 +176,10 @@ impl EnvironmentContext {
                     "{kind} implementation path is not its static multicall alias"
                 )));
             }
-            validate_digest("tool implementation sha256", &tool.implementation_sha256)?;
+            validate_digest(
+                "tool implementation sha256",
+                &tool.implementation_sha256,
+            )?;
             if let Some(expected) = controller_sha256 {
                 if tool.implementation_sha256 != expected {
                     return Err(EnvironmentError::new(
@@ -171,7 +194,10 @@ impl EnvironmentContext {
             }
         }
         for path in &self.pkg_config_libdirs {
-            validate_absolute_environment_path("pkg-config library directory", path)?;
+            validate_absolute_environment_path(
+                "pkg-config library directory",
+                path,
+            )?;
         }
         for name in &self.forbidden_env {
             validate_environment_name(name)?;
@@ -216,25 +242,37 @@ impl EnvironmentManifest {
         Self::build(Some(host), target)
     }
 
-    fn build(host: Option<&ViewManifest>, target: &ViewManifest) -> Result<Self, EnvironmentError> {
-        let target = EnvironmentContext::from_view(EnvironmentRole::Target, target)?;
+    fn build(
+        host: Option<&ViewManifest>,
+        target: &ViewManifest,
+    ) -> Result<Self, EnvironmentError> {
+        let target =
+            EnvironmentContext::from_view(EnvironmentRole::Target, target)?;
         let host = host
-            .map(|view| EnvironmentContext::from_view(EnvironmentRole::Host, view))
+            .map(|view| {
+                EnvironmentContext::from_view(EnvironmentRole::Host, view)
+            })
             .transpose()?;
         let variables = build_variables(host.as_ref(), &target)?;
         let manifest = Self {
             schema_version: ENVIRONMENT_SCHEMA_VERSION,
             toolchain_identity: target.toolchain_identity.clone(),
             profile_id: target.profile_id.clone(),
-            runtime_contract_id: host.is_none().then(|| target.runtime_contract_id.clone()),
+            runtime_contract_id: host
+                .is_none()
+                .then(|| target.runtime_contract_id.clone()),
             host_toolchain_identity: host
                 .as_ref()
                 .map(|context| context.toolchain_identity.clone()),
-            host_profile_id: host.as_ref().map(|context| context.profile_id.clone()),
+            host_profile_id: host
+                .as_ref()
+                .map(|context| context.profile_id.clone()),
             host_runtime_contract_id: host
                 .as_ref()
                 .map(|context| context.runtime_contract_id.clone()),
-            target_runtime_contract_id: host.as_ref().map(|_| target.runtime_contract_id.clone()),
+            target_runtime_contract_id: host
+                .as_ref()
+                .map(|_| target.runtime_contract_id.clone()),
             target,
             host,
             variables,
@@ -271,8 +309,10 @@ impl EnvironmentManifest {
                         "host context must have the host role",
                     ));
                 }
-                if self.host_toolchain_identity.as_deref() != Some(host.toolchain_identity.as_str())
-                    || self.host_profile_id.as_deref() != Some(host.profile_id.as_str())
+                if self.host_toolchain_identity.as_deref()
+                    != Some(host.toolchain_identity.as_str())
+                    || self.host_profile_id.as_deref()
+                        != Some(host.profile_id.as_str())
                     || self.host_runtime_contract_id.as_deref()
                         != Some(host.runtime_contract_id.as_str())
                     || self.target_runtime_contract_id.as_deref()
@@ -298,7 +338,8 @@ impl EnvironmentManifest {
                 }
             }
         }
-        let expected_variables = build_variables(self.host.as_ref(), &self.target)?;
+        let expected_variables =
+            build_variables(self.host.as_ref(), &self.target)?;
         if self.variables != expected_variables {
             return Err(EnvironmentError::new(
                 "environment aliases do not match the declared contexts",
@@ -307,7 +348,10 @@ impl EnvironmentManifest {
         Ok(())
     }
 
-    pub fn render(&self, format: EnvironmentFormat) -> Result<String, EnvironmentError> {
+    pub fn render(
+        &self,
+        format: EnvironmentFormat,
+    ) -> Result<String, EnvironmentError> {
         match format {
             EnvironmentFormat::Json => self.render_json(),
             EnvironmentFormat::Sh => self.render_sh(),
@@ -319,8 +363,10 @@ impl EnvironmentManifest {
 
     pub fn render_json(&self) -> Result<String, EnvironmentError> {
         self.validate()?;
-        let mut output = serde_json::to_string_pretty(self)
-            .map_err(|error| EnvironmentError::new(format!("JSON rendering failed: {error}")))?;
+        let mut output =
+            serde_json::to_string_pretty(self).map_err(|error| {
+                EnvironmentError::new(format!("JSON rendering failed: {error}"))
+            })?;
         output.push('\n');
         Ok(output)
     }
@@ -337,7 +383,8 @@ impl EnvironmentManifest {
         }
         for (name, value) in &self.variables {
             if is_posix_shell_name(name) {
-                writeln!(output, "export {name}={}", quote_sh(value)).expect("writing to String");
+                writeln!(output, "export {name}={}", quote_sh(value))
+                    .expect("writing to String");
             }
         }
         if let Some(cross_bin) = self.variables.get("RCC_TARGET_CROSS_BIN") {
@@ -384,9 +431,9 @@ impl EnvironmentManifest {
             .iter()
             .map(String::as_str)
             .chain(
-                self.host
-                    .iter()
-                    .flat_map(|host| host.forbidden_env.iter().map(String::as_str)),
+                self.host.iter().flat_map(|host| {
+                    host.forbidden_env.iter().map(String::as_str)
+                }),
             )
             .collect()
     }
@@ -427,7 +474,9 @@ impl EnvironmentManifest {
     }
 
     /// CMake toolchain file bound to a single materialized view.
-    pub fn render_view_cmake(view: &ViewManifest) -> Result<String, EnvironmentError> {
+    pub fn render_view_cmake(
+        view: &ViewManifest,
+    ) -> Result<String, EnvironmentError> {
         let role = match view.profile.kind {
             ProfileKind::Host => EnvironmentRole::Host,
             ProfileKind::Target => EnvironmentRole::Target,
@@ -613,7 +662,9 @@ fn insert_context_variables(
             variables,
             format!("RCC_{role_name}_{tool_name}_INJECTED_ARGS_JSON"),
             serde_json::to_string(&tool.injected_args).map_err(|error| {
-                EnvironmentError::new(format!("tool argument JSON encoding failed: {error}"))
+                EnvironmentError::new(format!(
+                    "tool argument JSON encoding failed: {error}"
+                ))
             })?,
         )?;
     }
@@ -665,7 +716,10 @@ fn insert_context_variables(
             "CROSS_COMPILE".into(),
             format!(
                 "{}-",
-                crate::cross_bin::primary_gnu_prefix(&context.target_triple, &context.clang_target)
+                crate::cross_bin::primary_gnu_prefix(
+                    &context.target_triple,
+                    &context.clang_target
+                )
             ),
         )?;
     }
@@ -695,9 +749,11 @@ fn insert_context_variables(
         context.sysroot.clone(),
     )?;
     if !context.pkg_config_libdirs.is_empty() {
-        let joined = context
-            .pkg_config_libdirs
-            .join(if cfg!(windows) { ";" } else { ":" });
+        let joined = context.pkg_config_libdirs.join(if cfg!(windows) {
+            ";"
+        } else {
+            ":"
+        });
         insert_variable(
             variables,
             format!("PKG_CONFIG_LIBDIR_{hyphenated}"),
@@ -777,7 +833,9 @@ fn launcher_paths_from_context(root: &str, kind: ToolKind) -> Vec<String> {
     };
     basenames
         .iter()
-        .map(|basename| join_path(root, &format!("launchers/{basename}{executable_suffix}")))
+        .map(|basename| {
+            join_path(root, &format!("launchers/{basename}{executable_suffix}"))
+        })
         .collect()
 }
 
@@ -830,7 +888,10 @@ fn validate_text(field: &str, value: &str) -> Result<(), EnvironmentError> {
     Ok(())
 }
 
-fn validate_absolute_environment_path(field: &str, value: &str) -> Result<(), EnvironmentError> {
+fn validate_absolute_environment_path(
+    field: &str,
+    value: &str,
+) -> Result<(), EnvironmentError> {
     validate_text(field, value)?;
     if !is_absolute_path(value) {
         return Err(EnvironmentError::new(format!(
@@ -881,8 +942,9 @@ fn quote_pwsh(value: &str) -> String {
 }
 
 fn quote_toml(value: &str) -> Result<String, EnvironmentError> {
-    serde_json::to_string(value)
-        .map_err(|error| EnvironmentError::new(format!("TOML quoting failed: {error}")))
+    serde_json::to_string(value).map_err(|error| {
+        EnvironmentError::new(format!("TOML quoting failed: {error}"))
+    })
 }
 
 fn quote_cmake(value: &str) -> String {
@@ -895,7 +957,8 @@ fn quote_cmake(value: &str) -> String {
 }
 
 fn write_cmake_set(output: &mut String, name: &str, value: &str) {
-    writeln!(output, "set({name} {})", quote_cmake(value)).expect("writing to String");
+    writeln!(output, "set({name} {})", quote_cmake(value))
+        .expect("writing to String");
 }
 
 fn write_cmake_force_empty(output: &mut String, name: &str) {
@@ -914,7 +977,11 @@ fn write_cmake_list(output: &mut String, name: &str, values: &[String]) {
     output.push_str(")\n");
 }
 
-fn write_cmake_context(output: &mut String, role: &str, context: &EnvironmentContext) {
+fn write_cmake_context(
+    output: &mut String,
+    role: &str,
+    context: &EnvironmentContext,
+) {
     for (suffix, value) in [
         ("TOOLCHAIN_IDENTITY", context.toolchain_identity.as_str()),
         ("PROFILE", context.profile_id.as_str()),
@@ -951,8 +1018,13 @@ fn write_cmake_context(output: &mut String, role: &str, context: &EnvironmentCon
         );
     }
     if !context.forbidden_env.is_empty() {
-        let forbidden: Vec<String> = context.forbidden_env.iter().cloned().collect();
-        write_cmake_list(output, &format!("RCC_{role}_FORBIDDEN_ENV"), &forbidden);
+        let forbidden: Vec<String> =
+            context.forbidden_env.iter().cloned().collect();
+        write_cmake_list(
+            output,
+            &format!("RCC_{role}_FORBIDDEN_ENV"),
+            &forbidden,
+        );
     }
 }
 
@@ -963,8 +1035,13 @@ fn tool_kind_env_name(kind: ToolKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry;
-    use crate::schema::{DriverKind, RuntimeContract, RuntimeOwnership, ViewTool, SCHEMA_VERSION};
+    use crate::{
+        registry,
+        schema::{
+            DriverKind, RuntimeContract, RuntimeOwnership, ViewTool,
+            SCHEMA_VERSION,
+        },
+    };
 
     fn digest(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
@@ -978,7 +1055,12 @@ mod tests {
         }
     }
 
-    fn view(profile_id: &str, contract_id: &str, root_name: &str, hash: char) -> ViewManifest {
+    fn view(
+        profile_id: &str,
+        contract_id: &str,
+        root_name: &str,
+        hash: char,
+    ) -> ViewManifest {
         let profile = registry::find_profile(profile_id).unwrap().clone();
         let root = absolute_root(root_name);
         let tools = profile
@@ -989,7 +1071,8 @@ mod tests {
                 let driver_kind = match kind {
                     ToolKind::Cc | ToolKind::Cxx => Some(profile.driver_kind),
                     ToolKind::Linker
-                        if profile.linker_flavor == crate::schema::LinkerFlavor::CoffMsvc =>
+                        if profile.linker_flavor
+                            == crate::schema::LinkerFlavor::CoffMsvc =>
                     {
                         Some(DriverKind::LldLink)
                     }
@@ -1000,7 +1083,10 @@ mod tests {
                     ViewTool {
                         path: join_path(
                             &root,
-                            &format!("launchers/{}", launcher_name(&profile, kind)),
+                            &format!(
+                                "launchers/{}",
+                                launcher_name(&profile, kind)
+                            ),
                         ),
                         sha256: digest(hash),
                         driver_kind,
@@ -1028,7 +1114,10 @@ mod tests {
             controller_sha256: digest(hash),
             engine_build_id: "llvm-test-engine".into(),
             pack_sha256: digest('f'),
-            external_sysroot_identity: profile.sdk_provider.as_ref().map(|_| digest('d')),
+            external_sysroot_identity: profile
+                .sdk_provider
+                .as_ref()
+                .map(|_| digest('d')),
             runtime_contract: RuntimeContract {
                 schema_version: SCHEMA_VERSION,
                 contract_id: contract_id.into(),
@@ -1116,14 +1205,16 @@ mod tests {
 
     #[test]
     fn host_and_target_contexts_keep_independent_contracts() {
-        let host = view("host-macos-aarch64", "rust-host-contract-1", "host", '2');
+        let host =
+            view("host-macos-aarch64", "rust-host-contract-1", "host", '2');
         let target = view(
             "linux-aarch64-gnu-glibc217",
             "rust-target-contract-1",
             "target",
             '3',
         );
-        let manifest = EnvironmentManifest::for_host_target(&host, &target).unwrap();
+        let manifest =
+            EnvironmentManifest::for_host_target(&host, &target).unwrap();
         assert_eq!(
             manifest.host_runtime_contract_id.as_deref(),
             Some("rust-host-contract-1")
@@ -1147,7 +1238,9 @@ mod tests {
         );
         let cmake = manifest.render_cmake().unwrap();
         assert!(cmake.contains("set(RCC_HOST_CC \"/rcc/host/launchers/cc\")"));
-        assert!(cmake.contains("set(RCC_TARGET_CC \"/rcc/target/launchers/cc\")"));
+        assert!(
+            cmake.contains("set(RCC_TARGET_CC \"/rcc/target/launchers/cc\")")
+        );
     }
 
     #[test]
@@ -1160,10 +1253,12 @@ mod tests {
         );
         let manifest = EnvironmentManifest::for_target(&target).unwrap();
         let rendered = manifest.render_json().unwrap();
-        let decoded: EnvironmentManifest = serde_json::from_str(&rendered).unwrap();
+        let decoded: EnvironmentManifest =
+            serde_json::from_str(&rendered).unwrap();
         assert_eq!(decoded, manifest);
         assert!(rendered.contains("\"injected_args\": ["));
-        let object = serde_json::from_str::<serde_json::Value>(&rendered).unwrap();
+        let object =
+            serde_json::from_str::<serde_json::Value>(&rendered).unwrap();
         let object = object.as_object().unwrap();
         assert_eq!(
             object["runtime_contract_id"],
@@ -1206,21 +1301,24 @@ mod tests {
         assert!(sh.contains("export CROSS_COMPILE='aarch64-linux-gnu-'"));
         let pwsh = manifest.render_pwsh().unwrap();
         assert!(pwsh.contains("'CC_aarch64-unknown-linux-gnu'"));
-        assert!(pwsh.contains(&quote_pwsh(&join_path(&target.root, "launchers/cc"))));
+        assert!(pwsh
+            .contains(&quote_pwsh(&join_path(&target.root, "launchers/cc"))));
         assert!(pwsh.contains("EnvironmentVariableTarget]::Process"));
         assert!(pwsh.contains("'Env:CPATH'"));
     }
 
     #[test]
     fn cargo_renderer_contains_both_linkers_and_quoted_aliases() {
-        let host = view("host-macos-aarch64", "rust-host-contract-1", "host", '6');
+        let host =
+            view("host-macos-aarch64", "rust-host-contract-1", "host", '6');
         let target = view(
             "windows-x86_64-gnu",
             "rust-target-contract-1",
             "target",
             '7',
         );
-        let manifest = EnvironmentManifest::for_host_target(&host, &target).unwrap();
+        let manifest =
+            EnvironmentManifest::for_host_target(&host, &target).unwrap();
         let cargo = manifest.render_cargo().unwrap();
         assert!(cargo.contains("[target.\"aarch64-apple-darwin\"]"));
         assert!(cargo.contains("[target.\"x86_64-pc-windows-gnu\"]"));
@@ -1230,12 +1328,16 @@ mod tests {
 
     #[test]
     fn cmake_renderer_uses_bound_tools_and_find_root_policy() {
-        let target = view("windows-x86_64-gnu", "native-rcc-owned", "target", '8');
+        let target =
+            view("windows-x86_64-gnu", "native-rcc-owned", "target", '8');
         let manifest = EnvironmentManifest::for_target(&target).unwrap();
         let cmake = manifest.render_cmake().unwrap();
         assert!(cmake.contains("set(CMAKE_SYSTEM_NAME \"Windows\")"));
-        assert!(cmake.contains("set(CMAKE_C_COMPILER \"/rcc/target/launchers/cc\")"));
-        assert!(cmake.contains("set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY \"ONLY\")"));
+        assert!(cmake
+            .contains("set(CMAKE_C_COMPILER \"/rcc/target/launchers/cc\")"));
+        assert!(
+            cmake.contains("set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY \"ONLY\")")
+        );
         assert!(
             cmake.contains("set(RCC_TARGET_CC_INJECTED_ARGS \"--target=x86_64-w64-windows-gnu\")")
         );
@@ -1248,7 +1350,9 @@ mod tests {
         let manifest = EnvironmentManifest::for_target(&target).unwrap();
         let cmake = manifest.render_cmake().unwrap();
         assert!(cmake.contains("set(CMAKE_SYSTEM_NAME \"Darwin\")"));
-        assert!(cmake.contains("set(RCC_TARGET_SYSROOT \"/rcc/target/sysroot\")"));
+        assert!(
+            cmake.contains("set(RCC_TARGET_SYSROOT \"/rcc/target/sysroot\")")
+        );
         assert_forces_empty_osx_cmake_vars(&cmake);
         assert!(!cmake.contains("CMAKE_C_COMPILER_TARGET"));
         assert_eq!(
@@ -1286,7 +1390,8 @@ mod tests {
             "target",
             'a',
         );
-        let error = EnvironmentManifest::for_host_target(&host, &target).unwrap_err();
+        let error =
+            EnvironmentManifest::for_host_target(&host, &target).unwrap_err();
         assert!(error.to_string().contains("assign different values"));
     }
 

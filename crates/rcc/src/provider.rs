@@ -1,16 +1,22 @@
-use crate::home;
-use anyhow::{bail, ensure, Context, Result};
-use rcc_core::layout::ExternalSysroot;
-use rcc_core::registry::{APPLE_DEVELOPER_PROVIDER, WINDOWS_MSVC_PROVIDER};
-use rcc_core::Profile;
-use sha2::{Digest, Sha256};
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, Metadata};
-use std::io::Read;
-use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    fs::{self, File, Metadata},
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{bail, ensure, Context, Result};
+use rcc_core::{
+    layout::ExternalSysroot,
+    registry::{APPLE_DEVELOPER_PROVIDER, WINDOWS_MSVC_PROVIDER},
+    Profile,
+};
+use sha2::{Digest, Sha256};
+
+use crate::home;
 
 const MAX_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 65_536;
@@ -60,10 +66,13 @@ pub fn resolve_external_sysroot(
     if reject_candidate_symlink {
         reject_symlink_leaf(&candidate, "SDK root")?;
     }
-    let canonical = fs::canonicalize(&candidate)
-        .with_context(|| format!("failed to resolve SDK root {}", candidate.display()))?;
-    let root_metadata = fs::symlink_metadata(&canonical)
-        .with_context(|| format!("failed to inspect SDK root {}", canonical.display()))?;
+    let canonical = fs::canonicalize(&candidate).with_context(|| {
+        format!("failed to resolve SDK root {}", candidate.display())
+    })?;
+    let root_metadata =
+        fs::symlink_metadata(&canonical).with_context(|| {
+            format!("failed to inspect SDK root {}", canonical.display())
+        })?;
     ensure!(
         !root_metadata.file_type().is_symlink(),
         "SDK root {} has a symbolic-link leaf",
@@ -77,7 +86,9 @@ pub fn resolve_external_sysroot(
 
     let identity = match provider {
         APPLE_DEVELOPER_PROVIDER => fingerprint_apple_sdk(&canonical)?,
-        WINDOWS_MSVC_PROVIDER => fingerprint_windows_sdk(&canonical, &profile.arch)?,
+        WINDOWS_MSVC_PROVIDER => {
+            fingerprint_windows_sdk(&canonical, &profile.arch)?
+        }
         _ => unreachable!("provider was checked above"),
     };
     let msvc_toolset = if provider == WINDOWS_MSVC_PROVIDER {
@@ -99,15 +110,20 @@ pub fn resolve_external_sysroot(
     }))
 }
 
-fn discover_apple_sdk_candidate(home: &Path) -> Result<Option<(PathBuf, bool)>> {
-    if let Some(path) =
-        explicit_sdk_from_env(home::APPLE_SDK_ROOT_ENV, &looks_like_apple_sdk, "Apple")?
-    {
+fn discover_apple_sdk_candidate(
+    home: &Path,
+) -> Result<Option<(PathBuf, bool)>> {
+    if let Some(path) = explicit_sdk_from_env(
+        home::APPLE_SDK_ROOT_ENV,
+        &looks_like_apple_sdk,
+        "Apple",
+    )? {
         return Ok(Some((path, true)));
     }
     let vendor = home::vendor_dir(home, "macos");
     if vendor.exists() {
-        return Ok(discover_vendor_sdk(&vendor, &looks_like_apple_sdk)?.map(|path| (path, true)));
+        return Ok(discover_vendor_sdk(&vendor, &looks_like_apple_sdk)?
+            .map(|path| (path, true)));
     }
     #[cfg(target_os = "macos")]
     {
@@ -120,12 +136,21 @@ fn discover_apple_sdk_candidate(home: &Path) -> Result<Option<(PathBuf, bool)>> 
     }
 }
 
-fn discover_windows_sdk_candidate(home: &Path, arch: &str) -> Result<Option<PathBuf>> {
+fn discover_windows_sdk_candidate(
+    home: &Path,
+    arch: &str,
+) -> Result<Option<PathBuf>> {
     let looks_like = |path: &Path| looks_like_windows_sdk(path, arch);
-    if let Some(path) = explicit_sdk_from_env(home::WINDOWS_SDK_ROOT_ENV, &looks_like, "Windows")? {
+    if let Some(path) = explicit_sdk_from_env(
+        home::WINDOWS_SDK_ROOT_ENV,
+        &looks_like,
+        "Windows",
+    )? {
         return Ok(Some(path));
     }
-    if let Some(path) = discover_vendor_sdk(&home::vendor_dir(home, "windows"), &looks_like)? {
+    if let Some(path) =
+        discover_vendor_sdk(&home::vendor_dir(home, "windows"), &looks_like)?
+    {
         return Ok(Some(path));
     }
     #[cfg(windows)]
@@ -151,14 +176,21 @@ fn resolve_msvc_toolset(home: &Path, arch: &str) -> Result<PathBuf> {
     }
 }
 
-fn discover_msvc_toolset_candidate(home: &Path, arch: &str) -> Result<Option<PathBuf>> {
+fn discover_msvc_toolset_candidate(
+    home: &Path,
+    arch: &str,
+) -> Result<Option<PathBuf>> {
     let looks_like = |path: &Path| looks_like_msvc_toolset(path, arch);
-    if let Some(path) =
-        explicit_sdk_from_env(home::MSVC_TOOLS_ROOT_ENV, &looks_like, "MSVC toolset")?
-    {
+    if let Some(path) = explicit_sdk_from_env(
+        home::MSVC_TOOLS_ROOT_ENV,
+        &looks_like,
+        "MSVC toolset",
+    )? {
         return Ok(Some(path));
     }
-    if let Some(path) = discover_vendor_sdk(&home::vendor_dir(home, "msvc"), &looks_like)? {
+    if let Some(path) =
+        discover_vendor_sdk(&home::vendor_dir(home, "msvc"), &looks_like)?
+    {
         return Ok(Some(path));
     }
     #[cfg(windows)]
@@ -174,10 +206,12 @@ fn discover_msvc_toolset_candidate(home: &Path, arch: &str) -> Result<Option<Pat
 
 fn canonicalize_external_root(path: PathBuf, label: &str) -> Result<PathBuf> {
     reject_symlink_leaf(&path, label)?;
-    let canonical = fs::canonicalize(&path)
-        .with_context(|| format!("failed to resolve {label} {}", path.display()))?;
-    let metadata = fs::symlink_metadata(&canonical)
-        .with_context(|| format!("failed to inspect {label} {}", canonical.display()))?;
+    let canonical = fs::canonicalize(&path).with_context(|| {
+        format!("failed to resolve {label} {}", path.display())
+    })?;
+    let metadata = fs::symlink_metadata(&canonical).with_context(|| {
+        format!("failed to inspect {label} {}", canonical.display())
+    })?;
     ensure!(
         !metadata.file_type().is_symlink(),
         "{label} {} has a symbolic-link leaf",
@@ -240,10 +274,15 @@ fn discover_vendor_sdk(
     looks_like: &dyn Fn(&Path) -> bool,
 ) -> Result<Option<PathBuf>> {
     match fs::symlink_metadata(vendor) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None)
+        }
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("failed to inspect vendor directory {}", vendor.display())
+                format!(
+                    "failed to inspect vendor directory {}",
+                    vendor.display()
+                )
             });
         }
         Ok(metadata) => {
@@ -265,9 +304,9 @@ fn discover_vendor_sdk(
 
     let mut matches = Vec::new();
     let mut inspected = 0_usize;
-    for entry in fs::read_dir(vendor)
-        .with_context(|| format!("failed to read vendor directory {}", vendor.display()))?
-    {
+    for entry in fs::read_dir(vendor).with_context(|| {
+        format!("failed to read vendor directory {}", vendor.display())
+    })? {
         let entry = entry.with_context(|| {
             format!("failed to enumerate vendor directory {}", vendor.display())
         })?;
@@ -278,8 +317,9 @@ fn discover_vendor_sdk(
             vendor.display()
         );
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to inspect vendor entry {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
+            format!("failed to inspect vendor entry {}", path.display())
+        })?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             continue;
         }
@@ -300,7 +340,8 @@ fn discover_vendor_sdk(
 
 fn looks_like_apple_sdk(root: &Path) -> bool {
     is_real_directory(root)
-        && (root.join("SDKSettings.json").is_file() || root.join("SDKSettings.plist").is_file())
+        && (root.join("SDKSettings.json").is_file()
+            || root.join("SDKSettings.plist").is_file())
         && is_real_directory(&root.join("usr/include"))
         && is_real_directory(&root.join("usr/lib"))
         && is_real_directory(&root.join("System/Library/Frameworks"))
@@ -384,7 +425,8 @@ fn msvc_toolset_from_vswhere(arch: &str) -> Result<Option<PathBuf>> {
     if !output.status.success() {
         return Ok(None);
     }
-    let stdout = String::from_utf8(output.stdout).context("vswhere returned non-UTF-8 output")?;
+    let stdout = String::from_utf8(output.stdout)
+        .context("vswhere returned non-UTF-8 output")?;
     let install = stdout.lines().map(str::trim).find(|line| !line.is_empty());
     let Some(install) = install else {
         return Ok(None);
@@ -400,7 +442,9 @@ fn windows_vs_msvc_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for program_files in windows_program_files_roots() {
         for year in ["2022", "2019"] {
-            for edition in ["BuildTools", "Community", "Professional", "Enterprise"] {
+            for edition in
+                ["BuildTools", "Community", "Professional", "Enterprise"]
+            {
                 roots.push(
                     program_files
                         .join("Microsoft Visual Studio")
@@ -443,7 +487,9 @@ fn msvc_toolset_versions(msvc_root: &Path, arch: &str) -> Vec<PathBuf> {
 
 #[cfg(windows)]
 fn newest_msvc_toolset(mut candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    candidates.sort_by(|left, right| os_bytes(left.as_os_str()).cmp(&os_bytes(right.as_os_str())));
+    candidates.sort_by(|left, right| {
+        os_bytes(left.as_os_str()).cmp(&os_bytes(right.as_os_str()))
+    });
     candidates.pop()
 }
 
@@ -458,8 +504,8 @@ fn discover_apple_sdk() -> Result<PathBuf> {
         "/usr/bin/xcrun could not locate the macOS SDK: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    let stdout =
-        String::from_utf8(output.stdout).context("/usr/bin/xcrun returned a non-UTF-8 SDK path")?;
+    let stdout = String::from_utf8(output.stdout)
+        .context("/usr/bin/xcrun returned a non-UTF-8 SDK path")?;
     let path = stdout.trim();
     ensure!(
         !path.is_empty(),
@@ -477,7 +523,8 @@ fn fingerprint_apple_sdk(root: &Path) -> Result<String> {
         root.display()
     );
 
-    let critical_directories = ["usr/include", "usr/lib", "System/Library/Frameworks"];
+    let critical_directories =
+        ["usr/include", "usr/lib", "System/Library/Frameworks"];
     for relative in critical_directories {
         require_real_directory(&root.join(relative), relative)?;
     }
@@ -568,26 +615,31 @@ fn fingerprint_msvc_toolset(root: &Path, arch: &str) -> Result<String> {
     Ok(identity.finish())
 }
 
-fn compatible_windows_sdk_versions(root: &Path, arch: &str) -> Result<Vec<OsString>> {
+fn compatible_windows_sdk_versions(
+    root: &Path,
+    arch: &str,
+) -> Result<Vec<OsString>> {
     let sdk_arch = windows_sdk_lib_arch(arch)?;
     let include = root.join("Include");
     let mut versions = Vec::new();
     let mut inspected = 0_usize;
-    for entry in fs::read_dir(&include)
-        .with_context(|| format!("failed to read Windows SDK directory {}", include.display()))?
-    {
-        let entry = entry.context("failed to enumerate Windows SDK Include versions")?;
+    for entry in fs::read_dir(&include).with_context(|| {
+        format!("failed to read Windows SDK directory {}", include.display())
+    })? {
+        let entry = entry
+            .context("failed to enumerate Windows SDK Include versions")?;
         inspected += 1;
         ensure!(
             inspected <= MAX_DIRECTORY_ENTRIES,
             "Windows SDK Include contains too many version entries"
         );
-        let metadata = fs::symlink_metadata(entry.path()).with_context(|| {
-            format!(
-                "failed to inspect Windows SDK version {}",
-                entry.path().display()
-            )
-        })?;
+        let metadata =
+            fs::symlink_metadata(entry.path()).with_context(|| {
+                format!(
+                    "failed to inspect Windows SDK version {}",
+                    entry.path().display()
+                )
+            })?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             continue;
         }
@@ -609,7 +661,10 @@ fn compatible_windows_sdk_versions(root: &Path, arch: &str) -> Result<Vec<OsStri
     Ok(versions)
 }
 
-fn existing_regular_files<'a>(root: &Path, names: &'a [&'a str]) -> Result<Vec<&'a str>> {
+fn existing_regular_files<'a>(
+    root: &Path,
+    names: &'a [&'a str],
+) -> Result<Vec<&'a str>> {
     let mut existing = Vec::new();
     for name in names {
         let path = root.join(name);
@@ -641,7 +696,10 @@ fn existing_regular_files<'a>(root: &Path, names: &'a [&'a str]) -> Result<Vec<&
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!("failed to inspect SDK descriptor {}", path.display())
+                    format!(
+                        "failed to inspect SDK descriptor {}",
+                        path.display()
+                    )
                 });
             }
         }
@@ -650,12 +708,13 @@ fn existing_regular_files<'a>(root: &Path, names: &'a [&'a str]) -> Result<Vec<&
 }
 
 fn reject_symlink_leaf(path: &Path, label: &str) -> Result<()> {
-    let leaf = path
-        .file_name()
-        .with_context(|| format!("{label} {} has no path leaf", path.display()))?;
+    let leaf = path.file_name().with_context(|| {
+        format!("{label} {} has no path leaf", path.display())
+    })?;
     let leaf_path = path.parent().unwrap_or_else(|| Path::new("")).join(leaf);
-    let metadata = fs::symlink_metadata(&leaf_path)
-        .with_context(|| format!("failed to inspect {label} {}", leaf_path.display()))?;
+    let metadata = fs::symlink_metadata(&leaf_path).with_context(|| {
+        format!("failed to inspect {label} {}", leaf_path.display())
+    })?;
     ensure!(
         !metadata.file_type().is_symlink(),
         "{label} {} has a symbolic-link leaf",
@@ -665,8 +724,9 @@ fn reject_symlink_leaf(path: &Path, label: &str) -> Result<()> {
 }
 
 fn require_real_directory(path: &Path, label: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("SDK is missing required directory {label}"))?;
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!("SDK is missing required directory {label}")
+    })?;
     ensure!(
         !metadata.file_type().is_symlink(),
         "required SDK directory {label} has a symbolic-link leaf"
@@ -701,8 +761,9 @@ impl IdentityHasher {
 
     fn add_descriptor(&mut self, root: &Path, relative: &str) -> Result<()> {
         let path = root.join(relative);
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to inspect SDK descriptor {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
+            format!("failed to inspect SDK descriptor {}", path.display())
+        })?;
         self.field(b"descriptor-path", relative.as_bytes());
         self.field(b"descriptor-length", &metadata.len().to_le_bytes());
         self.field(b"descriptor-sha256", &file_sha256(&path)?);
@@ -715,19 +776,24 @@ impl IdentityHasher {
         self.field(b"directory-path", &os_bytes(relative.as_os_str()));
 
         let mut entries = Vec::new();
-        for entry in fs::read_dir(&path)
-            .with_context(|| format!("failed to read SDK directory {}", path.display()))?
-        {
-            let entry = entry
-                .with_context(|| format!("failed to enumerate SDK directory {}", path.display()))?;
+        for entry in fs::read_dir(&path).with_context(|| {
+            format!("failed to read SDK directory {}", path.display())
+        })? {
+            let entry = entry.with_context(|| {
+                format!("failed to enumerate SDK directory {}", path.display())
+            })?;
             ensure!(
                 entries.len() < MAX_DIRECTORY_ENTRIES,
                 "SDK directory {} contains too many entries",
                 path.display()
             );
-            let metadata = fs::symlink_metadata(entry.path()).with_context(|| {
-                format!("failed to inspect SDK entry {}", entry.path().display())
-            })?;
+            let metadata =
+                fs::symlink_metadata(entry.path()).with_context(|| {
+                    format!(
+                        "failed to inspect SDK entry {}",
+                        entry.path().display()
+                    )
+                })?;
             entries.push(DirectoryEntryFingerprint::new(
                 entry.path(),
                 entry.file_name(),
@@ -777,8 +843,9 @@ impl DirectoryEntryFingerprint {
         } else if file_type.is_dir() {
             (b'd', 0, None)
         } else if file_type.is_symlink() {
-            let target = fs::read_link(&path)
-                .with_context(|| format!("failed to read SDK symlink {}", path.display()))?;
+            let target = fs::read_link(&path).with_context(|| {
+                format!("failed to read SDK symlink {}", path.display())
+            })?;
             (b'l', 0, Some(os_bytes(target.as_os_str())))
         } else {
             (b'o', metadata.len(), None)
@@ -793,14 +860,15 @@ impl DirectoryEntryFingerprint {
 }
 
 fn file_sha256(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open SDK descriptor {}", path.display()))?;
+    let mut file = File::open(path).with_context(|| {
+        format!("failed to open SDK descriptor {}", path.display())
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
-        let count = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read SDK descriptor {}", path.display()))?;
+        let count = file.read(&mut buffer).with_context(|| {
+            format!("failed to read SDK descriptor {}", path.display())
+        })?;
         if count == 0 {
             break;
         }
@@ -831,11 +899,15 @@ fn os_bytes(value: &OsStr) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        env,
+        sync::{Mutex, MutexGuard},
+    };
+
     use rcc_core::registry::resolve_target_profile;
-    use std::env;
-    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
+
+    use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -879,7 +951,8 @@ mod tests {
             br#"{"Version":"14.0","CanonicalName":"macosx14.0"}"#,
         )
         .unwrap();
-        for directory in ["usr/include", "usr/lib", "System/Library/Frameworks"] {
+        for directory in ["usr/include", "usr/lib", "System/Library/Frameworks"]
+        {
             fs::create_dir_all(root.join(directory)).unwrap();
         }
         fs::write(root.join("usr/lib/libSystem.tbd"), b"stub-v1").unwrap();
@@ -947,7 +1020,8 @@ mod tests {
         let profile = resolve_target_profile("windows-aarch64-msvc").unwrap();
         let error = resolve_external_sysroot(profile, None).unwrap_err();
         assert!(
-            error.to_string().contains("arm64") || error.to_string().contains("Windows SDK"),
+            error.to_string().contains("arm64")
+                || error.to_string().contains("Windows SDK"),
             "{error}"
         );
     }
@@ -983,7 +1057,8 @@ mod tests {
         write_msvc_toolset_arch(&tools, "lib/arm64");
         let _restore = EnvRestore::set(home::HOME_ENV, home.path());
         let profile = resolve_target_profile("windows-aarch64-msvc").unwrap();
-        let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        let resolved =
+            resolve_external_sysroot(profile, None).unwrap().unwrap();
         assert!(resolved.path.ends_with("vendor/windows/sdk"));
         assert!(resolved
             .msvc_toolset
@@ -1004,7 +1079,10 @@ mod tests {
         (home, restore)
     }
 
-    fn home_with_vendor_sdk(os: &str, write_sdk: fn(&Path)) -> (TempDir, EnvRestore) {
+    fn home_with_vendor_sdk(
+        os: &str,
+        write_sdk: fn(&Path),
+    ) -> (TempDir, EnvRestore) {
         let home = tempfile::tempdir().unwrap();
         let sdk = home.path().join("vendor").join(os).join("sdk");
         fs::create_dir_all(&sdk).unwrap();
@@ -1031,7 +1109,8 @@ mod tests {
         let _restore = EnvRestore::set(home::HOME_ENV, vendor_home.path())
             .and(home::APPLE_SDK_ROOT_ENV, env_sdk.path());
         let profile = resolve_target_profile("macos-aarch64").unwrap();
-        let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        let resolved =
+            resolve_external_sysroot(profile, None).unwrap().unwrap();
         assert_eq!(resolved.path, env_sdk.path().canonicalize().unwrap());
     }
 
@@ -1046,10 +1125,13 @@ mod tests {
         assert!(first.path.ends_with("vendor/macos/sdk"));
         assert_eq!(first.identity, second.identity);
         assert_eq!(first.identity.len(), 64);
-        assert!(first
-            .identity
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(
+            first
+                .identity
+                .bytes()
+                .all(|byte| byte.is_ascii_digit()
+                    || (b'a'..=b'f').contains(&byte))
+        );
     }
 
     #[test]
@@ -1074,7 +1156,8 @@ mod tests {
         let (_home, _restore) = home_with_windows_sdk_and_toolset();
         let profile = resolve_target_profile("windows-x86_64-msvc").unwrap();
 
-        let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        let resolved =
+            resolve_external_sysroot(profile, None).unwrap().unwrap();
         assert!(resolved.path.ends_with("vendor/windows/sdk"));
         assert!(resolved
             .msvc_toolset
@@ -1087,7 +1170,8 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn windows_msvc_requires_toolset_as_well_as_sdk() {
-        let (_home, _restore) = home_with_vendor_sdk("windows", write_windows_sdk);
+        let (_home, _restore) =
+            home_with_vendor_sdk("windows", write_windows_sdk);
         let profile = resolve_target_profile("windows-x86_64-msvc").unwrap();
         let error = resolve_external_sysroot(profile, None).unwrap_err();
         assert!(error.to_string().contains("MSVC toolset"), "{error}");
@@ -1114,7 +1198,8 @@ mod tests {
         let _restore = EnvRestore::set(home::HOME_ENV, vendor_home.path())
             .and(home::MSVC_TOOLS_ROOT_ENV, env_tools.path());
         let profile = resolve_target_profile("windows-x86_64-msvc").unwrap();
-        let resolved = resolve_external_sysroot(profile, None).unwrap().unwrap();
+        let resolved =
+            resolve_external_sysroot(profile, None).unwrap().unwrap();
         assert_eq!(
             resolved.msvc_toolset.unwrap(),
             env_tools.path().canonicalize().unwrap()
@@ -1155,7 +1240,8 @@ mod tests {
 
     #[test]
     fn hermetic_profile_has_no_external_sysroot() {
-        let profile = resolve_target_profile("linux-x86_64-musl-static").unwrap();
+        let profile =
+            resolve_target_profile("linux-x86_64-musl-static").unwrap();
         assert!(resolve_external_sysroot(profile, None).unwrap().is_none());
     }
 

@@ -1,8 +1,10 @@
-use std::env;
-use std::fmt::Write as _;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    env,
+    fmt::Write as _,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -24,15 +26,19 @@ fn main() {
         "cargo:rustc-env=RCC_HOST_TRIPLE={}",
         env::var("TARGET").expect("Cargo sets TARGET")
     );
-    let manifest_directory =
-        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
+    let manifest_directory = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR")
+            .expect("Cargo sets CARGO_MANIFEST_DIR"),
+    );
     let workspace = manifest_directory
         .parent()
         .and_then(Path::parent)
         .expect("rcc crate is inside the workspace")
         .to_path_buf();
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
-    let engine_build_id = configure_static_engine(&manifest_directory, &out_dir);
+    let out_dir =
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    let engine_build_id =
+        configure_static_engine(&manifest_directory, &out_dir);
     println!("cargo:rustc-env=RCC_ENGINE_BUILD_ID={engine_build_id}");
     println!(
         "cargo:rustc-env=RCC_CONTROLLER_BUILD_SHA256={}",
@@ -44,7 +50,8 @@ fn main() {
         Some(source) => {
             let source = PathBuf::from(source);
             println!("cargo:rerun-if-changed={}", source.display());
-            fs::copy(&source, &destination).expect("copy RCC_EMBED_PACK into OUT_DIR");
+            fs::copy(&source, &destination)
+                .expect("copy RCC_EMBED_PACK into OUT_DIR");
             sha256_file(&destination)
         }
         None => {
@@ -55,7 +62,10 @@ fn main() {
     println!("cargo:rustc-env=RCC_EMBED_PACK_SHA256={embedded_pack_sha256}");
 }
 
-fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String {
+fn configure_static_engine(
+    manifest_directory: &Path,
+    out_dir: &Path,
+) -> String {
     let variables = [
         ("RCC_LLVM_BUILD_DIR", env::var_os("RCC_LLVM_BUILD_DIR")),
         ("RCC_LLVM_SOURCE_DIR", env::var_os("RCC_LLVM_SOURCE_DIR")),
@@ -96,7 +106,8 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
     };
     let build = PathBuf::from(variables[0].1.clone().expect("checked above"));
     let source = PathBuf::from(variables[1].1.clone().expect("checked above"));
-    let bootstrap = PathBuf::from(variables[2].1.clone().expect("checked above"));
+    let bootstrap =
+        PathBuf::from(variables[2].1.clone().expect("checked above"));
     let build_id = variables[3]
         .1
         .clone()
@@ -110,7 +121,9 @@ fn configure_static_engine(manifest_directory: &Path, out_dir: &Path) -> String 
     validate_static_engine_patch(&source);
     let macos_sysroot = match host {
         EngineHost::Macos => Some(macos_build_sysroot()),
-        EngineHost::Linux | EngineHost::WindowsMsvc | EngineHost::WindowsGnu => None,
+        EngineHost::Linux
+        | EngineHost::WindowsMsvc
+        | EngineHost::WindowsGnu => None,
     };
 
     let native_archive = compile_native_entries(
@@ -148,17 +161,16 @@ struct MacosBuildSysroot {
 }
 
 fn macos_build_sysroot() -> MacosBuildSysroot {
-    let sdk_root = PathBuf::from(
-        env::var_os("SDKROOT")
-            .expect("SDKROOT must name the build-time macOS SDK for static engine builds"),
-    );
+    let sdk_root = PathBuf::from(env::var_os("SDKROOT").expect(
+        "SDKROOT must name the build-time macOS SDK for static engine builds",
+    ));
     assert!(
         sdk_root.is_dir(),
         "build-time macOS SDK is missing: {}",
         sdk_root.display()
     );
-    let deployment_target =
-        env::var("RCC_MACOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".to_owned());
+    let deployment_target = env::var("RCC_MACOS_DEPLOYMENT_TARGET")
+        .unwrap_or_else(|_| "11.0".to_owned());
     assert!(
         !deployment_target.is_empty()
             && deployment_target
@@ -176,11 +188,13 @@ fn validate_static_engine_patch(source: &Path) {
     let driver = source.join("clang/lib/Driver/Driver.cpp");
     require_file(&driver, "patched Clang driver source");
     println!("cargo:rerun-if-changed={}", driver.display());
-    let contents = fs::read_to_string(&driver)
-        .unwrap_or_else(|error| panic!("read patched Clang driver {}: {error}", driver.display()));
+    let contents = fs::read_to_string(&driver).unwrap_or_else(|error| {
+        panic!("read patched Clang driver {}: {error}", driver.display())
+    });
     assert!(
         contents.contains("RCC statically integrates the Clang frontend")
-            && !contents.contains("C.getJobs().size() > 1 || CCPrintProcessStats"),
+            && !contents
+                .contains("C.getJobs().size() > 1 || CCPrintProcessStats"),
         "Clang source is missing the pinned RCC integrated-cc1 patch"
     );
 }
@@ -268,19 +282,27 @@ fn compile_native_entries(
             ]);
         }
         if let Some(macos) = macos {
-            command
-                .arg("-isysroot")
-                .arg(&macos.sdk_root)
-                .arg(format!("-mmacosx-version-min={}", macos.deployment_target));
+            command.arg("-isysroot").arg(&macos.sdk_root).arg(format!(
+                "-mmacosx-version-min={}",
+                macos.deployment_target
+            ));
             // The ARM64 LLVM bootstrap clang++ otherwise emits host arm64
             // objects while CMAKE_OSX_ARCHITECTURES=x86_64 produced x86_64
             // engine archives.
             match cargo_target {
                 "x86_64-apple-darwin" => {
-                    command.args(["-arch", "x86_64", "--target=x86_64-apple-darwin"]);
+                    command.args([
+                        "-arch",
+                        "x86_64",
+                        "--target=x86_64-apple-darwin",
+                    ]);
                 }
                 "aarch64-apple-darwin" => {
-                    command.args(["-arch", "arm64", "--target=arm64-apple-darwin"]);
+                    command.args([
+                        "-arch",
+                        "arm64",
+                        "--target=arm64-apple-darwin",
+                    ]);
                 }
                 _ => {}
             }
@@ -414,7 +436,8 @@ fn emit_static_links(
     let components = llvm_components(&targets);
     let mut command = Command::new(&llvm_config);
     command.args(["--link-static", "--libs"]).args(&components);
-    let llvm_libraries = command_output(&mut command, "query custom LLVM static libraries");
+    let llvm_libraries =
+        command_output(&mut command, "query custom LLVM static libraries");
     emit_link_tokens(&llvm_libraries, &library_directory, true);
     if matches!(host, EngineHost::Linux) {
         println!("cargo:rustc-link-arg=-Wl,--end-group");
@@ -423,7 +446,8 @@ fn emit_static_links(
     command
         .args(["--link-static", "--system-libs"])
         .args(&components);
-    let system_libraries = command_output(&mut command, "query custom LLVM system libraries");
+    let system_libraries =
+        command_output(&mut command, "query custom LLVM system libraries");
     emit_link_tokens(&system_libraries, &library_directory, false);
     match host {
         EngineHost::Macos => {
@@ -478,9 +502,9 @@ fn emit_static_gcc_archive(clangxx: &Path, file_name: &str, link_name: &str) {
         "{file_name} is missing (clang++ printed {})",
         path.display()
     );
-    let directory = path
-        .parent()
-        .unwrap_or_else(|| panic!("{} has no parent directory", path.display()));
+    let directory = path.parent().unwrap_or_else(|| {
+        panic!("{} has no parent directory", path.display())
+    });
     println!("cargo:rustc-link-search=native={}", directory.display());
     println!("cargo:rustc-link-lib=static={link_name}");
 }
@@ -510,7 +534,11 @@ fn llvm_components(targets: &str) -> Vec<String> {
     components
 }
 
-fn emit_link_tokens(output: &str, library_directory: &Path, require_static: bool) {
+fn emit_link_tokens(
+    output: &str,
+    library_directory: &Path,
+    require_static: bool,
+) {
     for token in output.split_whitespace() {
         if let Some(library) = token.strip_prefix("-l") {
             if require_static {
@@ -542,7 +570,9 @@ fn emit_link_tokens(output: &str, library_directory: &Path, require_static: bool
             let stem = path
                 .file_stem()
                 .and_then(|name| name.to_str())
-                .unwrap_or_else(|| panic!("invalid LLVM archive name {token:?}"));
+                .unwrap_or_else(|| {
+                    panic!("invalid LLVM archive name {token:?}")
+                });
             if require_static {
                 println!("cargo:rustc-link-lib=static={stem}");
             } else {
@@ -585,8 +615,9 @@ fn command_output(command: &mut Command, description: &str) -> String {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    String::from_utf8(output.stdout)
-        .unwrap_or_else(|error| panic!("{description} returned non-UTF-8 output: {error}"))
+    String::from_utf8(output.stdout).unwrap_or_else(|error| {
+        panic!("{description} returned non-UTF-8 output: {error}")
+    })
 }
 
 fn run_command(mut command: Command, description: &str) {
@@ -609,8 +640,12 @@ fn require_file(path: &Path, description: &str) {
     );
 }
 
-fn controller_build_identity(workspace: &Path, engine_build_id: &str) -> String {
-    let mut paths = vec![workspace.join("Cargo.toml"), workspace.join("Cargo.lock")];
+fn controller_build_identity(
+    workspace: &Path,
+    engine_build_id: &str,
+) -> String {
+    let mut paths =
+        vec![workspace.join("Cargo.toml"), workspace.join("Cargo.lock")];
     collect_controller_sources(&workspace.join("crates"), &mut paths);
     paths.sort();
 
@@ -627,8 +662,9 @@ fn controller_build_identity(workspace: &Path, engine_build_id: &str) -> String 
         let relative = path
             .strip_prefix(workspace)
             .expect("controller source is inside workspace");
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("read controller source {}: {error}", path.display()));
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!("read controller source {}: {error}", path.display())
+        });
         digest.update(relative.to_string_lossy().as_bytes());
         digest.update([0]);
         digest.update((bytes.len() as u64).to_le_bytes());
@@ -643,7 +679,9 @@ fn controller_build_identity(workspace: &Path, engine_build_id: &str) -> String 
 
 fn collect_controller_sources(directory: &Path, output: &mut Vec<PathBuf>) {
     let mut entries = fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("read source directory {}: {error}", directory.display()))
+        .unwrap_or_else(|error| {
+            panic!("read source directory {}: {error}", directory.display())
+        })
         .map(|entry| entry.expect("read source directory entry").path())
         .collect::<Vec<_>>();
     entries.sort();
@@ -660,8 +698,9 @@ fn collect_controller_sources(directory: &Path, output: &mut Vec<PathBuf>) {
 }
 
 fn sha256_file(path: &Path) -> String {
-    let bytes = fs::read(path)
-        .unwrap_or_else(|error| panic!("read embedded pack {}: {error}", path.display()));
+    let bytes = fs::read(path).unwrap_or_else(|error| {
+        panic!("read embedded pack {}: {error}", path.display())
+    });
     let mut encoded = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
         write!(encoded, "{byte:02x}").expect("write digest into String");

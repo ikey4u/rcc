@@ -1,28 +1,31 @@
-use crate::cache;
-use crate::engine;
-use crate::payload::Payload;
-use crate::toolchain;
-use anyhow::{bail, Context, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use rcc_core::artifact;
-use rcc_core::digest::file_sha256;
-use rcc_core::environment::{EnvironmentFormat as CoreEnvironmentFormat, EnvironmentManifest};
-use rcc_core::layout::launcher_path;
-use rcc_core::layout::validate_view_binding;
-use rcc_core::pack;
-use rcc_core::registry;
-use rcc_core::schema::{ObjectFormat, Profile, ViewManifest};
-use rcc_core::ToolKind;
-use serde::Serialize;
-use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::collections::HashSet;
-use std::ffi::OsString;
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitStatus};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, ExitStatus},
+};
+
+use anyhow::{bail, Context, Result};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use rcc_core::{
+    artifact,
+    digest::file_sha256,
+    environment::{
+        EnvironmentFormat as CoreEnvironmentFormat, EnvironmentManifest,
+    },
+    layout::{launcher_path, validate_view_binding},
+    pack, registry,
+    schema::{ObjectFormat, Profile, ViewManifest},
+    ToolKind,
+};
+use serde::Serialize;
 use walkdir::WalkDir;
+
+use crate::{cache, engine, payload::Payload, toolchain};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -269,11 +272,21 @@ pub fn run(cli: Cli) -> Result<i32> {
             print_environment(&options, arguments)?;
             Ok(0)
         }
-        Command::Cc(arguments) => invoke_direct(&options, ToolKind::Cc, arguments),
-        Command::Cxx(arguments) => invoke_direct(&options, ToolKind::Cxx, arguments),
-        Command::Ar(arguments) => invoke_direct(&options, ToolKind::Ar, arguments),
-        Command::Ranlib(arguments) => invoke_direct(&options, ToolKind::Ranlib, arguments),
-        Command::Link(arguments) => invoke_direct(&options, ToolKind::Linker, arguments),
+        Command::Cc(arguments) => {
+            invoke_direct(&options, ToolKind::Cc, arguments)
+        }
+        Command::Cxx(arguments) => {
+            invoke_direct(&options, ToolKind::Cxx, arguments)
+        }
+        Command::Ar(arguments) => {
+            invoke_direct(&options, ToolKind::Ar, arguments)
+        }
+        Command::Ranlib(arguments) => {
+            invoke_direct(&options, ToolKind::Ranlib, arguments)
+        }
+        Command::Link(arguments) => {
+            invoke_direct(&options, ToolKind::Linker, arguments)
+        }
         Command::Tool(arguments) => invoke_generic(&options, arguments),
         Command::Verify {
             profile,
@@ -310,20 +323,30 @@ pub fn run(cli: Cli) -> Result<i32> {
 fn print_licenses(options: &GlobalOptions) -> Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    stdout.write_all(include_str!("../../../docs/THIRD_PARTY_NOTICES.md").as_bytes())?;
-    let payload = match Payload::load(options.pack.as_deref(), options.allow_external_pack) {
+    stdout.write_all(
+        include_str!("../../../docs/THIRD_PARTY_NOTICES.md").as_bytes(),
+    )?;
+    let payload = match Payload::load(
+        options.pack.as_deref(),
+        options.allow_external_pack,
+    ) {
         Ok(payload) => payload,
         Err(_) if options.pack.is_none() => return Ok(()),
         Err(error) => return Err(error),
     };
-    if let Ok(license) = pack::read_pack_file_bytes(payload.bytes(), "licenses/LLVM-LICENSE.TXT") {
+    if let Ok(license) =
+        pack::read_pack_file_bytes(payload.bytes(), "licenses/LLVM-LICENSE.TXT")
+    {
         stdout.write_all(b"\n## Embedded LLVM license\n\n")?;
         stdout.write_all(&license)?;
         if !license.ends_with(b"\n") {
             stdout.write_all(b"\n")?;
         }
     }
-    if let Ok(license) = pack::read_pack_file_bytes(payload.bytes(), "licenses/GLIBC-COPYING.LIB") {
+    if let Ok(license) = pack::read_pack_file_bytes(
+        payload.bytes(),
+        "licenses/GLIBC-COPYING.LIB",
+    ) {
         stdout.write_all(b"\n## Embedded glibc license\n\n")?;
         stdout.write_all(&license)?;
         if !license.ends_with(b"\n") {
@@ -349,42 +372,60 @@ fn materialize_profile(
 }
 
 fn find_profile(query: &str) -> Result<&'static Profile> {
-    registry::find_profile(query).with_context(|| format!("unknown profile {query}"))
+    registry::find_profile(query)
+        .with_context(|| format!("unknown profile {query}"))
 }
 
 fn print_value(options: &GlobalOptions, command: PrintCommand) -> Result<()> {
     match command {
         PrintCommand::Tool(selector) => {
             let profile = find_profile(&selector.profile)?;
-            let view = materialize_profile(options, profile, &selector.runtime_contract)?;
+            let view = materialize_profile(
+                options,
+                profile,
+                &selector.runtime_contract,
+            )?;
             println!("{}", view.launcher(selector.kind.into())?.display());
         }
         PrintCommand::Sysroot(selector) => {
             let profile = find_profile(&selector.profile)?;
-            let view = materialize_profile(options, profile, "native-rcc-owned")?;
+            let view =
+                materialize_profile(options, profile, "native-rcc-owned")?;
             println!("{}", view.manifest.sysroot);
         }
         PrintCommand::ResourceDir(selector) => {
             let profile = find_profile(&selector.profile)?;
-            let view = materialize_profile(options, profile, "native-rcc-owned")?;
+            let view =
+                materialize_profile(options, profile, "native-rcc-owned")?;
             println!("{}", view.manifest.resource_dir);
         }
         PrintCommand::Manifest(selector) => {
             let profile = find_profile(&selector.profile)?;
-            let view = materialize_profile(options, profile, &selector.runtime_contract)?;
+            let view = materialize_profile(
+                options,
+                profile,
+                &selector.runtime_contract,
+            )?;
             serde_json::to_writer_pretty(io::stdout().lock(), &view.manifest)?;
             println!();
         }
         PrintCommand::Identity(selector) => {
             let profile = find_profile(&selector.profile)?;
-            let view = materialize_profile(options, profile, &selector.runtime_contract)?;
+            let view = materialize_profile(
+                options,
+                profile,
+                &selector.runtime_contract,
+            )?;
             println!("{}", view.manifest.identity);
         }
     }
     Ok(())
 }
 
-fn print_environment(options: &GlobalOptions, arguments: EnvArgs) -> Result<()> {
+fn print_environment(
+    options: &GlobalOptions,
+    arguments: EnvArgs,
+) -> Result<()> {
     let target_profile = registry::resolve_target_profile(&arguments.profile)?;
     let target_contract = arguments
         .target_runtime_contract
@@ -401,7 +442,9 @@ fn print_environment(options: &GlobalOptions, arguments: EnvArgs) -> Result<()> 
         );
     }
     let target = materialize_profile(options, target_profile, target_contract)?;
-    let environment = if let Some(host_query) = arguments.host_profile.as_deref() {
+    let environment = if let Some(host_query) =
+        arguments.host_profile.as_deref()
+    {
         let host_profile = registry::resolve_host_profile(host_query)?;
         let host_contract = arguments
             .host_runtime_contract
@@ -428,13 +471,18 @@ fn invoke_direct(
     arguments: DirectToolArgs,
 ) -> Result<i32> {
     let profile = find_profile(&arguments.profile)?;
-    let view = materialize_profile(options, profile, &arguments.runtime_contract)?;
+    let view =
+        materialize_profile(options, profile, &arguments.runtime_contract)?;
     spawn_launcher(&view.launcher(kind)?, &arguments.args)
 }
 
-fn invoke_generic(options: &GlobalOptions, arguments: GenericToolArgs) -> Result<i32> {
+fn invoke_generic(
+    options: &GlobalOptions,
+    arguments: GenericToolArgs,
+) -> Result<i32> {
     let profile = find_profile(&arguments.profile)?;
-    let view = materialize_profile(options, profile, &arguments.runtime_contract)?;
+    let view =
+        materialize_profile(options, profile, &arguments.runtime_contract)?;
     spawn_launcher(&view.launcher(arguments.kind.into())?, &arguments.args)
 }
 
@@ -442,7 +490,9 @@ fn spawn_launcher(path: &Path, arguments: &[OsString]) -> Result<i32> {
     let status = ProcessCommand::new(path)
         .args(arguments)
         .status()
-        .with_context(|| format!("failed to execute profile launcher {}", path.display()))?;
+        .with_context(|| {
+            format!("failed to execute profile launcher {}", path.display())
+        })?;
     Ok(exit_status_code(status))
 }
 
@@ -518,7 +568,10 @@ fn doctor(
                     "identity: {}",
                     report.toolchain_identity.as_deref().unwrap_or("unknown")
                 );
-                println!("view: {}", report.view_root.as_deref().unwrap_or("unknown"));
+                println!(
+                    "view: {}",
+                    report.view_root.as_deref().unwrap_or("unknown")
+                );
                 for (kind, path) in &report.launchers {
                     println!("launcher-{kind}: {path}");
                 }
@@ -559,12 +612,17 @@ fn doctor_inner(
     let view = materialize_profile(options, profile, runtime_contract)?;
     let extras = generated_view_files(&view.manifest);
     let extra_refs = extras.iter().map(String::as_str).collect::<Vec<_>>();
-    pack::verify_directory_with_extras(&view.pack.manifest, &view.materialized.root, &extra_refs)
-        .context("doctor found invalid toolchain view contents")?;
+    pack::verify_directory_with_extras(
+        &view.pack.manifest,
+        &view.materialized.root,
+        &extra_refs,
+    )
+    .context("doctor found invalid toolchain view contents")?;
     let mut launchers = BTreeMap::new();
     for kind in &profile.tool_kinds {
         let launcher = view.launcher(*kind)?;
-        launchers.insert(kind.as_str().to_owned(), launcher.display().to_string());
+        launchers
+            .insert(kind.as_str().to_owned(), launcher.display().to_string());
         let implementation = &view.manifest.tools[kind];
         let actual = file_sha256(Path::new(&implementation.path))?;
         if actual != implementation.sha256 {
@@ -591,8 +649,8 @@ fn doctor_inner(
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        let actual =
-            String::from_utf8(output.stdout).context("launcher query returned non-UTF-8 output")?;
+        let actual = String::from_utf8(output.stdout)
+            .context("launcher query returned non-UTF-8 output")?;
         if actual.trim() != expected {
             bail!(
                 "launcher query {argument} returned {:?}, expected {:?}",
@@ -610,7 +668,9 @@ fn doctor_inner(
         engine_build_id: engine::BUILD_ID,
         static_engine: engine::is_available(),
         profile_id: Some(view.manifest.profile.profile_id.clone()),
-        runtime_contract_id: Some(view.manifest.runtime_contract.contract_id.clone()),
+        runtime_contract_id: Some(
+            view.manifest.runtime_contract.contract_id.clone(),
+        ),
         toolchain_identity: Some(view.manifest.identity.clone()),
         pack_sha256: Some(view.pack.sha256.clone()),
         pack_origin: Some(view.pack_origin.clone()),
@@ -656,7 +716,11 @@ fn verify_cache(explicit: Option<&Path>, repair: bool) -> Result<i32> {
             if entry.file_type().is_file() && entry.file_name() == "view.json" {
                 checked_views += 1;
                 if let Err(error) = verify_cached_view(&root, entry.path()) {
-                    let view_root = entry.path().parent().unwrap_or(entry.path()).to_path_buf();
+                    let view_root = entry
+                        .path()
+                        .parent()
+                        .unwrap_or(entry.path())
+                        .to_path_buf();
                     issues.push((view_root, format!("{error:#}")));
                 }
             }
@@ -681,7 +745,9 @@ fn verify_cached_controller(directory: &Path) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .context("controller cache directory name is not UTF-8")?;
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if expected.len() != 64
+        || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         bail!("controller cache directory is not named by a SHA-256 digest");
     }
     let executable = directory.join("rcc");
@@ -722,8 +788,12 @@ fn verify_cached_view(cache_root: &Path, manifest_path: &Path) -> Result<()> {
     }
     let extras = generated_view_files(&manifest);
     let extra_refs = extras.iter().map(String::as_str).collect::<Vec<_>>();
-    pack::verify_directory_with_extras(&pack.manifest, &actual_root, &extra_refs)
-        .context("cached view contents do not match their pack")?;
+    pack::verify_directory_with_extras(
+        &pack.manifest,
+        &actual_root,
+        &extra_refs,
+    )
+    .context("cached view contents do not match their pack")?;
     let controller = cache_root
         .join("controllers")
         .join(&manifest.controller_sha256)
@@ -734,14 +804,19 @@ fn verify_cached_view(cache_root: &Path, manifest_path: &Path) -> Result<()> {
     for (kind, tool) in &manifest.tools {
         let path = Path::new(&tool.path);
         if path != launcher_path(&manifest, *kind) {
-            bail!("cached tool path does not match launcher binding for {kind}");
+            bail!(
+                "cached tool path does not match launcher binding for {kind}"
+            );
         }
-        if tool.sha256 != manifest.controller_sha256 || file_sha256(path)? != tool.sha256 {
+        if tool.sha256 != manifest.controller_sha256
+            || file_sha256(path)? != tool.sha256
+        {
             bail!("cached implementation digest mismatch for {kind}");
         }
         let launcher = launcher_path(&manifest, *kind);
         let metadata = fs::symlink_metadata(&launcher)?;
-        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink()
+        {
             bail!("cached launcher is invalid: {}", launcher.display());
         }
         verify_same_controller_file(&launcher, &controller)?;
@@ -790,7 +865,10 @@ fn verify_same_controller_file(alias: &Path, controller: &Path) -> Result<()> {
     Ok(())
 }
 
-fn quarantine_cache_issues(root: &Path, issues: &[(PathBuf, String)]) -> Result<()> {
+fn quarantine_cache_issues(
+    root: &Path,
+    issues: &[(PathBuf, String)],
+) -> Result<()> {
     let quarantine = root
         .join("tmp")
         .join(format!("manual-repair-{}", std::process::id()));
@@ -799,17 +877,22 @@ fn quarantine_cache_issues(root: &Path, issues: &[(PathBuf, String)]) -> Result<
         if !path.starts_with(root) || path == root || !path.exists() {
             continue;
         }
-        fs::rename(path, quarantine.join(index.to_string())).with_context(|| {
-            format!(
-                "failed to quarantine corrupt cache entry {}",
-                path.display()
-            )
-        })?;
+        fs::rename(path, quarantine.join(index.to_string())).with_context(
+            || {
+                format!(
+                    "failed to quarantine corrupt cache entry {}",
+                    path.display()
+                )
+            },
+        )?;
     }
     Ok(())
 }
 
-fn garbage_collect_cache(explicit: Option<&Path>, dry_run: bool) -> Result<i32> {
+fn garbage_collect_cache(
+    explicit: Option<&Path>,
+    dry_run: bool,
+) -> Result<i32> {
     let root = cache::resolve(explicit)?;
     let temporary = root.join("tmp");
     let mut entries = Vec::new();
@@ -848,7 +931,10 @@ fn make_cache_tree_removable(root: &Path) -> Result<()> {
         #[cfg(unix)]
         if entry.file_type().is_dir() {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o700))?;
+            fs::set_permissions(
+                entry.path(),
+                fs::Permissions::from_mode(0o700),
+            )?;
         }
 
         #[cfg(windows)]
@@ -869,10 +955,13 @@ struct ProfileListing<'a> {
 }
 
 fn list_targets(options: &GlobalOptions, json: bool) -> Result<()> {
-    registry::validate_builtin_registry().context("invalid built-in profile registry")?;
+    registry::validate_builtin_registry()
+        .context("invalid built-in profile registry")?;
     let profiles = registry::builtin_profiles().collect::<Vec<_>>();
-    let payload_profiles = match Payload::load(options.pack.as_deref(), options.allow_external_pack)
-    {
+    let payload_profiles = match Payload::load(
+        options.pack.as_deref(),
+        options.allow_external_pack,
+    ) {
         Ok(payload) => payload.inspection()?.manifest.profiles,
         Err(_) if options.pack.is_none() => Default::default(),
         Err(error) => return Err(error),
@@ -947,7 +1036,10 @@ fn verify_artifact(profile_query: &str, path: &Path, json: bool) -> Result<()> {
             profile.object_format
         );
     }
-    if profile.os == "linux" && profile.libc_family == "musl" && profile.crt_mode == "static" {
+    if profile.os == "linux"
+        && profile.libc_family == "musl"
+        && profile.crt_mode == "static"
+    {
         let violations = report.linux_musl_static_violations();
         if !violations.is_empty() {
             bail!(
@@ -963,7 +1055,8 @@ fn verify_artifact(profile_query: &str, path: &Path, json: bool) -> Result<()> {
             .and_then(artifact::parse_dotted_glibc_version)
             .unwrap_or((2, 17, 0));
         let interpreter = profile.dynamic_loader.as_deref().unwrap_or("");
-        let violations = report.linux_gnu_glibc_violations(interpreter, max_glibc);
+        let violations =
+            report.linux_gnu_glibc_violations(interpreter, max_glibc);
         if !violations.is_empty() {
             bail!(
                 "artifact is not a linux gnu glibc {} binary: {}",
@@ -1085,9 +1178,10 @@ impl From<ToolKindArg> for ToolKind {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn parses_profile_bound_tool_path_query() {
@@ -1141,8 +1235,13 @@ mod tests {
 
     #[test]
     fn external_pack_requires_acknowledgement() {
-        let error =
-            Cli::try_parse_from(["rcc", "--pack", "fixture.rccpack", "targets"]).unwrap_err();
+        let error = Cli::try_parse_from([
+            "rcc",
+            "--pack",
+            "fixture.rccpack",
+            "targets",
+        ])
+        .unwrap_err();
         assert_eq!(
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
@@ -1167,7 +1266,8 @@ mod tests {
         let nested = root.join("sealed");
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("tool"), b"sealed").unwrap();
-        fs::set_permissions(&nested, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o555))
+            .unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
 
         make_cache_tree_removable(&root).unwrap();

@@ -1,12 +1,26 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    path::{Component, Path},
+};
+
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt;
-use std::path::{Component, Path};
 
 pub const SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolKind {
     Cc,
@@ -156,7 +170,10 @@ impl Profile {
             validate_atom("environment", environment)?;
         }
         validate_optional_version("minimum_os", self.minimum_os.as_deref())?;
-        validate_optional_version("libc_version", self.libc_version.as_deref())?;
+        validate_optional_version(
+            "libc_version",
+            self.libc_version.as_deref(),
+        )?;
         validate_nonempty("libc_family", &self.libc_family)?;
         validate_nonempty("crt_mode", &self.crt_mode)?;
         validate_nonempty("compiler_runtime", &self.compiler_runtime)?;
@@ -166,7 +183,11 @@ impl Profile {
         validate_nonempty("cxx_runtime", &self.cxx_runtime)?;
         match self.cxx_runtime_linkage.as_str() {
             "static" | "dynamic" | "system" => {}
-            _ => return invalid("cxx_runtime_linkage must be static, dynamic, or system"),
+            _ => {
+                return invalid(
+                    "cxx_runtime_linkage must be static, dynamic, or system",
+                )
+            }
         }
         validate_id("resource_pack", &self.resource_pack)?;
         if let Some(pack) = &self.sysroot_pack {
@@ -184,7 +205,9 @@ impl Profile {
         ];
         for kind in required {
             if !self.tool_kinds.contains(&kind) {
-                return invalid(format!("profile is missing required tool kind {kind}"));
+                return invalid(format!(
+                    "profile is missing required tool kind {kind}"
+                ));
             }
         }
         match (self.object_format, self.linker_flavor) {
@@ -192,24 +215,42 @@ impl Profile {
             | (ObjectFormat::Coff, LinkerFlavor::CoffGnu)
             | (ObjectFormat::Coff, LinkerFlavor::CoffMsvc)
             | (ObjectFormat::MachO, LinkerFlavor::MachO) => {}
-            _ => return invalid("object_format and linker_flavor are incompatible"),
+            _ => {
+                return invalid(
+                    "object_format and linker_flavor are incompatible",
+                )
+            }
         }
-        if self.driver_kind == DriverKind::ClangCl && self.linker_flavor != LinkerFlavor::CoffMsvc {
+        if self.driver_kind == DriverKind::ClangCl
+            && self.linker_flavor != LinkerFlavor::CoffMsvc
+        {
             return invalid("clang-cl requires the coff-msvc linker flavor");
         }
-        if self.driver_kind == DriverKind::LldLink && self.linker_flavor != LinkerFlavor::CoffMsvc {
-            return invalid("lld-link driver requires the coff-msvc linker flavor");
+        if self.driver_kind == DriverKind::LldLink
+            && self.linker_flavor != LinkerFlavor::CoffMsvc
+        {
+            return invalid(
+                "lld-link driver requires the coff-msvc linker flavor",
+            );
         }
-        if self.os == "macos" && self.sdk_provider.as_deref() != Some("apple-developer") {
-            return invalid("macOS profiles require the apple-developer SDK provider");
+        if self.os == "macos"
+            && self.sdk_provider.as_deref() != Some("apple-developer")
+        {
+            return invalid(
+                "macOS profiles require the apple-developer SDK provider",
+            );
         }
         if self.linker_flavor == LinkerFlavor::CoffMsvc
             && self.sdk_provider.as_deref() != Some("windows-msvc")
         {
-            return invalid("MSVC profiles require the windows-msvc SDK provider");
+            return invalid(
+                "MSVC profiles require the windows-msvc SDK provider",
+            );
         }
         if self.sdk_provider.is_none() && self.sysroot_pack.is_none() {
-            return invalid("a profile requires either sysroot_pack or sdk_provider");
+            return invalid(
+                "a profile requires either sysroot_pack or sdk_provider",
+            );
         }
         validate_unique_strings("include_roots", &self.include_roots)?;
         validate_unique_strings("library_roots", &self.library_roots)?;
@@ -227,7 +268,9 @@ impl Profile {
             validate_nonempty("forbidden root", root)?;
         }
         if self.os == "macos" && self.framework_roots.is_empty() {
-            return invalid("macOS profiles require at least one framework root");
+            return invalid(
+                "macOS profiles require at least one framework root",
+            );
         }
         Ok(())
     }
@@ -240,7 +283,9 @@ pub fn launcher_name(profile: &Profile, kind: ToolKind) -> String {
     let basename = match (kind, profile.linker_flavor) {
         (ToolKind::Linker, LinkerFlavor::MachO) => "ld64.lld",
         (ToolKind::Linker, LinkerFlavor::CoffMsvc) => "lld-link",
-        (ToolKind::Linker, LinkerFlavor::Elf | LinkerFlavor::CoffGnu) => "ld.lld",
+        (ToolKind::Linker, LinkerFlavor::Elf | LinkerFlavor::CoffGnu) => {
+            "ld.lld"
+        }
         _ => kind.as_str(),
     };
     if cfg!(windows) {
@@ -282,17 +327,23 @@ impl RuntimeContract {
         for (component, owner) in &self.component_owners {
             validate_id("runtime component", component)?;
             if *owner == RuntimeOwnership::SplitContract {
-                return invalid("a runtime component owner cannot itself be split-contract");
+                return invalid(
+                    "a runtime component owner cannot itself be split-contract",
+                );
             }
         }
         match self.ownership {
-            RuntimeOwnership::SplitContract if self.component_owners.is_empty() => {
+            RuntimeOwnership::SplitContract
+                if self.component_owners.is_empty() =>
+            {
                 return invalid("split-contract requires component_owners");
             }
             RuntimeOwnership::RccOwned | RuntimeOwnership::ConsumerOwned
                 if !self.component_owners.is_empty() =>
             {
-                return invalid("component_owners are only valid for split-contract");
+                return invalid(
+                    "component_owners are only valid for split-contract",
+                );
             }
             _ => {}
         }
@@ -308,7 +359,9 @@ impl RuntimeContract {
             .iter()
             .any(|arg| forbidden.contains(arg.as_str()))
         {
-            return invalid("the same link argument cannot be both injected and forbidden");
+            return invalid(
+                "the same link argument cannot be both injected and forbidden",
+            );
         }
         Ok(())
     }
@@ -330,11 +383,15 @@ impl PackFile {
         validate_pack_path(&self.path)?;
         validate_sha256("pack file sha256", &self.sha256)?;
         if self.compressed_len == 0 && self.original_len != 0 {
-            return invalid("a non-empty pack file must have a non-empty compressed region");
+            return invalid(
+                "a non-empty pack file must have a non-empty compressed region",
+            );
         }
         self.offset
             .checked_add(self.compressed_len)
-            .ok_or_else(|| ValidationError::new("pack file range overflows u64"))?;
+            .ok_or_else(|| {
+                ValidationError::new("pack file range overflows u64")
+            })?;
         Ok(())
     }
 }
@@ -358,7 +415,9 @@ impl PackManifest {
         validate_id("revision", &self.revision)?;
         validate_triple(&self.host)?;
         if self.profiles.is_empty() {
-            return invalid("pack manifest must declare at least one supported profile");
+            return invalid(
+                "pack manifest must declare at least one supported profile",
+            );
         }
         for profile in &self.profiles {
             validate_id("pack profile", profile)?;
@@ -408,7 +467,10 @@ impl ViewTool {
         validate_absolute_path("tool path", &self.path)?;
         validate_sha256("tool sha256", &self.sha256)?;
         if !path_is_within(root, &self.path) {
-            return invalid(format!("tool path {} escapes view root", self.path));
+            return invalid(format!(
+                "tool path {} escapes view root",
+                self.path
+            ));
         }
         Ok(())
     }
@@ -457,22 +519,32 @@ impl ViewManifest {
             (Some(_), Some(identity)) => {
                 validate_sha256("external sysroot identity", identity)?;
             }
-            (Some(_), None) => return invalid("SDK-backed view has no external sysroot identity"),
+            (Some(_), None) => {
+                return invalid(
+                    "SDK-backed view has no external sysroot identity",
+                )
+            }
             (None, Some(_)) => {
-                return invalid("hermetic view cannot have an external sysroot identity")
+                return invalid(
+                    "hermetic view cannot have an external sysroot identity",
+                )
             }
             (None, None) => {}
         }
         self.profile.validate()?;
         self.runtime_contract.validate()?;
         if self.runtime_contract.profile_id != self.profile.profile_id {
-            return invalid("runtime contract profile_id does not match view profile");
+            return invalid(
+                "runtime contract profile_id does not match view profile",
+            );
         }
         validate_absolute_path("view root", &self.root)?;
         validate_absolute_path("sysroot", &self.sysroot)?;
         validate_absolute_path("resource_dir", &self.resource_dir)?;
         if !path_is_within(&self.root, &self.resource_dir) {
-            return invalid("resource_dir must be inside the immutable view root");
+            return invalid(
+                "resource_dir must be inside the immutable view root",
+            );
         }
         let actual: BTreeSet<ToolKind> = self.tools.keys().copied().collect();
         if actual != self.profile.tool_kinds {
@@ -496,7 +568,9 @@ impl ViewManifest {
             }
             let expected_driver = match kind {
                 ToolKind::Cc | ToolKind::Cxx => Some(self.profile.driver_kind),
-                ToolKind::Linker if self.profile.linker_flavor == LinkerFlavor::CoffMsvc => {
+                ToolKind::Linker
+                    if self.profile.linker_flavor == LinkerFlavor::CoffMsvc =>
+                {
                     Some(DriverKind::LldLink)
                 }
                 _ => None,
@@ -509,7 +583,9 @@ impl ViewManifest {
         }
         for (kind, args) in &self.injected_args {
             if !self.tools.contains_key(kind) {
-                return invalid(format!("injected args reference missing tool kind {kind}"));
+                return invalid(format!(
+                    "injected args reference missing tool kind {kind}"
+                ));
             }
             validate_args("injected_args", args)?;
         }
@@ -558,7 +634,9 @@ fn validate_schema_version(version: u32) -> ValidationResult {
 
 fn validate_nonempty(field: &str, value: &str) -> ValidationResult {
     if value.is_empty() || value.trim() != value || value.contains('\0') {
-        return invalid(format!("{field} must be non-empty, trimmed, and NUL-free"));
+        return invalid(format!(
+            "{field} must be non-empty, trimmed, and NUL-free"
+        ));
     }
     Ok(())
 }
@@ -567,7 +645,9 @@ fn validate_id(field: &str, value: &str) -> ValidationResult {
     validate_nonempty(field, value)?;
     if value.len() > 128
         || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.')
         })
     {
         return invalid(format!(
@@ -585,7 +665,9 @@ fn validate_triple(value: &str) -> ValidationResult {
     validate_nonempty("target triple", value)?;
     if value.split('-').count() < 3
         || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'-' | b'.')
         })
     {
         return invalid(format!("invalid target triple {value}"));
@@ -593,7 +675,10 @@ fn validate_triple(value: &str) -> ValidationResult {
     Ok(())
 }
 
-fn validate_optional_version(field: &str, value: Option<&str>) -> ValidationResult {
+fn validate_optional_version(
+    field: &str,
+    value: Option<&str>,
+) -> ValidationResult {
     let Some(value) = value else {
         return Ok(());
     };
@@ -626,7 +711,9 @@ fn validate_sha256(field: &str, value: &str) -> ValidationResult {
 fn validate_pack_path(value: &str) -> ValidationResult {
     validate_nonempty("pack path", value)?;
     if value.contains('\\') || value.contains(':') || value.starts_with('/') {
-        return invalid(format!("pack path must be portable and relative: {value}"));
+        return invalid(format!(
+            "pack path must be portable and relative: {value}"
+        ));
     }
     let path = Path::new(value);
     if path.components().any(|component| {
@@ -638,7 +725,9 @@ fn validate_pack_path(value: &str) -> ValidationResult {
         .split('/')
         .any(|component| component.is_empty() || component == ".")
     {
-        return invalid(format!("pack path contains an unsafe component: {value}"));
+        return invalid(format!(
+            "pack path contains an unsafe component: {value}"
+        ));
     }
     Ok(())
 }
@@ -648,7 +737,9 @@ fn validate_unique_strings(field: &str, values: &[String]) -> ValidationResult {
     for value in values {
         validate_nonempty(field, value)?;
         if !seen.insert(value.as_str()) {
-            return invalid(format!("{field} contains duplicate value {value}"));
+            return invalid(format!(
+                "{field} contains duplicate value {value}"
+            ));
         }
     }
     Ok(())
@@ -657,7 +748,9 @@ fn validate_unique_strings(field: &str, values: &[String]) -> ValidationResult {
 fn validate_args(field: &str, values: &[String]) -> ValidationResult {
     for value in values {
         if value.is_empty() || value.contains('\0') {
-            return invalid(format!("{field} contains an empty or NUL-bearing argument"));
+            return invalid(format!(
+                "{field} contains an empty or NUL-bearing argument"
+            ));
         }
     }
     Ok(())
@@ -665,9 +758,9 @@ fn validate_args(field: &str, values: &[String]) -> ValidationResult {
 
 fn validate_env_name(value: &str) -> ValidationResult {
     if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+        })
         || value.as_bytes()[0].is_ascii_digit()
     {
         return invalid(format!("invalid environment variable name {value}"));
@@ -696,7 +789,8 @@ fn is_absolute_like(value: &str) -> bool {
 }
 
 fn path_is_within(root: &str, child: &str) -> bool {
-    let normalize = |value: &str| value.replace('\\', "/").trim_end_matches('/').to_owned();
+    let normalize =
+        |value: &str| value.replace('\\', "/").trim_end_matches('/').to_owned();
     let root = normalize(root);
     let child = normalize(child);
     child == root
@@ -709,7 +803,8 @@ fn path_is_within(root: &str, child: &str) -> bool {
 mod tests {
     use super::*;
 
-    const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const HASH: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn profile() -> Profile {
         Profile {
@@ -884,8 +979,11 @@ mod tests {
                             launcher_name(&profile, kind)
                         ),
                         sha256: HASH.into(),
-                        driver_kind: matches!(kind, ToolKind::Cc | ToolKind::Cxx)
-                            .then_some(DriverKind::ClangGcc),
+                        driver_kind: matches!(
+                            kind,
+                            ToolKind::Cc | ToolKind::Cxx
+                        )
+                        .then_some(DriverKind::ClangGcc),
                     },
                 )
             })
@@ -903,7 +1001,9 @@ mod tests {
             root: root.into(),
             tools,
             sysroot: format!("{root}{separator}sysroot"),
-            resource_dir: format!("{root}{separator}lib{separator}clang{separator}22"),
+            resource_dir: format!(
+                "{root}{separator}lib{separator}clang{separator}22"
+            ),
             injected_args: BTreeMap::new(),
             forbidden_env: ["CPATH".into(), "LIBRARY_PATH".into()]
                 .into_iter()

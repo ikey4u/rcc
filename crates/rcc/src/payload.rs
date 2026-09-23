@@ -1,9 +1,15 @@
-use anyhow::{bail, Context, Result};
-use rcc_core::pack::{inspect_embedded_pack_bytes, inspect_pack_bytes, PackInspection};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-static EMBEDDED_PACK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embedded.rccpack"));
+use anyhow::{bail, Context, Result};
+use rcc_core::pack::{
+    inspect_embedded_pack_bytes, inspect_pack_bytes, PackInspection,
+};
+
+static EMBEDDED_PACK: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/embedded.rccpack"));
 const EMBEDDED_PACK_SHA256: &str = env!("RCC_EMBED_PACK_SHA256");
 
 #[derive(Clone, Debug)]
@@ -34,8 +40,9 @@ impl Payload {
                         path.display()
                     );
                 }
-                let bytes = fs::read(path)
-                    .with_context(|| format!("failed to read external pack {}", path.display()))?;
+                let bytes = fs::read(path).with_context(|| {
+                    format!("failed to read external pack {}", path.display())
+                })?;
                 if bytes.is_empty() {
                     bail!("external pack {} is empty", path.display());
                 }
@@ -74,17 +81,17 @@ impl Payload {
                 inspect_embedded_pack_bytes(bytes, EMBEDDED_PACK_SHA256)
                     .context("embedded RCC pack failed structural inspection")
             }
-            PayloadData::External(bytes) => {
-                inspect_pack_bytes(bytes).context("external RCC pack failed inspection")
-            }
+            PayloadData::External(bytes) => inspect_pack_bytes(bytes)
+                .context("external RCC pack failed inspection"),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn external_pack_requires_acknowledgement() {

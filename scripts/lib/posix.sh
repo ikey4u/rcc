@@ -1,6 +1,25 @@
 # Shared helpers for macOS, Linux, and Git bash on Windows.
 # shellcheck shell=sh
 
+# True when rust-std for a rustc triple is installed so cargo-rcc can bind it.
+# musl also needs rust-std's self-contained libunwind.a.
+rust_std_ready() {
+    rust_target=$1
+    sysroot=$(rustc --print sysroot 2>/dev/null) || return 1
+    lib=$sysroot/lib/rustlib/$rust_target/lib
+    if [ ! -d "$lib" ]; then
+        return 1
+    fi
+    case "$rust_target" in
+        *-linux-musl)
+            [ -f "$lib/self-contained/libunwind.a" ]
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 file_sha256() {
     path=$1
     if command -v sha256sum >/dev/null 2>&1; then

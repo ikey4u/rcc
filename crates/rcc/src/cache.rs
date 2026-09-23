@@ -1,6 +1,9 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use anyhow::{bail, Context, Result};
-use std::fs;
-use std::path::{Path, PathBuf};
 
 pub fn resolve(explicit: Option<&Path>) -> Result<PathBuf> {
     let path = match explicit {
@@ -22,16 +25,18 @@ fn prepare(path: &Path) -> Result<()> {
             bail!("cache root {} is not a directory", path.display());
         }
     } else {
-        fs::create_dir_all(path)
-            .with_context(|| format!("failed to create cache root {}", path.display()))?;
+        fs::create_dir_all(path).with_context(|| {
+            format!("failed to create cache root {}", path.display())
+        })?;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let metadata = fs::metadata(path)
-            .with_context(|| format!("failed to inspect cache root {}", path.display()))?;
+        let metadata = fs::metadata(path).with_context(|| {
+            format!("failed to inspect cache root {}", path.display())
+        })?;
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             let mut permissions = metadata.permissions();
@@ -49,8 +54,9 @@ fn prepare(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn prepares_an_explicit_cache() {

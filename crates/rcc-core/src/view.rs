@@ -1,16 +1,23 @@
-use crate::digest::file_sha256;
-use crate::environment::{EnvironmentManifest, CMAKE_TOOLCHAIN_FILE_NAME};
-use crate::pack::{
-    create_unique_dir, extract_pack_into, inspect_embedded_pack_bytes, inspect_pack_bytes,
-    verify_directory_metadata_with_extras, verify_pack, DirectoryCleanup, PackInspection,
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
 };
-use crate::schema::ViewManifest;
+
 use anyhow::{ensure, Context, Result};
 use fs2::FileExt;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+use crate::{
+    digest::file_sha256,
+    environment::{EnvironmentManifest, CMAKE_TOOLCHAIN_FILE_NAME},
+    pack::{
+        create_unique_dir, extract_pack_into, inspect_embedded_pack_bytes,
+        inspect_pack_bytes, verify_directory_metadata_with_extras, verify_pack,
+        DirectoryCleanup, PackInspection,
+    },
+    schema::ViewManifest,
+};
 
 pub const VIEW_MANIFEST_FILE: &str = "view.json";
 
@@ -55,9 +62,14 @@ impl ViewMaterializer {
     /// Creates a materializer rooted at an absolute, canonical cache path.
     pub fn new(cache_root: &Path) -> Result<Self> {
         prepare_directory(cache_root, "cache root")?;
-        let cache_root = strip_verbatim_prefix(cache_root.canonicalize().with_context(|| {
-            format!("failed to canonicalize cache root {}", cache_root.display())
-        })?);
+        let cache_root = strip_verbatim_prefix(
+            cache_root.canonicalize().with_context(|| {
+                format!(
+                    "failed to canonicalize cache root {}",
+                    cache_root.display()
+                )
+            })?,
+        );
         for child in ["blobs", "controllers", "locks", "tmp", "views"] {
             prepare_directory(&cache_root.join(child), "cache directory")?;
         }
@@ -154,13 +166,23 @@ impl ViewMaterializer {
             .create(true)
             .truncate(false)
             .open(&lock_path)
-            .with_context(|| format!("failed to open view lock {}", lock_path.display()))?;
-        FileExt::lock_exclusive(&lock)
-            .with_context(|| format!("failed to lock view {}", target.display()))?;
+            .with_context(|| {
+                format!("failed to open view lock {}", lock_path.display())
+            })?;
+        FileExt::lock_exclusive(&lock).with_context(|| {
+            format!("failed to lock view {}", target.display())
+        })?;
 
-        let result = self.materialize_locked(pack_path, pack, controller, view_manifest, &target);
-        FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock view {}", target.display()))?;
+        let result = self.materialize_locked(
+            pack_path,
+            pack,
+            controller,
+            view_manifest,
+            &target,
+        );
+        FileExt::unlock(&lock).with_context(|| {
+            format!("failed to unlock view {}", target.display())
+        })?;
         result
     }
 
@@ -181,21 +203,26 @@ impl ViewMaterializer {
     /// Copy the running RCC executable into a content-addressed controller
     /// cache. Views hardlink this immutable cache entry instead of embedding
     /// or copying separate compiler/linker programs.
-    pub fn persist_controller(&self, executable_path: &Path) -> Result<ControllerExecutable> {
+    pub fn persist_controller(
+        &self,
+        executable_path: &Path,
+    ) -> Result<ControllerExecutable> {
         let source = executable_path.canonicalize().with_context(|| {
             format!(
                 "failed to canonicalize controller executable {}",
                 executable_path.display()
             )
         })?;
-        let source_metadata = fs::symlink_metadata(&source).with_context(|| {
-            format!(
-                "failed to inspect controller executable {}",
-                source.display()
-            )
-        })?;
+        let source_metadata =
+            fs::symlink_metadata(&source).with_context(|| {
+                format!(
+                    "failed to inspect controller executable {}",
+                    source.display()
+                )
+            })?;
         ensure!(
-            source_metadata.file_type().is_file() && !source_metadata.file_type().is_symlink(),
+            source_metadata.file_type().is_file()
+                && !source_metadata.file_type().is_symlink(),
             "controller executable is not a regular file: {}",
             source.display()
         );
@@ -208,7 +235,8 @@ impl ViewMaterializer {
         let digest = file_sha256(&source).with_context(|| {
             format!("failed to hash controller executable {}", source.display())
         })?;
-        let target_directory = self.cache_root.join("controllers").join(&digest);
+        let target_directory =
+            self.cache_root.join("controllers").join(&digest);
         let target = target_directory.join("rcc");
         let lock_path = self
             .cache_root
@@ -220,28 +248,39 @@ impl ViewMaterializer {
             .create(true)
             .truncate(false)
             .open(&lock_path)
-            .with_context(|| format!("failed to open controller lock {}", lock_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "failed to open controller lock {}",
+                    lock_path.display()
+                )
+            })?;
         FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock controller {digest}"))?;
 
         let persist_result = (|| -> Result<()> {
             if path_exists(&target_directory) {
-                if cached_controller_is_valid(&target, &digest, source_metadata.len()) {
+                if cached_controller_is_valid(
+                    &target,
+                    &digest,
+                    source_metadata.len(),
+                ) {
                     return Ok(());
                 }
-                let quarantine =
-                    create_unique_dir(&self.cache_root.join("tmp"), "corrupt-controller")?;
-                fs::rename(&target_directory, quarantine.join("controller")).with_context(
-                    || {
+                let quarantine = create_unique_dir(
+                    &self.cache_root.join("tmp"),
+                    "corrupt-controller",
+                )?;
+                fs::rename(&target_directory, quarantine.join("controller"))
+                    .with_context(|| {
                         format!(
                             "failed to quarantine invalid controller {}",
                             target_directory.display()
                         )
-                    },
-                )?;
+                    })?;
             }
 
-            let temporary = create_unique_dir(&self.cache_root.join("tmp"), ".controller")?;
+            let temporary =
+                create_unique_dir(&self.cache_root.join("tmp"), ".controller")?;
             let mut cleanup = DirectoryCleanup::new(temporary.clone());
             let staged = temporary.join("rcc");
             fs::copy(&source, &staged).with_context(|| {
@@ -282,7 +321,8 @@ impl ViewMaterializer {
             cleanup.disarm();
             Ok(())
         })();
-        FileExt::unlock(&lock).context("failed to unlock controller executable")?;
+        FileExt::unlock(&lock)
+            .context("failed to unlock controller executable")?;
         persist_result?;
 
         let controller = ControllerExecutable {
@@ -297,10 +337,13 @@ impl ViewMaterializer {
     /// Persist and verify an in-memory pack without materializing a profile
     /// view. The returned inspection is used to derive the view identity and
     /// absolute manifest paths before extraction.
-    pub fn persist_pack_bytes(&self, pack_bytes: &[u8]) -> Result<(PathBuf, PackInspection)> {
+    pub fn persist_pack_bytes(
+        &self,
+        pack_bytes: &[u8],
+    ) -> Result<(PathBuf, PackInspection)> {
         ensure!(!pack_bytes.is_empty(), "embedded pack is empty");
-        let inspection =
-            inspect_pack_bytes(pack_bytes).context("embedded pack failed inspection")?;
+        let inspection = inspect_pack_bytes(pack_bytes)
+            .context("embedded pack failed inspection")?;
         self.persist_inspected_pack_bytes(pack_bytes, inspection)
     }
 
@@ -321,7 +364,8 @@ impl ViewMaterializer {
             "pack inspection digest is not canonical"
         );
         ensure!(
-            inspect_embedded_pack_bytes(pack_bytes, &inspection.sha256)? == inspection,
+            inspect_embedded_pack_bytes(pack_bytes, &inspection.sha256)?
+                == inspection,
             "pack inspection does not describe the supplied bytes"
         );
         let digest = inspection.sha256.clone();
@@ -339,7 +383,9 @@ impl ViewMaterializer {
             .create(true)
             .truncate(false)
             .open(&lock_path)
-            .with_context(|| format!("failed to open blob lock {}", lock_path.display()))?;
+            .with_context(|| {
+                format!("failed to open blob lock {}", lock_path.display())
+            })?;
         FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock payload blob {digest}"))?;
 
@@ -352,23 +398,33 @@ impl ViewMaterializer {
                 if valid {
                     return Ok(());
                 }
-                let quarantine = create_unique_dir(&self.cache_root.join("tmp"), "corrupt-blob")?;
-                fs::rename(&blob, quarantine.join("payload.rccpack")).with_context(|| {
-                    format!(
-                        "failed to quarantine invalid payload blob {}",
-                        blob.display()
-                    )
-                })?;
+                let quarantine = create_unique_dir(
+                    &self.cache_root.join("tmp"),
+                    "corrupt-blob",
+                )?;
+                fs::rename(&blob, quarantine.join("payload.rccpack"))
+                    .with_context(|| {
+                        format!(
+                            "failed to quarantine invalid payload blob {}",
+                            blob.display()
+                        )
+                    })?;
             }
 
-            let temporary = create_unique_dir(&self.cache_root.join("tmp"), ".blob")?;
+            let temporary =
+                create_unique_dir(&self.cache_root.join("tmp"), ".blob")?;
             let _cleanup = DirectoryCleanup::new(temporary.clone());
             let staged = temporary.join("payload.rccpack");
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&staged)
-                .with_context(|| format!("failed to stage embedded pack {}", staged.display()))?;
+                .with_context(|| {
+                    format!(
+                        "failed to stage embedded pack {}",
+                        staged.display()
+                    )
+                })?;
             file.write_all(pack_bytes)
                 .context("failed to write embedded pack into blob cache")?;
             file.sync_all()
@@ -424,7 +480,10 @@ impl ViewMaterializer {
             expected_path.display()
         );
         ensure!(
-            cached_controller_metadata_is_valid(&controller.path, controller.size),
+            cached_controller_metadata_is_valid(
+                &controller.path,
+                controller.size
+            ),
             "cached controller {} failed type, size, or mode validation",
             controller.path.display()
         );
@@ -440,29 +499,41 @@ impl ViewMaterializer {
         target: &Path,
     ) -> Result<MaterializedView> {
         if path_exists(target) {
-            match validate_materialized_view(target, &pack.manifest, controller, view_manifest) {
+            match validate_materialized_view(
+                target,
+                &pack.manifest,
+                controller,
+                view_manifest,
+            ) {
                 Ok(()) => {
                     seal_view(target, &pack.manifest)?;
                     return Ok(materialized_result(target, pack, true));
                 }
-                Err(error) => self
-                    .quarantine(target)
-                    .with_context(|| format!("existing view was invalid ({error:#})"))?,
+                Err(error) => self.quarantine(target).with_context(|| {
+                    format!("existing view was invalid ({error:#})")
+                })?,
             }
         }
 
-        let temporary = create_unique_dir(&self.cache_root.join("tmp"), ".view")?;
+        let temporary =
+            create_unique_dir(&self.cache_root.join("tmp"), ".view")?;
         let mut cleanup = DirectoryCleanup::new(temporary.clone());
         let extracted = extract_pack_into(pack_path, &temporary)?;
         ensure!(
-            extracted.sha256 == pack.sha256 && extracted.manifest == pack.manifest,
+            extracted.sha256 == pack.sha256
+                && extracted.manifest == pack.manifest,
             "pack changed while the view was being materialized"
         );
         create_launcher_aliases(&temporary, controller, view_manifest)?;
         create_cross_bin_aliases(&temporary, controller, view_manifest)?;
         write_view_manifest(&temporary, view_manifest)?;
         write_cmake_toolchain(&temporary, view_manifest)?;
-        validate_materialized_view(&temporary, &pack.manifest, controller, view_manifest)?;
+        validate_materialized_view(
+            &temporary,
+            &pack.manifest,
+            controller,
+            view_manifest,
+        )?;
         // Seal every member before publication. macOS refuses to rename a
         // directory whose root itself is mode 0555, so the root stays writable
         // only until the atomic rename below. Its final read-only mode is the
@@ -470,8 +541,9 @@ impl ViewMaterializer {
         seal_view_contents(&temporary, &pack.manifest)?;
 
         let parent = target.parent().context("view target has no parent")?;
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create view parent {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create view parent {}", parent.display())
+        })?;
         ensure!(
             !path_exists(target),
             "view target appeared while materializing: {}",
@@ -489,15 +561,22 @@ impl ViewMaterializer {
         }
         cleanup.disarm();
         set_directory_read_only(target)?;
-        validate_materialized_view(target, &pack.manifest, controller, view_manifest)?;
+        validate_materialized_view(
+            target,
+            &pack.manifest,
+            controller,
+            view_manifest,
+        )?;
         Ok(materialized_result(target, pack, false))
     }
 
     fn quarantine(&self, target: &Path) -> Result<()> {
-        let quarantine = create_unique_dir(&self.cache_root.join("tmp"), "corrupt-view")?;
+        let quarantine =
+            create_unique_dir(&self.cache_root.join("tmp"), "corrupt-view")?;
         let quarantined_view = quarantine.join("view");
-        let metadata = fs::symlink_metadata(target)
-            .with_context(|| format!("failed to inspect invalid view {}", target.display()))?;
+        let metadata = fs::symlink_metadata(target).with_context(|| {
+            format!("failed to inspect invalid view {}", target.display())
+        })?;
         if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
             set_directory_writable(target)?;
         }
@@ -530,7 +609,9 @@ fn ensure_resource_pack_paths(files: &[crate::schema::PackFile]) -> Result<()> {
                 && file.path != "launchers"
                 && !file.path.starts_with("launchers/")
                 && file.path != crate::CROSS_BIN_DIR
-                && !file.path.starts_with(&format!("{}/", crate::CROSS_BIN_DIR))
+                && !file
+                    .path
+                    .starts_with(&format!("{}/", crate::CROSS_BIN_DIR))
                 && file.path != VIEW_MANIFEST_FILE
                 && !file.path.starts_with(&format!("{VIEW_MANIFEST_FILE}/"))
                 && file.path != CMAKE_TOOLCHAIN_FILE_NAME
@@ -549,9 +630,15 @@ fn launcher_relative_paths(view: &ViewManifest) -> Result<Vec<String>> {
     view.tools
         .values()
         .map(|tool| {
-            let relative = Path::new(&tool.path).strip_prefix(root).with_context(|| {
-                format!("view tool path {} escapes {}", tool.path, root.display())
-            })?;
+            let relative = Path::new(&tool.path)
+                .strip_prefix(root)
+                .with_context(|| {
+                    format!(
+                        "view tool path {} escapes {}",
+                        tool.path,
+                        root.display()
+                    )
+                })?;
             let mut components = Vec::new();
             for component in relative.components() {
                 match component {
@@ -596,8 +683,9 @@ fn create_launcher_aliases(
                 alias.display()
             )
         })?;
-        let metadata = fs::symlink_metadata(&alias)
-            .with_context(|| format!("failed to inspect launcher alias {}", alias.display()))?;
+        let metadata = fs::symlink_metadata(&alias).with_context(|| {
+            format!("failed to inspect launcher alias {}", alias.display())
+        })?;
         ensure_cached_executable_mode(&metadata, &alias)?;
         verify_controller_alias(&alias, controller)?;
     }
@@ -629,8 +717,9 @@ fn create_cross_bin_aliases(
                 alias.display()
             )
         })?;
-        let metadata = fs::symlink_metadata(&alias)
-            .with_context(|| format!("failed to inspect cross-bin alias {}", alias.display()))?;
+        let metadata = fs::symlink_metadata(&alias).with_context(|| {
+            format!("failed to inspect cross-bin alias {}", alias.display())
+        })?;
         ensure_cached_executable_mode(&metadata, &alias)?;
         verify_controller_alias(&alias, controller)?;
     }
@@ -649,7 +738,9 @@ fn cached_controller_metadata_is_valid(path: &Path, size: u64) -> bool {
     let Ok(directory_metadata) = fs::symlink_metadata(directory) else {
         return false;
     };
-    if !directory_metadata.file_type().is_dir() || directory_metadata.file_type().is_symlink() {
+    if !directory_metadata.file_type().is_dir()
+        || directory_metadata.file_type().is_symlink()
+    {
         return false;
     }
     let Ok(mut entries) = fs::read_dir(directory) else {
@@ -670,7 +761,10 @@ fn cached_controller_metadata_is_valid(path: &Path, size: u64) -> bool {
         && cached_executable_mode_is_valid(&metadata)
 }
 
-fn ensure_source_executable(metadata: &fs::Metadata, path: &Path) -> Result<()> {
+fn ensure_source_executable(
+    metadata: &fs::Metadata,
+    path: &Path,
+) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -699,7 +793,10 @@ fn cached_executable_mode_is_valid(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn ensure_cached_executable_mode(metadata: &fs::Metadata, path: &Path) -> Result<()> {
+fn ensure_cached_executable_mode(
+    metadata: &fs::Metadata,
+    path: &Path,
+) -> Result<()> {
     ensure!(
         cached_executable_mode_is_valid(metadata),
         "controller executable or alias has an invalid mode: {}",
@@ -708,7 +805,10 @@ fn ensure_cached_executable_mode(metadata: &fs::Metadata, path: &Path) -> Result
     Ok(())
 }
 
-fn verify_controller_alias(alias: &Path, controller: &ControllerExecutable) -> Result<()> {
+fn verify_controller_alias(
+    alias: &Path,
+    controller: &ControllerExecutable,
+) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -736,7 +836,11 @@ fn verify_controller_alias(alias: &Path, controller: &ControllerExecutable) -> R
     Ok(())
 }
 
-fn materialized_result(target: &Path, pack: &PackInspection, reused: bool) -> MaterializedView {
+fn materialized_result(
+    target: &Path,
+    pack: &PackInspection,
+    reused: bool,
+) -> MaterializedView {
     MaterializedView {
         root: target.to_owned(),
         manifest_path: target.join(VIEW_MANIFEST_FILE),
@@ -746,32 +850,43 @@ fn materialized_result(target: &Path, pack: &PackInspection, reused: bool) -> Ma
 }
 
 fn write_view_manifest(root: &Path, manifest: &ViewManifest) -> Result<()> {
-    let bytes = serde_json::to_vec(manifest).context("failed to encode view manifest")?;
+    let bytes = serde_json::to_vec(manifest)
+        .context("failed to encode view manifest")?;
     let path = root.join(VIEW_MANIFEST_FILE);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
-        .with_context(|| format!("failed to create view manifest {}", path.display()))?;
-    file.write_all(&bytes)
-        .with_context(|| format!("failed to write view manifest {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync view manifest {}", path.display()))
+        .with_context(|| {
+            format!("failed to create view manifest {}", path.display())
+        })?;
+    file.write_all(&bytes).with_context(|| {
+        format!("failed to write view manifest {}", path.display())
+    })?;
+    file.sync_all().with_context(|| {
+        format!("failed to sync view manifest {}", path.display())
+    })
 }
 
 fn write_cmake_toolchain(root: &Path, view: &ViewManifest) -> Result<()> {
-    let contents = EnvironmentManifest::render_view_cmake(view)
-        .map_err(|error| anyhow::anyhow!("failed to render CMake toolchain: {error}"))?;
+    let contents =
+        EnvironmentManifest::render_view_cmake(view).map_err(|error| {
+            anyhow::anyhow!("failed to render CMake toolchain: {error}")
+        })?;
     let path = root.join(CMAKE_TOOLCHAIN_FILE_NAME);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)
-        .with_context(|| format!("failed to create CMake toolchain {}", path.display()))?;
-    file.write_all(contents.as_bytes())
-        .with_context(|| format!("failed to write CMake toolchain {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync CMake toolchain {}", path.display()))
+        .with_context(|| {
+            format!("failed to create CMake toolchain {}", path.display())
+        })?;
+    file.write_all(contents.as_bytes()).with_context(|| {
+        format!("failed to write CMake toolchain {}", path.display())
+    })?;
+    file.sync_all().with_context(|| {
+        format!("failed to sync CMake toolchain {}", path.display())
+    })
 }
 
 fn validate_materialized_view(
@@ -786,13 +901,19 @@ fn validate_materialized_view(
     ];
     extra_files.extend(launcher_relative_paths(expected_view)?);
     extra_files.extend(crate::cross_bin::relative_paths(expected_view));
-    let extra_file_refs = extra_files.iter().map(String::as_str).collect::<Vec<_>>();
-    verify_directory_metadata_with_extras(pack_manifest, actual_root, &extra_file_refs)?;
+    let extra_file_refs =
+        extra_files.iter().map(String::as_str).collect::<Vec<_>>();
+    verify_directory_metadata_with_extras(
+        pack_manifest,
+        actual_root,
+        &extra_file_refs,
+    )?;
     let manifest_path = actual_root.join(VIEW_MANIFEST_FILE);
-    let bytes = fs::read(&manifest_path)
-        .with_context(|| format!("failed to read view manifest {}", manifest_path.display()))?;
-    let actual: ViewManifest =
-        serde_json::from_slice(&bytes).context("failed to decode materialized view manifest")?;
+    let bytes = fs::read(&manifest_path).with_context(|| {
+        format!("failed to read view manifest {}", manifest_path.display())
+    })?;
+    let actual: ViewManifest = serde_json::from_slice(&bytes)
+        .context("failed to decode materialized view manifest")?;
     actual
         .validate()
         .context("materialized view manifest is invalid")?;
@@ -801,10 +922,13 @@ fn validate_materialized_view(
         "materialized view manifest does not match the requested view"
     );
     let expected_cmake = EnvironmentManifest::render_view_cmake(expected_view)
-        .map_err(|error| anyhow::anyhow!("failed to render CMake toolchain: {error}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("failed to render CMake toolchain: {error}")
+        })?;
     let cmake_path = actual_root.join(CMAKE_TOOLCHAIN_FILE_NAME);
-    let actual_cmake = fs::read_to_string(&cmake_path)
-        .with_context(|| format!("failed to read CMake toolchain {}", cmake_path.display()))?;
+    let actual_cmake = fs::read_to_string(&cmake_path).with_context(|| {
+        format!("failed to read CMake toolchain {}", cmake_path.display())
+    })?;
     ensure!(
         actual_cmake == expected_cmake,
         "materialized CMake toolchain does not match the view"
@@ -824,10 +948,12 @@ fn validate_materialized_view(
 
     for (kind, tool) in &actual.tools {
         let path = map_declared_path(&actual.root, actual_root, &tool.path)?;
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("view tool {kind} is missing at {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
+            format!("view tool {kind} is missing at {}", path.display())
+        })?;
         ensure!(
-            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink(),
             "view tool {kind} is not a regular file: {}",
             path.display()
         );
@@ -852,8 +978,9 @@ fn validate_materialized_view(
         ("resource directory", actual.resource_dir.as_str()),
     ] {
         let path = map_declared_path(&actual.root, actual_root, declared)?;
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("view {label} is missing at {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
+            format!("view {label} is missing at {}", path.display())
+        })?;
         ensure!(
             metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
             "view {label} is not a directory: {}",
@@ -863,15 +990,18 @@ fn validate_materialized_view(
     Ok(())
 }
 
-fn map_declared_path(declared_root: &str, actual_root: &Path, declared: &str) -> Result<PathBuf> {
+fn map_declared_path(
+    declared_root: &str,
+    actual_root: &Path,
+    declared: &str,
+) -> Result<PathBuf> {
     let declared_root = Path::new(declared_root);
     let declared = Path::new(declared);
     if let Ok(relative) = declared.strip_prefix(declared_root) {
         ensure!(
-            relative
-                .components()
-                .all(|component| { matches!(component, std::path::Component::Normal(_)) })
-                || relative.as_os_str().is_empty(),
+            relative.components().all(|component| {
+                matches!(component, std::path::Component::Normal(_))
+            }) || relative.as_os_str().is_empty(),
             "declared view path is not normalized: {}",
             declared.display()
         );
@@ -880,12 +1010,18 @@ fn map_declared_path(declared_root: &str, actual_root: &Path, declared: &str) ->
     Ok(declared.to_owned())
 }
 
-fn seal_view(root: &Path, pack_manifest: &crate::schema::PackManifest) -> Result<()> {
+fn seal_view(
+    root: &Path,
+    pack_manifest: &crate::schema::PackManifest,
+) -> Result<()> {
     seal_view_contents(root, pack_manifest)?;
     set_directory_read_only(root)
 }
 
-fn seal_view_contents(root: &Path, pack_manifest: &crate::schema::PackManifest) -> Result<()> {
+fn seal_view_contents(
+    root: &Path,
+    pack_manifest: &crate::schema::PackManifest,
+) -> Result<()> {
     for file in &pack_manifest.files {
         set_file_read_only(&root.join(&file.path), file.executable)?;
     }
@@ -900,7 +1036,8 @@ fn seal_view_contents(root: &Path, pack_manifest: &crate::schema::PackManifest) 
         .filter(|entry| entry.file_type().is_dir() && entry.path() != root)
         .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
-    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    directories
+        .sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for directory in directories {
         set_directory_read_only(&directory)?;
     }
@@ -942,7 +1079,9 @@ fn set_directory_read_only(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o555))
-            .with_context(|| format!("failed to seal directory {}", path.display()))?;
+            .with_context(|| {
+                format!("failed to seal directory {}", path.display())
+            })?;
     }
     #[cfg(not(unix))]
     {
@@ -956,7 +1095,9 @@ fn set_directory_writable(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("failed to unseal directory {}", path.display()))?;
+            .with_context(|| {
+                format!("failed to unseal directory {}", path.display())
+            })?;
     }
     #[cfg(not(unix))]
     {
@@ -1003,12 +1144,14 @@ fn prepare_directory(path: &Path, label: &str) -> Result<()> {
             );
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path)
-                .with_context(|| format!("failed to create {label} {}", path.display()))?;
+            fs::create_dir_all(path).with_context(|| {
+                format!("failed to create {label} {}", path.display())
+            })?;
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to inspect {label} {}", path.display()))
+            return Err(error).with_context(|| {
+                format!("failed to inspect {label} {}", path.display())
+            })
         }
     }
     Ok(())
@@ -1041,14 +1184,23 @@ fn validate_id_component(label: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::digest::bytes_sha256;
-    use crate::pack::{create_pack, PackOptions};
-    use crate::registry;
-    use crate::schema::{RuntimeContract, RuntimeOwnership, ToolKind, ViewTool, SCHEMA_VERSION};
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
+
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        digest::bytes_sha256,
+        pack::{create_pack, PackOptions},
+        registry,
+        schema::{
+            RuntimeContract, RuntimeOwnership, ToolKind, ViewTool,
+            SCHEMA_VERSION,
+        },
+    };
 
     struct Fixture {
         pack: PathBuf,
@@ -1080,15 +1232,22 @@ mod tests {
             ),
         )
         .unwrap();
-        let materializer = ViewMaterializer::new(&temporary.join("cache")).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.join("cache")).unwrap();
         let controller_source = temporary.join("rcc-controller");
-        fs::write(&controller_source, b"fixture statically linked controller").unwrap();
+        fs::write(&controller_source, b"fixture statically linked controller")
+            .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&controller_source, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(
+                &controller_source,
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
         }
-        let controller = materializer.persist_controller(&controller_source).unwrap();
+        let controller =
+            materializer.persist_controller(&controller_source).unwrap();
         let identity = bytes_sha256(b"fixture-view");
         let contract = RuntimeContract {
             schema_version: SCHEMA_VERSION,
@@ -1112,7 +1271,8 @@ mod tests {
                 let driver_kind = match kind {
                     ToolKind::Cc | ToolKind::Cxx => Some(profile.driver_kind),
                     ToolKind::Linker
-                        if profile.linker_flavor == crate::schema::LinkerFlavor::CoffMsvc =>
+                        if profile.linker_flavor
+                            == crate::schema::LinkerFlavor::CoffMsvc =>
                     {
                         Some(crate::schema::DriverKind::LldLink)
                     }
@@ -1145,11 +1305,15 @@ mod tests {
             root: root.to_string_lossy().into_owned(),
             tools,
             sysroot: root.join("sysroot").to_string_lossy().into_owned(),
-            resource_dir: root.join("lib/clang/22").to_string_lossy().into_owned(),
+            resource_dir: root
+                .join("lib/clang/22")
+                .to_string_lossy()
+                .into_owned(),
             injected_args: BTreeMap::new(),
             forbidden_env: BTreeSet::new(),
         };
-        let bound_identity = crate::layout::recompute_view_identity(&view).unwrap();
+        let bound_identity =
+            crate::layout::recompute_view_identity(&view).unwrap();
         let bound_root = materializer
             .view_root(
                 &bound_identity,
@@ -1159,9 +1323,11 @@ mod tests {
             .unwrap();
         for tool in view.tools.values_mut() {
             let relative = Path::new(&tool.path).strip_prefix(&root).unwrap();
-            tool.path = bound_root.join(relative).to_string_lossy().into_owned();
+            tool.path =
+                bound_root.join(relative).to_string_lossy().into_owned();
         }
-        view.sysroot = bound_root.join("sysroot").to_string_lossy().into_owned();
+        view.sysroot =
+            bound_root.join("sysroot").to_string_lossy().into_owned();
         view.resource_dir = bound_root
             .join("lib/clang/22")
             .to_string_lossy()
@@ -1197,7 +1363,8 @@ mod tests {
         }
         assert!(!first.root.join("cross-bin/gcc").exists());
         assert_eq!(
-            fs::read_to_string(first.root.join(CMAKE_TOOLCHAIN_FILE_NAME)).unwrap(),
+            fs::read_to_string(first.root.join(CMAKE_TOOLCHAIN_FILE_NAME))
+                .unwrap(),
             EnvironmentManifest::render_view_cmake(&fixture.view).unwrap()
         );
         #[cfg(unix)]
@@ -1221,7 +1388,8 @@ mod tests {
                 file_sha256(Path::new(&tool.path)).unwrap(),
                 fixture.controller.sha256
             );
-            verify_controller_alias(Path::new(&tool.path), &fixture.controller).unwrap();
+            verify_controller_alias(Path::new(&tool.path), &fixture.controller)
+                .unwrap();
         }
 
         let resource = first.root.join("lib/clang/22/.keep");
@@ -1292,7 +1460,8 @@ mod tests {
             .materialize_bytes(&pack_bytes, &fixture.controller, &fixture.view)
             .unwrap();
         let old_alias = PathBuf::from(&fixture.view.tools[&ToolKind::Cc].path);
-        fs::set_permissions(&old_alias, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&old_alias, fs::Permissions::from_mode(0o755))
+            .unwrap();
         assert!(!cached_executable_mode_is_valid(
             &fs::metadata(fixture.controller.path()).unwrap()
         ));
@@ -1304,7 +1473,9 @@ mod tests {
         assert!(cached_executable_mode_is_valid(
             &fs::metadata(repaired_controller.path()).unwrap()
         ));
-        assert!(!same_unix_file(&old_alias, repaired_controller.path()).unwrap());
+        assert!(
+            !same_unix_file(&old_alias, repaired_controller.path()).unwrap()
+        );
 
         let repaired_view = fixture
             .materializer
@@ -1329,16 +1500,22 @@ mod tests {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let temporary = tempdir().unwrap();
-        let materializer = ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
         let source = temporary.path().join("rcc-source");
         fs::write(&source, b"trusted controller bytes").unwrap();
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))
+            .unwrap();
         let digest = file_sha256(&source).unwrap();
 
         let external = temporary.path().join("external-controller");
         fs::create_dir(&external).unwrap();
         fs::copy(&source, external.join("rcc")).unwrap();
-        fs::set_permissions(external.join("rcc"), fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(
+            external.join("rcc"),
+            fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
         symlink(
             &external,
             materializer.cache_root().join("controllers").join(&digest),
@@ -1346,7 +1523,8 @@ mod tests {
         .unwrap();
 
         let controller = materializer.persist_controller(&source).unwrap();
-        let directory_metadata = fs::symlink_metadata(controller.path().parent().unwrap()).unwrap();
+        let directory_metadata =
+            fs::symlink_metadata(controller.path().parent().unwrap()).unwrap();
         assert!(directory_metadata.is_dir());
         assert!(!directory_metadata.file_type().is_symlink());
         assert!(cached_controller_is_valid(
@@ -1365,7 +1543,8 @@ mod tests {
         let fixture = fixture(temporary.path());
         let external = temporary.path().join("external-view");
         fs::create_dir(&external).unwrap();
-        fs::set_permissions(&external, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o500))
+            .unwrap();
         let target = PathBuf::from(&fixture.view.root);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         symlink(&external, &target).unwrap();

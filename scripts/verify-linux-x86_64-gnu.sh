@@ -11,6 +11,8 @@ set -eu
 profile=linux-x86_64-gnu-glibc217
 rust_target=x86_64-unknown-linux-gnu
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=lib/posix.sh
+. "$repository/scripts/lib/posix.sh"
 cache_dir=${RCC_CACHE_DIR:-$repository/inner/rcc-cache}
 out_dir=$repository/examples/linux-glibc-c/out
 cxx_out_dir=$repository/examples/linux-glibc-cxx/out
@@ -85,7 +87,10 @@ then
     exit 1
 fi
 
-if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ]; then
+openssl_bin=
+stack_bin=
+capng_bin=
+if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ] && rust_std_ready "$rust_target"; then
     echo "==> cargo-rcc openssl-linux ($rust_target)"
     "$CARGO_RCC" --rcc "$RCC" --cache-dir "$cache_dir" build \
         --manifest-path "$repository/examples/openssl-linux/Cargo.toml" \
@@ -112,6 +117,9 @@ if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ]; then
     capng_bin=$repository/examples/libcap-ng-linux/target/$rust_target/release/libcap-ng-linux
     "$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$capng_bin"
 else
+    if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ]; then
+        echo "skip cargo-rcc: rust-std for $rust_target is missing; run \`rustup target add $rust_target\`" >&2
+    fi
     openssl_bin=
     stack_bin=
     capng_bin=

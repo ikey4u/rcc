@@ -9,7 +9,7 @@
 #     -> Apple SDK into vendor/macos (non-macOS; scripts/setup-env.sh)
 #     -> linux guest runtimes on macOS (Homebrew qemu-system + Lima)
 #   mise check
-#     -> rustfmt --check, cargo test, clippy, script/lock metadata
+#     -> nightly rustfmt --check, cargo test, clippy, script/lock metadata
 #     -> product verify scripts when a release rcc is present
 #   mise release
 #     -> fetches archives into .cache/
@@ -28,9 +28,16 @@
 min_version = "2024.11.1"
 
 [tools]
-# Cargo.toml enforces 1.85 as the MSRV; use the current stable toolchain for
-# normal development, including rustfmt and clippy.
-rust = { version = "stable", components = "rustfmt,clippy" }
+# Cargo.toml enforces 1.85 as the MSRV. Stable is for build/test/clippy.
+# rustfmt.toml uses unstable options, so nightly rustfmt is a second toolchain.
+rust = [
+    { version = "stable", components = "clippy" },
+    { version = "nightly", components = "rustfmt" },
+]
+
+[env]
+# mise may leave the last-installed rustup toolchain as default; pin cargo to stable.
+RUSTUP_TOOLCHAIN = "stable"
 
 [tasks.setup]
 description = "cargo fetch, pinned archives, Apple SDK off macOS, and macOS linux guest VMs"
@@ -64,9 +71,14 @@ depends = ["release"]
 run = "./scripts/install.sh"
 
 [tasks.format]
-description = "Format all Rust code"
-run = "cargo fmt --all"
+description = "Format all Rust code with nightly rustfmt (rustfmt.toml unstable options)"
+run = "cargo +nightly fmt --all -- --unstable-features"
+
+[tasks."format:check"]
+description = "Check Rust formatting with nightly rustfmt"
+run = "cargo +nightly fmt --all -- --check --unstable-features"
 
 [tasks.check]
-description = "rustfmt check, cargo test, clippy, script/lock metadata; product verify scripts when a release rcc is present"
+description = "nightly rustfmt check, cargo test, clippy, script/lock metadata; product verify scripts when a release rcc is present"
+depends = ["format:check"]
 run = "./scripts/check.sh"

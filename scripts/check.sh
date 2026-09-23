@@ -1,6 +1,7 @@
 #!/bin/sh
-# Workspace quality gate: rustfmt, tests, clippy, script/lock metadata, and
+# Workspace quality gate: tests, clippy, script/lock metadata, and
 # (when a release rcc is present) the product verify scripts.
+# rustfmt --check is mise task format:check (nightly), run by `mise check`.
 set -eu
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -94,9 +95,6 @@ verify_sqlite_if_ready() {
     fi
     "$repository/scripts/verify-sqlite.sh" "$profile"
 }
-
-echo "==> rustfmt"
-cargo fmt --all -- --check
 
 echo "==> cargo test"
 cargo test --workspace --locked

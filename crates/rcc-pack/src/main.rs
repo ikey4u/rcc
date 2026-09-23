@@ -1,10 +1,14 @@
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+};
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rcc_core::pack::{
-    create_pack, extract_pack, inspect_pack, verify_pack, PackInspection, PackOptions,
+    create_pack, extract_pack, inspect_pack, verify_pack, PackInspection,
+    PackOptions,
 };
-use std::io::{self, Write};
-use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -88,13 +92,14 @@ fn run(cli: Cli) -> Result<()> {
             profiles,
         } => {
             let options = PackOptions::new(pack_id, revision, host, profiles);
-            let inspection = create_pack(&source, &output, &options).with_context(|| {
-                format!(
-                    "failed to create {} from {}",
-                    output.display(),
-                    source.display()
-                )
-            })?;
+            let inspection = create_pack(&source, &output, &options)
+                .with_context(|| {
+                    format!(
+                        "failed to create {} from {}",
+                        output.display(),
+                        source.display()
+                    )
+                })?;
             println!(
                 "created {} ({} files, {} bytes, sha256 {})",
                 output.display(),
@@ -104,8 +109,9 @@ fn run(cli: Cli) -> Result<()> {
             );
         }
         Command::List { pack, json } => {
-            let inspection = inspect_pack(&pack)
-                .with_context(|| format!("failed to inspect {}", pack.display()))?;
+            let inspection = inspect_pack(&pack).with_context(|| {
+                format!("failed to inspect {}", pack.display())
+            })?;
             print_inspection(&inspection, json, false, true)?;
         }
         Command::Verify {
@@ -113,18 +119,20 @@ fn run(cli: Cli) -> Result<()> {
             json,
             verbose,
         } => {
-            let inspection = verify_pack(&pack)
-                .with_context(|| format!("failed to verify {}", pack.display()))?;
+            let inspection = verify_pack(&pack).with_context(|| {
+                format!("failed to verify {}", pack.display())
+            })?;
             print_inspection(&inspection, json, true, verbose)?;
         }
         Command::Extract { pack, output } => {
-            let inspection = extract_pack(&pack, &output).with_context(|| {
-                format!(
-                    "failed to extract {} into {}",
-                    pack.display(),
-                    output.display()
-                )
-            })?;
+            let inspection =
+                extract_pack(&pack, &output).with_context(|| {
+                    format!(
+                        "failed to extract {} into {}",
+                        pack.display(),
+                        output.display()
+                    )
+                })?;
             println!(
                 "extracted {} files into {} (pack sha256 {})",
                 inspection.manifest.files.len(),
@@ -213,8 +221,15 @@ mod tests {
             "macos-aarch64",
         ])
         .unwrap();
-        Cli::try_parse_from(["rcc-pack", "list", "payload.rccpack", "--json"]).unwrap();
+        Cli::try_parse_from(["rcc-pack", "list", "payload.rccpack", "--json"])
+            .unwrap();
         Cli::try_parse_from(["rcc-pack", "verify", "payload.rccpack"]).unwrap();
-        Cli::try_parse_from(["rcc-pack", "extract", "payload.rccpack", "extracted"]).unwrap();
+        Cli::try_parse_from([
+            "rcc-pack",
+            "extract",
+            "payload.rccpack",
+            "extracted",
+        ])
+        .unwrap();
     }
 }

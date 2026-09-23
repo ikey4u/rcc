@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Cargo subcommand that builds Rust crates with RCC as the C/C++ toolchain and linker"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 cargo-options = "0.7.5"

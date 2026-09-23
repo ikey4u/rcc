@@ -1,15 +1,21 @@
-use crate::digest::{bytes_sha256, file_region_sha256, file_sha256};
-use crate::schema::{PackFile, PackManifest, SCHEMA_VERSION};
+use std::{
+    collections::BTreeSet,
+    fs::{self, File, OpenOptions},
+    io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use anyhow::{bail, ensure, Context, Result};
 use lz4_flex::block::{compress, decompress, get_maximum_output_size};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
+
+use crate::{
+    digest::{bytes_sha256, file_region_sha256, file_sha256},
+    schema::{PackFile, PackManifest, SCHEMA_VERSION},
+};
 
 pub const PACK_MAGIC: &[u8; 8] = b"RCCPACK\0";
 pub const PACK_FORMAT_VERSION: u32 = 2;
@@ -87,9 +93,9 @@ pub fn create_pack(
         "pack destination already exists: {}",
         destination.display()
     );
-    let source = source
-        .canonicalize()
-        .with_context(|| format!("failed to canonicalize pack source {}", source.display()))?;
+    let source = source.canonicalize().with_context(|| {
+        format!("failed to canonicalize pack source {}", source.display())
+    })?;
     ensure!(
         source.is_dir(),
         "pack source is not a directory: {}",
@@ -99,8 +105,9 @@ pub fn create_pack(
     let sources = collect_source_files(&source)?;
     ensure!(!sources.is_empty(), "pack source contains no regular files");
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create pack parent {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!("failed to create pack parent {}", parent.display())
+    })?;
 
     let (data_path, data_file) = create_unique_file(parent, ".rccpack-data")?;
     let mut data_guard = FileCleanup::new(data_path);
@@ -110,12 +117,13 @@ pub fn create_pack(
     let mut next_offset = 0_u64;
 
     for source_file in sources {
-        let before = fs::symlink_metadata(&source_file.source_path).with_context(|| {
-            format!(
-                "failed to inspect source file {}",
-                source_file.source_path.display()
-            )
-        })?;
+        let before = fs::symlink_metadata(&source_file.source_path)
+            .with_context(|| {
+                format!(
+                    "failed to inspect source file {}",
+                    source_file.source_path.display()
+                )
+            })?;
         ensure!(
             before.file_type().is_file() && !before.file_type().is_symlink(),
             "pack source changed or is not a regular file: {}",
@@ -128,18 +136,20 @@ pub fn create_pack(
             source_file.source_path.display()
         );
 
-        let contents = fs::read(&source_file.source_path).with_context(|| {
-            format!(
-                "failed to read source file {}",
-                source_file.source_path.display()
-            )
-        })?;
-        let after = fs::symlink_metadata(&source_file.source_path).with_context(|| {
-            format!(
-                "failed to re-inspect source file {}",
-                source_file.source_path.display()
-            )
-        })?;
+        let contents =
+            fs::read(&source_file.source_path).with_context(|| {
+                format!(
+                    "failed to read source file {}",
+                    source_file.source_path.display()
+                )
+            })?;
+        let after = fs::symlink_metadata(&source_file.source_path)
+            .with_context(|| {
+                format!(
+                    "failed to re-inspect source file {}",
+                    source_file.source_path.display()
+                )
+            })?;
         ensure!(
             after.file_type().is_file()
                 && !after.file_type().is_symlink()
@@ -195,30 +205,35 @@ pub fn create_pack(
         files,
     };
     validate_manifest(&manifest, next_offset)?;
-    let manifest_bytes = serde_json::to_vec(&manifest).context("failed to encode pack manifest")?;
+    let manifest_bytes = serde_json::to_vec(&manifest)
+        .context("failed to encode pack manifest")?;
     ensure!(
         manifest_bytes.len() as u64 <= MAX_MANIFEST_SIZE,
         "pack manifest exceeds the {} byte limit",
         MAX_MANIFEST_SIZE
     );
 
-    let (temporary_path, temporary_file) = create_unique_file(parent, ".rccpack-output")?;
+    let (temporary_path, temporary_file) =
+        create_unique_file(parent, ".rccpack-output")?;
     let mut output_guard = FileCleanup::new(temporary_path.clone());
     let mut output = BufWriter::new(temporary_file);
     write_header(&mut output, manifest_bytes.len() as u64)?;
     output
         .write_all(&manifest_bytes)
         .context("failed to write pack manifest")?;
-    let mut staged = File::open(data_guard.path())
-        .with_context(|| format!("failed to reopen {}", data_guard.path().display()))?;
-    io::copy(&mut staged, &mut output).context("failed to append compressed pack payload")?;
+    let mut staged = File::open(data_guard.path()).with_context(|| {
+        format!("failed to reopen {}", data_guard.path().display())
+    })?;
+    io::copy(&mut staged, &mut output)
+        .context("failed to append compressed pack payload")?;
     output.flush().context("failed to flush pack")?;
     output.get_ref().sync_all().context("failed to sync pack")?;
     drop(output);
 
     // Verify the exact bytes that will be published rather than trusting only
     // the in-memory representation used by the writer.
-    verify_pack(&temporary_path).context("newly created pack failed self-verification")?;
+    verify_pack(&temporary_path)
+        .context("newly created pack failed self-verification")?;
     ensure!(
         !destination.exists(),
         "pack destination appeared while creating pack: {}",
@@ -266,7 +281,8 @@ pub fn inspect_embedded_pack_bytes(
         build_time_sha256.len() == 64
             && build_time_sha256
                 .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                .all(|byte| byte.is_ascii_digit()
+                    || (b'a'..=b'f').contains(&byte)),
         "embedded pack build-time digest is invalid"
     );
     inspect_pack_bytes_inner(bytes, Some(build_time_sha256))
@@ -281,7 +297,9 @@ fn inspect_pack_bytes_inner(
         "pack is smaller than its fixed header"
     );
     ensure!(&bytes[..8] == PACK_MAGIC, "invalid RCC pack magic");
-    let version = u32::from_le_bytes(bytes[8..12].try_into().expect("fixed version field"));
+    let version = u32::from_le_bytes(
+        bytes[8..12].try_into().expect("fixed version field"),
+    );
     ensure!(
         version == PACK_FORMAT_VERSION,
         "unsupported RCC pack format version {version}; expected {PACK_FORMAT_VERSION}"
@@ -302,9 +320,10 @@ fn inspect_pack_bytes_inner(
         data_offset <= bytes.len() as u64,
         "pack manifest extends beyond the input"
     );
-    let manifest: PackManifest =
-        serde_json::from_slice(&bytes[HEADER_SIZE as usize..data_offset as usize])
-            .context("failed to decode pack manifest")?;
+    let manifest: PackManifest = serde_json::from_slice(
+        &bytes[HEADER_SIZE as usize..data_offset as usize],
+    )
+    .context("failed to decode pack manifest")?;
     let payload = &bytes[data_offset as usize..];
     validate_manifest(&manifest, payload.len() as u64)?;
     if build_time_sha256.is_none() {
@@ -378,8 +397,9 @@ pub fn extract_pack(path: &Path, destination: &Path) -> Result<PackInspection> {
         destination.display()
     );
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create extract parent {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!("failed to create extract parent {}", parent.display())
+    })?;
     let temporary = create_unique_dir(parent, ".rccpack-extract")?;
     let mut guard = DirectoryCleanup::new(temporary.clone());
     let inspection = extract_pack_into(path, &temporary)?;
@@ -400,7 +420,10 @@ pub fn extract_pack(path: &Path, destination: &Path) -> Result<PackInspection> {
 }
 
 /// Extracts into an existing, empty directory owned by the caller.
-pub(crate) fn extract_pack_into(path: &Path, destination: &Path) -> Result<PackInspection> {
+pub(crate) fn extract_pack_into(
+    path: &Path,
+    destination: &Path,
+) -> Result<PackInspection> {
     ensure!(
         destination.is_dir(),
         "extract root is not a directory: {}",
@@ -408,7 +431,10 @@ pub(crate) fn extract_pack_into(path: &Path, destination: &Path) -> Result<PackI
     );
     ensure!(
         fs::read_dir(destination)
-            .with_context(|| format!("failed to read extract root {}", destination.display()))?
+            .with_context(|| format!(
+                "failed to read extract root {}",
+                destination.display()
+            ))?
             .next()
             .is_none(),
         "extract root is not empty: {}",
@@ -419,8 +445,9 @@ pub(crate) fn extract_pack_into(path: &Path, destination: &Path) -> Result<PackI
     let manifest = opened.manifest.clone();
     let pack_size = opened.pack_size;
     let data_offset = opened.data_offset;
-    process_files(opened, Some(destination))
-        .with_context(|| format!("failed to extract pack {}", path.display()))?;
+    process_files(opened, Some(destination)).with_context(|| {
+        format!("failed to extract pack {}", path.display())
+    })?;
     verify_directory_metadata_with_extras(&manifest, destination, &[])?;
     Ok(PackInspection {
         manifest,
@@ -496,7 +523,9 @@ fn verify_directory_contents(
     }
 
     for item in WalkDir::new(root).follow_links(false) {
-        let item = item.with_context(|| format!("failed to inspect view {}", root.display()))?;
+        let item = item.with_context(|| {
+            format!("failed to inspect view {}", root.display())
+        })?;
         if item.depth() == 0 {
             continue;
         }
@@ -536,7 +565,8 @@ fn verify_directory_contents(
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("view is missing {}", file.path))?;
         ensure!(
-            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink(),
             "view entry is not a regular file: {}",
             file.path
         );
@@ -564,7 +594,8 @@ fn verify_directory_contents(
         let metadata = fs::symlink_metadata(&full)
             .with_context(|| format!("view is missing extra file {path}"))?;
         ensure!(
-            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink(),
             "view extra entry is not a regular file: {path}"
         );
     }
@@ -574,8 +605,9 @@ fn verify_directory_contents(
 fn collect_source_files(source: &Path) -> Result<Vec<SourceFile>> {
     let mut files = Vec::new();
     for item in WalkDir::new(source).follow_links(false) {
-        let item =
-            item.with_context(|| format!("failed to walk pack source {}", source.display()))?;
+        let item = item.with_context(|| {
+            format!("failed to walk pack source {}", source.display())
+        })?;
         if item.depth() == 0 {
             continue;
         }
@@ -596,9 +628,9 @@ fn collect_source_files(source: &Path) -> Result<Vec<SourceFile>> {
             file_type.is_file(),
             "pack source contains a special file: {archive_path}"
         );
-        let metadata = item
-            .metadata()
-            .with_context(|| format!("failed to inspect source file {archive_path}"))?;
+        let metadata = item.metadata().with_context(|| {
+            format!("failed to inspect source file {archive_path}")
+        })?;
         files.push(SourceFile {
             archive_path,
             source_path: item.path().to_owned(),
@@ -611,8 +643,8 @@ fn collect_source_files(source: &Path) -> Result<Vec<SourceFile>> {
 }
 
 fn open_pack(path: &Path) -> Result<OpenedPack> {
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open pack {}", path.display()))?;
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open pack {}", path.display()))?;
     let pack_size = file
         .metadata()
         .with_context(|| format!("failed to inspect pack {}", path.display()))?
@@ -628,7 +660,8 @@ fn open_pack(path: &Path) -> Result<OpenedPack> {
         version == PACK_FORMAT_VERSION,
         "unsupported rccpack version {version}; expected {PACK_FORMAT_VERSION}"
     );
-    let manifest_size = read_u64(&mut file).context("failed to read manifest size")?;
+    let manifest_size =
+        read_u64(&mut file).context("failed to read manifest size")?;
     ensure!(
         manifest_size <= MAX_MANIFEST_SIZE,
         "pack manifest is too large"
@@ -638,15 +671,17 @@ fn open_pack(path: &Path) -> Result<OpenedPack> {
         .context("pack manifest offset overflow")?;
     ensure!(data_offset <= pack_size, "pack manifest is truncated");
 
-    let manifest_len = usize::try_from(manifest_size).context("manifest does not fit in memory")?;
+    let manifest_len = usize::try_from(manifest_size)
+        .context("manifest does not fit in memory")?;
     let mut manifest_bytes = vec![0_u8; manifest_len];
     file.read_exact(&mut manifest_bytes)
         .context("failed to read pack manifest")?;
-    let manifest: PackManifest =
-        serde_json::from_slice(&manifest_bytes).context("failed to decode pack manifest JSON")?;
+    let manifest: PackManifest = serde_json::from_slice(&manifest_bytes)
+        .context("failed to decode pack manifest JSON")?;
     let payload_len = pack_size - data_offset;
     validate_manifest(&manifest, payload_len)?;
-    let actual_payload_sha256 = file_region_sha256(path, data_offset, payload_len)?;
+    let actual_payload_sha256 =
+        file_region_sha256(path, data_offset, payload_len)?;
     ensure!(
         actual_payload_sha256 == manifest.payload_sha256,
         "compressed payload digest mismatch: expected {}, got {}",
@@ -661,7 +696,10 @@ fn open_pack(path: &Path) -> Result<OpenedPack> {
     })
 }
 
-fn process_files(mut opened: OpenedPack, destination: Option<&Path>) -> Result<()> {
+fn process_files(
+    mut opened: OpenedPack,
+    destination: Option<&Path>,
+) -> Result<()> {
     opened
         .file
         .seek(SeekFrom::Start(opened.data_offset))
@@ -672,15 +710,21 @@ fn process_files(mut opened: OpenedPack, destination: Option<&Path>) -> Result<(
         let mut output = if let Some(root) = destination {
             let path = root.join(path_from_archive(&entry.path));
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create directory for {}", entry.path))?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create directory for {}", entry.path)
+                })?;
             }
             Some(
                 OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(&path)
-                    .with_context(|| format!("failed to create extracted file {}", entry.path))?,
+                    .with_context(|| {
+                        format!(
+                            "failed to create extracted file {}",
+                            entry.path
+                        )
+                    })?,
             )
         } else {
             None
@@ -692,13 +736,15 @@ fn process_files(mut opened: OpenedPack, destination: Option<&Path>) -> Result<(
             let compressed_len = usize::try_from(entry.compressed_len)
                 .context("compressed file does not fit in memory")?;
             let mut compressed = vec![0_u8; compressed_len];
-            reader
-                .read_exact(&mut compressed)
-                .with_context(|| format!("compressed block is truncated for {}", entry.path))?;
+            reader.read_exact(&mut compressed).with_context(|| {
+                format!("compressed block is truncated for {}", entry.path)
+            })?;
             let original_len = usize::try_from(entry.original_len)
                 .context("uncompressed file does not fit in memory")?;
-            let contents = decompress(&compressed, original_len)
-                .with_context(|| format!("invalid LZ4 block for {}", entry.path))?;
+            let contents =
+                decompress(&compressed, original_len).with_context(|| {
+                    format!("invalid LZ4 block for {}", entry.path)
+                })?;
             ensure!(
                 contents.len() == original_len,
                 "LZ4 size mismatch for {}: expected {}, got {}",
@@ -717,8 +763,9 @@ fn process_files(mut opened: OpenedPack, destination: Option<&Path>) -> Result<(
             digest
         );
         if let Some(file) = output.as_mut() {
-            file.write_all(&contents)
-                .with_context(|| format!("failed to write extracted file {}", entry.path))?;
+            file.write_all(&contents).with_context(|| {
+                format!("failed to write extracted file {}", entry.path)
+            })?;
             file.flush()
                 .with_context(|| format!("failed to flush {}", entry.path))?;
             file.sync_all()
@@ -726,7 +773,10 @@ fn process_files(mut opened: OpenedPack, destination: Option<&Path>) -> Result<(
         }
         drop(output);
         if let Some(root) = destination {
-            set_executable(&root.join(path_from_archive(&entry.path)), entry.executable)?;
+            set_executable(
+                &root.join(path_from_archive(&entry.path)),
+                entry.executable,
+            )?;
         }
     }
     Ok(())
@@ -794,7 +844,9 @@ fn validate_path_order<'a>(paths: impl Iterator<Item = &'a str>) -> Result<()> {
             );
         }
         for (index, _) in path.match_indices('/') {
-            let parent = &path[..index];
+            let Some(parent) = path.get(..index) else {
+                continue;
+            };
             ensure!(
                 !seen.contains(parent),
                 "pack path conflicts with parent file: {parent} and {path}"
@@ -813,9 +865,9 @@ fn normalize_relative_path(path: &Path) -> Result<String> {
         let Component::Normal(component) = component else {
             bail!("path contains an unsafe component: {}", path.display());
         };
-        let component = component
-            .to_str()
-            .with_context(|| format!("path is not valid UTF-8: {}", path.display()))?;
+        let component = component.to_str().with_context(|| {
+            format!("path is not valid UTF-8: {}", path.display())
+        })?;
         ensure!(
             !component.is_empty()
                 && component != "."
@@ -880,8 +932,9 @@ fn is_executable(_metadata: &fs::Metadata) -> bool {
 fn set_executable(path: &Path, executable: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = if executable { 0o755 } else { 0o644 };
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .with_context(|| format!("failed to set mode {:o} on {}", mode, path.display()))
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).with_context(
+        || format!("failed to set mode {:o} on {}", mode, path.display()),
+    )
 }
 
 #[cfg(not(unix))]
@@ -890,7 +943,11 @@ fn set_executable(_path: &Path, _executable: bool) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn verify_executable(metadata: &fs::Metadata, expected: bool, path: &str) -> Result<()> {
+fn verify_executable(
+    metadata: &fs::Metadata,
+    expected: bool,
+    path: &str,
+) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     ensure!(
         (metadata.permissions().mode() & 0o111 != 0) == expected,
@@ -900,7 +957,11 @@ fn verify_executable(metadata: &fs::Metadata, expected: bool, path: &str) -> Res
 }
 
 #[cfg(not(unix))]
-fn verify_executable(_metadata: &fs::Metadata, _expected: bool, _path: &str) -> Result<()> {
+fn verify_executable(
+    _metadata: &fs::Metadata,
+    _expected: bool,
+    _path: &str,
+) -> Result<()> {
     Ok(())
 }
 
@@ -909,10 +970,16 @@ fn create_unique_file(parent: &Path, label: &str) -> Result<(PathBuf, File)> {
         let path = unique_path(parent, label);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                continue
+            }
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to create temporary file {}", path.display()))
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create temporary file {}",
+                        path.display()
+                    )
+                })
             }
         }
     }
@@ -927,10 +994,15 @@ pub(crate) fn create_unique_dir(parent: &Path, label: &str) -> Result<PathBuf> {
         let path = unique_path(parent, label);
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                continue
+            }
             Err(error) => {
                 return Err(error).with_context(|| {
-                    format!("failed to create temporary directory {}", path.display())
+                    format!(
+                        "failed to create temporary directory {}",
+                        path.display()
+                    )
                 })
             }
         }
@@ -998,8 +1070,9 @@ impl FileCleanup {
 
     fn remove_now(&mut self) -> Result<()> {
         if self.armed {
-            fs::remove_file(&self.path)
-                .with_context(|| format!("failed to remove {}", self.path.display()))?;
+            fs::remove_file(&self.path).with_context(|| {
+                format!("failed to remove {}", self.path.display())
+            })?;
             self.armed = false;
         }
         Ok(())
@@ -1016,12 +1089,19 @@ impl Drop for FileCleanup {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
 
+    use super::*;
+
     fn options() -> PackOptions {
-        PackOptions::new("test-pack", "r1", "aarch64-apple-darwin", ["test-profile"])
+        PackOptions::new(
+            "test-pack",
+            "r1",
+            "aarch64-apple-darwin",
+            ["test-profile"],
+        )
     }
 
     #[test]
@@ -1040,14 +1120,19 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(source.join("bin/tool"), fs::Permissions::from_mode(0o755))
-                .unwrap();
+            fs::set_permissions(
+                source.join("bin/tool"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
         }
 
         let first = temporary.path().join("first.rccpack");
         let second = temporary.path().join("second.rccpack");
-        let first_inspection = create_pack(&source, &first, &options()).unwrap();
-        let second_inspection = create_pack(&source, &second, &options()).unwrap();
+        let first_inspection =
+            create_pack(&source, &first, &options()).unwrap();
+        let second_inspection =
+            create_pack(&source, &second, &options()).unwrap();
         assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
         assert_eq!(first_inspection.manifest, second_inspection.manifest);
         assert_eq!(first_inspection.sha256, second_inspection.sha256);
@@ -1056,7 +1141,8 @@ mod tests {
         let memory_inspection = inspect_pack_bytes(&pack_bytes).unwrap();
         assert_eq!(memory_inspection, first_inspection);
         assert_eq!(
-            inspect_embedded_pack_bytes(&pack_bytes, &first_inspection.sha256).unwrap(),
+            inspect_embedded_pack_bytes(&pack_bytes, &first_inspection.sha256)
+                .unwrap(),
             first_inspection
         );
         assert_eq!(
@@ -1084,8 +1170,12 @@ mod tests {
             fs::create_dir(&source).unwrap();
             fs::write(source.join("real"), b"data").unwrap();
             symlink("real", source.join("link")).unwrap();
-            let error = create_pack(&source, &temporary.path().join("bad.rccpack"), &options())
-                .unwrap_err();
+            let error = create_pack(
+                &source,
+                &temporary.path().join("bad.rccpack"),
+                &options(),
+            )
+            .unwrap_err();
             assert!(error.to_string().contains("symlink"));
         }
     }
@@ -1152,7 +1242,8 @@ mod tests {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
         fs::create_dir(&source).unwrap();
-        fs::write(source.join("data"), b"some content that compresses").unwrap();
+        fs::write(source.join("data"), b"some content that compresses")
+            .unwrap();
         let pack = temporary.path().join("data.rccpack");
         create_pack(&source, &pack, &options()).unwrap();
 

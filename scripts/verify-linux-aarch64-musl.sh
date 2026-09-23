@@ -9,6 +9,8 @@ set -eu
 profile=linux-aarch64-musl-static
 rust_target=aarch64-unknown-linux-musl
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=lib/posix.sh
+. "$repository/scripts/lib/posix.sh"
 cache_dir=${RCC_CACHE_DIR:-$repository/inner/rcc-cache}
 out_dir=$repository/examples/linux-musl-c/out-aarch64
 cxx_out_dir=$repository/examples/linux-musl-cxx/out-aarch64
@@ -75,21 +77,27 @@ echo "==> native C++: iostream, exception, thread"
     "$repository/examples/linux-musl-cxx/src/main.cpp"
 "$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$cxx_out_dir/linux-musl-cxx"
 
-echo "==> cargo-rcc openssl-linux"
-"$CARGO_RCC" --rcc "$RCC" --cache-dir "$cache_dir" build \
-    --manifest-path "$repository/examples/openssl-linux/Cargo.toml" \
-    --target "$rust_target" \
-    --release
-openssl_bin=$repository/examples/openssl-linux/target/$rust_target/release/openssl-linux-example
-"$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$openssl_bin"
+openssl_bin=
+stack_bin=
+if [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ] && rust_std_ready "$rust_target"; then
+    echo "==> cargo-rcc openssl-linux"
+    "$CARGO_RCC" --rcc "$RCC" --cache-dir "$cache_dir" build \
+        --manifest-path "$repository/examples/openssl-linux/Cargo.toml" \
+        --target "$rust_target" \
+        --release
+    openssl_bin=$repository/examples/openssl-linux/target/$rust_target/release/openssl-linux-example
+    "$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$openssl_bin"
 
-echo "==> cargo-rcc native-stack-linux (OpenSSL + bundled SQLite)"
-"$CARGO_RCC" --rcc "$RCC" --cache-dir "$cache_dir" build \
-    --manifest-path "$repository/examples/native-stack-linux/Cargo.toml" \
-    --target "$rust_target" \
-    --release
-stack_bin=$repository/examples/native-stack-linux/target/$rust_target/release/native-stack-linux
-"$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$stack_bin"
+    echo "==> cargo-rcc native-stack-linux (OpenSSL + bundled SQLite)"
+    "$CARGO_RCC" --rcc "$RCC" --cache-dir "$cache_dir" build \
+        --manifest-path "$repository/examples/native-stack-linux/Cargo.toml" \
+        --target "$rust_target" \
+        --release
+    stack_bin=$repository/examples/native-stack-linux/target/$rust_target/release/native-stack-linux
+    "$RCC" --cache-dir "$cache_dir" verify --profile "$profile" "$stack_bin"
+elif [ "${RCC_SKIP_CARGO_RCC:-}" != 1 ]; then
+    echo "skip cargo-rcc: rust-std for $rust_target is missing; run \`rustup target add $rust_target\`" >&2
+fi
 
 run_guest() {
     binary=$1
@@ -139,8 +147,10 @@ run_guest() {
 
 run_guest "$out_dir/linux-musl-c" "rcc-c-ok"
 run_guest "$cxx_out_dir/linux-musl-cxx" "rcc-cxx-ok"
-run_guest "$openssl_bin" "OpenSSL"
-run_guest "$stack_bin" "sqlite=rcc-musl"
+if [ -n "$openssl_bin" ]; then
+    run_guest "$openssl_bin" "OpenSSL"
+    run_guest "$stack_bin" "sqlite=rcc-musl"
+fi
 
 echo
 echo "linux-aarch64-musl-static verification passed"

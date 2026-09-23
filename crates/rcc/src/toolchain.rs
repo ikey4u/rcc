@@ -1,14 +1,19 @@
-use crate::cache;
-use crate::engine;
-use crate::payload::{Payload, PayloadOrigin};
-use crate::provider;
-use anyhow::{ensure, Context, Result};
-use rcc_core::contracts;
-use rcc_core::layout::{build_view_manifest, launcher_path, ControllerIdentity};
-use rcc_core::pack::PackInspection;
-use rcc_core::schema::{Profile, ToolKind, ViewManifest};
-use rcc_core::view::{MaterializedView, ViewMaterializer};
 use std::path::{Path, PathBuf};
+
+use anyhow::{ensure, Context, Result};
+use rcc_core::{
+    contracts,
+    layout::{build_view_manifest, launcher_path, ControllerIdentity},
+    pack::PackInspection,
+    schema::{Profile, ToolKind, ViewManifest},
+    view::{MaterializedView, ViewMaterializer},
+};
+
+use crate::{
+    cache, engine,
+    payload::{Payload, PayloadOrigin},
+    provider,
+};
 
 pub const CONTROLLER_HOST: &str = env!("RCC_HOST_TRIPLE");
 pub const CONTROLLER_BUILD_SHA256: &str = env!("RCC_CONTROLLER_BUILD_SHA256");
@@ -29,10 +34,12 @@ impl ResolvedView {
             self.manifest.profile.profile_id
         );
         let path = launcher_path(&self.manifest, kind);
-        let metadata = std::fs::symlink_metadata(&path)
-            .with_context(|| format!("profile launcher is missing: {}", path.display()))?;
+        let metadata = std::fs::symlink_metadata(&path).with_context(|| {
+            format!("profile launcher is missing: {}", path.display())
+        })?;
         ensure!(
-            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink(),
             "profile launcher is not a regular file: {}",
             path.display()
         );
@@ -61,7 +68,8 @@ pub fn materialize(
             engine::BUILD_ID
         );
     }
-    let executable = std::env::current_exe().context("failed to locate the running RCC binary")?;
+    let executable = std::env::current_exe()
+        .context("failed to locate the running RCC binary")?;
     let controller = materializer
         .persist_controller(&executable)
         .context("failed to persist the static RCC controller")?;
@@ -79,9 +87,13 @@ pub fn materialize(
     );
 
     let contract = contracts::resolve(profile, contract_id)?;
-    let external_sysroot = provider::resolve_external_sysroot(profile, home_directory)?;
-    let controller_identity =
-        ControllerIdentity::new(CONTROLLER_BUILD_SHA256, &controller, engine::BUILD_ID);
+    let external_sysroot =
+        provider::resolve_external_sysroot(profile, home_directory)?;
+    let controller_identity = ControllerIdentity::new(
+        CONTROLLER_BUILD_SHA256,
+        &controller,
+        engine::BUILD_ID,
+    );
     let manifest = build_view_manifest(
         &materializer,
         &pack,
