@@ -41,7 +41,12 @@ host_label() {
     esac
 }
 
-build_full_rcc() {
+build_full_rcc() (
+    mkdir -p "$repository/dist"
+    build_root=$(mktemp -d "$repository/dist/.rcc-release-build.XXXXXXXX")
+    trap 'rm -rf "$build_root"' EXIT
+    build_output=$build_root/rcc-release
+
     bootstrap_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
     source_archive=$archive_cache/llvm-project-22.1.8.src.tar.xz
     musl_archive=$archive_cache/musl-1.2.5.tar.gz
@@ -51,8 +56,9 @@ build_full_rcc() {
             exit 66
         fi
     done
+    (. "$script_directory/lib/posix.sh"; make_command >/dev/null)
 
-    echo "building release rcc into $rcc_release_dir" >&2
+    echo "building release rcc into $build_output" >&2
     host=$(rustc -vV | awk '/^host:/{print $2}')
     case "$host" in
         aarch64-apple-darwin)
@@ -65,7 +71,7 @@ build_full_rcc() {
                 "$bootstrap_archive" \
                 "$source_archive" \
                 "$musl_archive" \
-                "$rcc_release_dir"
+                "$build_output"
             ;;
         x86_64-apple-darwin)
             RCC_ARCHIVE_CACHE=$archive_cache \
@@ -73,7 +79,7 @@ build_full_rcc() {
                 "$bootstrap_archive" \
                 "$source_archive" \
                 "$musl_archive" \
-                "$rcc_release_dir"
+                "$build_output"
             ;;
         x86_64-unknown-linux-gnu|x86_64-unknown-linux-musl)
             resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
@@ -82,7 +88,7 @@ build_full_rcc() {
                 "$resource_archive" \
                 "$source_archive" \
                 "$musl_archive" \
-                "$rcc_release_dir"
+                "$build_output"
             ;;
         aarch64-unknown-linux-gnu|aarch64-unknown-linux-musl)
             resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
@@ -91,7 +97,7 @@ build_full_rcc() {
                 "$resource_archive" \
                 "$source_archive" \
                 "$musl_archive" \
-                "$rcc_release_dir"
+                "$build_output"
             ;;
         x86_64-pc-windows-msvc|x86_64-pc-windows-gnu)
             resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
@@ -100,7 +106,7 @@ build_full_rcc() {
                 "$resource_archive" \
                 "$source_archive" \
                 "$musl_archive" \
-                "$rcc_release_dir"
+                "$build_output"
             ;;
         aarch64-pc-windows-msvc)
             resource_archive=$archive_cache/LLVM-22.1.8-macOS-ARM64.tar.xz
@@ -109,14 +115,24 @@ build_full_rcc() {
                 "$resource_archive" \
                 "$source_archive" \
                 "$musl_archive" \
-                "$rcc_release_dir"
+                "$build_output"
             ;;
         *)
             echo "no release build script for rustc host $host" >&2
             exit 64
             ;;
     esac
-}
+
+    if [ -e "$rcc_release_dir" ] || [ -L "$rcc_release_dir" ]; then
+        mv "$rcc_release_dir" "$build_root/previous"
+    fi
+    if ! mv "$build_output" "$rcc_release_dir"; then
+        if [ -e "$build_root/previous" ] || [ -L "$build_root/previous" ]; then
+            mv "$build_root/previous" "$rcc_release_dir"
+        fi
+        exit 73
+    fi
+)
 
 rebuild_rcc() {
     relink_status=0

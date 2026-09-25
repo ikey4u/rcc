@@ -183,8 +183,11 @@ PY
 
 make_headers() {
     if [ -f Makefile ]; then
-        sed -i "s|C:/Program Files/Git/usr/bin/sh.exe|sh.exe|g" Makefile
-        sed -i "s|/usr/bin/make|$make_bin|g" Makefile
+        sed \
+            -e "s|C:/Program Files/Git/usr/bin/sh.exe|sh.exe|g" \
+            -e "s|/usr/bin/make|$make_bin|g" \
+            Makefile > Makefile.rcc-tmp
+        mv Makefile.rcc-tmp Makefile
         rewrite_automake_ar_recipes Makefile
     fi
     "$make_bin" MAKE="$make_bin" "$@"

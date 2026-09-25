@@ -160,9 +160,16 @@ else
         echo "building musl 1.2.5"
         "$make_bin" -j "$build_jobs"
         echo "installing musl sysroot"
-        gnu_install=$temporary/gnu-install.exe
-        cp "$(host_binary /usr/bin/install)" "$gnu_install"
-        "$make_bin" INSTALL="$(native_path "$gnu_install")" DESTDIR="$(native_path "$musl_destdir")" install
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*)
+                gnu_install=$temporary/gnu-install.exe
+                cp "$(host_binary /usr/bin/install)" "$gnu_install"
+                "$make_bin" INSTALL="$(native_path "$gnu_install")" DESTDIR="$(native_path "$musl_destdir")" install
+                ;;
+            *)
+                "$make_bin" DESTDIR="$musl_destdir" install
+                ;;
+        esac
     )
 fi
 

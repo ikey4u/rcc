@@ -193,6 +193,11 @@ mkdir -p "$builtins_build"
         -DCOMPILER_RT_BUILD_CTX_PROFILE=OFF \
         -DCOMPILER_RT_BUILD_GWP_ASAN=OFF \
         -DCOMPILER_RT_BUILD_ORC=OFF \
+        -DCOMPILER_RT_ENABLE_IOS=OFF \
+        -DCOMPILER_RT_ENABLE_WATCHOS=OFF \
+        -DCOMPILER_RT_ENABLE_TVOS=OFF \
+        -DCOMPILER_RT_ENABLE_XROS=OFF \
+        -DCOMPILER_RT_ENABLE_MACCATALYST=OFF \
         -DCOMPILER_RT_INCLUDE_TESTS=OFF
 )
 "$ninja_command" -C "$builtins_build" -j "$build_jobs" builtins

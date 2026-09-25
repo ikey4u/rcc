@@ -14,6 +14,7 @@
 #   mise release
 #     -> fetches archives into .cache/
 #     -> always rebuilds cargo-rcc and rcc (LLVM engine reused if present)
+#     -> full builds need GNU Make 4.x (brew install make on macOS)
 #     -> dist/bin/{cargo-rcc,rcc}
 #     -> dist/rcc-{os}-{arch}-{version}.zip
 #   mise run release:install
