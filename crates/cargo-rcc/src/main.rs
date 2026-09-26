@@ -505,10 +505,9 @@ fn execute_rcc(
     mut cargo: Command,
 ) -> Result<()> {
     let host = detect_rustc_host()?;
-    host_profile_for(&host)?;
-
+    let host_profile = host_profile_for(&host)?;
     let rust_targets = if targets.is_empty() {
-        vec![host]
+        vec![host.clone()]
     } else {
         targets.to_vec()
     };
@@ -531,10 +530,14 @@ fn execute_rcc(
 
     let rcc = locate_rcc(rcc_args.rcc.as_deref())?;
     let mut env_command = Command::new(&rcc);
+    env_command.arg("env").arg("--profile").arg(profile_id);
+    add_host_context_to_env_command(
+        &mut env_command,
+        &host,
+        &host_profile,
+        &rust_targets,
+    )?;
     env_command
-        .arg("env")
-        .arg("--profile")
-        .arg(profile_id)
         .arg("--target-runtime-contract")
         .arg(runtime_contract)
         .arg("--format")
@@ -559,6 +562,27 @@ fn execute_rcc(
         rcc_args.cache_dir.as_deref(),
     )?;
     spawn_cargo(cargo)
+}
+
+fn add_host_context_to_env_command(
+    command: &mut Command,
+    host: &str,
+    host_profile: &str,
+    rust_targets: &[String],
+) -> Result<()> {
+    if rust_targets.iter().any(|target| target != host) {
+        // Cargo runs build scripts and their C dependencies for the host.
+        // Target-scoped CC variables alone leave cc-rs to fall back to the
+        // target's unprefixed CC for those host builds.
+        let host_runtime_contract =
+            plan_for_rust_target(host, None)?.runtime_contract;
+        command
+            .arg("--host-profile")
+            .arg(host_profile)
+            .arg("--host-runtime-contract")
+            .arg(host_runtime_contract);
+    }
+    Ok(())
 }
 
 fn spawn_cargo(mut cargo: Command) -> Result<()> {
@@ -707,6 +731,19 @@ fn apply_rcc_environment(
         .tool(rcc_core::ToolKind::Cc)
         .map(|tool| tool.path.as_str())
         .context("RCC environment is missing a C compiler")?;
+    if let Some(host) = &manifest.host {
+        let host_cc = host
+            .tool(rcc_core::ToolKind::Cc)
+            .map(|tool| tool.path.as_str())
+            .context("RCC environment is missing a host C compiler")?;
+        let host_linker_key = format!(
+            "CARGO_TARGET_{}_LINKER",
+            host.target_triple.replace('-', "_").to_ascii_uppercase()
+        );
+        // rustc invokes a compiler driver for host build scripts, not LLD
+        // directly. The environment manifest's linker alias is raw LLD.
+        cargo.env(host_linker_key, host_cc);
+    }
 
     for plan in plans {
         let linker_key = format!(
@@ -1019,6 +1056,37 @@ mod tests {
             rustc_sdkroot_for_apple_targets(&[linux], "/MacOSX.sdk"),
             None
         );
+    }
+
+    #[test]
+    fn requests_host_context_only_for_cross_compilation() {
+        let mut cross = Command::new("rcc");
+        add_host_context_to_env_command(
+            &mut cross,
+            HOST_MACOS_AARCH64,
+            HOST_MACOS_AARCH64_PROFILE,
+            &[LINUX_X64_GNU.into()],
+        )
+        .unwrap();
+        assert_eq!(
+            cross.get_args().collect::<Vec<_>>(),
+            [
+                "--host-profile",
+                HOST_MACOS_AARCH64_PROFILE,
+                "--host-runtime-contract",
+                RUSTC_MACOS_V0,
+            ]
+        );
+
+        let mut native = Command::new("rcc");
+        add_host_context_to_env_command(
+            &mut native,
+            HOST_MACOS_AARCH64,
+            HOST_MACOS_AARCH64_PROFILE,
+            &[HOST_MACOS_AARCH64.into()],
+        )
+        .unwrap();
+        assert_eq!(native.get_args().count(), 0);
     }
 
     #[test]
