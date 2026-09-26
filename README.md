@@ -110,6 +110,17 @@ Use rustc triples only (`x86_64-unknown-linux-gnu`). Zig glibc suffixes such as
 | `x86_64-pc-windows-gnu` / `*-gnullvm` / `*-msvc` | matching `windows-*` | `rustc-windows-v0` or `native-rcc-owned` (MSVC) |
 | `aarch64-apple-darwin` / `x86_64-apple-darwin` | `macos-*` | `rustc-macos-v0` |
 
+cargo-rcc does not choose a panic strategy. Earlier releases forced
+`-C panic=abort` on Linux and Windows targets; binaries now unwind like a plain
+`cargo build`, so `catch_unwind` and panicking-thread `join` recover. Set
+`panic = "abort"` in the Cargo profile to keep the old behavior. On musl
+targets cargo-rcc also passes `--cfg=libc_unstable_musl_v1_2_3`, derived from
+the staged musl version, so the `libc` crate matches the sysroot ABI.
+
+`rcc` and `cargo-rcc` need not come from the same release. They share only the
+`rcc env --format json` schema, which grows without breaking older readers;
+cargo-rcc names the side to upgrade if the schema version ever differs.
+
 Vendored OpenSSL and bundled SQLite are the cc-rs acceptance path. Crates that
 need `-lcap-ng` must supply a static library (`examples/libcap-ng-linux`).
 Details: [docs/VERIFY.md](docs/VERIFY.md),

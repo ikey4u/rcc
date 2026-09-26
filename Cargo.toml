@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/buildinfo",
     "crates/rcc-core",
     "crates/rcc",
     "crates/rcc-pack",
@@ -13,6 +14,9 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/ikey4u/rcc"
 rust-version = "1.85"
+# Crates depend on each other by path only; they ship as release binaries,
+# not crates.io packages.
+publish = false
 
 [workspace.lints.clippy]
 string_slice = "deny"

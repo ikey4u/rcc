@@ -8,10 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{
     launcher_name, DriverKind, ProfileKind, ToolKind, ViewManifest,
-    SCHEMA_VERSION,
 };
 
-pub const ENVIRONMENT_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
+/// Versioned separately from packs and views. `rcc env --format json` is read
+/// by cargo-rcc and other consumers that may come from a different release,
+/// so the schema only grows: new fields and tool kinds are optional for
+/// readers and ignored by older ones. Bump this only when an existing field
+/// changes meaning or disappears.
+pub const ENVIRONMENT_SCHEMA_VERSION: u32 = 3;
 
 /// Generated into every materialized view. `rcc env` exposes the absolute
 /// path as `CMAKE_TOOLCHAIN_FILE`; cargo-rcc only forwards that variable.
@@ -35,7 +39,6 @@ pub enum EnvironmentRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EnvironmentTool {
     /// Consumer-facing, profile-bound launcher. Invoking this path preserves
     /// the policy and arguments recorded by the immutable view.
@@ -52,7 +55,6 @@ pub struct EnvironmentTool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EnvironmentContext {
     pub role: EnvironmentRole,
     pub toolchain_identity: String,
@@ -66,6 +68,7 @@ pub struct EnvironmentContext {
     pub root: String,
     pub sysroot: String,
     pub resource_dir: String,
+    #[serde(deserialize_with = "deserialize_known_tools")]
     pub tools: BTreeMap<ToolKind, EnvironmentTool>,
     pub pkg_config_libdirs: Vec<String>,
     pub forbidden_env: BTreeSet<String>,
@@ -206,8 +209,25 @@ impl EnvironmentContext {
     }
 }
 
+/// A newer rcc may expose tool kinds (or driver kinds) this reader does not
+/// know. Those entries are skipped instead of rejecting the whole manifest.
+fn deserialize_known_tools<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<ToolKind, EnvironmentTool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(kind, tool)| {
+            let kind = serde_json::from_value(serde_json::Value::String(kind));
+            Some((kind.ok()?, serde_json::from_value(tool).ok()?))
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EnvironmentManifest {
     pub schema_version: u32,
     pub toolchain_identity: String,
@@ -243,17 +263,24 @@ impl EnvironmentManifest {
     }
 
     fn build(
-        host: Option<&ViewManifest>,
-        target: &ViewManifest,
+        host_view: Option<&ViewManifest>,
+        target_view: &ViewManifest,
     ) -> Result<Self, EnvironmentError> {
-        let target =
-            EnvironmentContext::from_view(EnvironmentRole::Target, target)?;
-        let host = host
+        let target = EnvironmentContext::from_view(
+            EnvironmentRole::Target,
+            target_view,
+        )?;
+        let host = host_view
             .map(|view| {
                 EnvironmentContext::from_view(EnvironmentRole::Host, view)
             })
             .transpose()?;
-        let variables = build_variables(host.as_ref(), &target)?;
+        let mut variables = build_variables(host.as_ref(), &target)?;
+        for (role_name, view) in std::iter::once(("TARGET", target_view))
+            .chain(host_view.map(|view| ("HOST", view)))
+        {
+            insert_libc_variables(&mut variables, role_name, view)?;
+        }
         let manifest = Self {
             schema_version: ENVIRONMENT_SCHEMA_VERSION,
             toolchain_identity: target.toolchain_identity.clone(),
@@ -340,7 +367,9 @@ impl EnvironmentManifest {
         }
         let expected_variables =
             build_variables(self.host.as_ref(), &self.target)?;
-        if self.variables != expected_variables {
+        let mut context_variables = self.variables.clone();
+        context_variables.retain(|name, _| !is_libc_variable(name));
+        if context_variables != expected_variables {
             return Err(EnvironmentError::new(
                 "environment aliases do not match the declared contexts",
             ));
@@ -605,6 +634,40 @@ fn build_variables(
     Ok(variables)
 }
 
+/// The C library staged in the sysroot. Language bindings that encode libc
+/// ABI (Rust's `libc` crate, for example) must follow this version, not their
+/// default for the triple. These are variables rather than context fields
+/// because readers that predate them reject unknown fields.
+fn is_libc_variable(name: &str) -> bool {
+    matches!(
+        name,
+        "RCC_TARGET_LIBC"
+            | "RCC_TARGET_LIBC_VERSION"
+            | "RCC_HOST_LIBC"
+            | "RCC_HOST_LIBC_VERSION"
+    )
+}
+
+fn insert_libc_variables(
+    variables: &mut BTreeMap<String, String>,
+    role_name: &str,
+    view: &ViewManifest,
+) -> Result<(), EnvironmentError> {
+    insert_variable(
+        variables,
+        format!("RCC_{role_name}_LIBC"),
+        view.profile.libc_family.clone(),
+    )?;
+    if let Some(libc_version) = &view.profile.libc_version {
+        insert_variable(
+            variables,
+            format!("RCC_{role_name}_LIBC_VERSION"),
+            libc_version.clone(),
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_context_variables(
     variables: &mut BTreeMap<String, String>,
     role_name: &str,
@@ -650,7 +713,6 @@ fn insert_context_variables(
         format!("RCC_{role_name}_RESOURCE_DIR"),
         context.resource_dir.clone(),
     )?;
-
     for (kind, tool) in &context.tools {
         let tool_name = tool_kind_env_name(*kind);
         insert_variable(
@@ -1143,6 +1205,33 @@ mod tests {
     }
 
     #[test]
+    fn reads_manifests_from_older_and_newer_releases() {
+        let target = view(
+            "linux-x86_64-musl-static",
+            "rustc-linux-musl-v0",
+            "target",
+            '1',
+        );
+        let manifest = EnvironmentManifest::for_target(&target).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&manifest.render_json().unwrap()).unwrap();
+        json["future_field"] = "x".into();
+        let context = &mut json["target"];
+        context["future_field"] = "x".into();
+        context["tools"]["future-tool"] = context["tools"]["cc"].clone();
+        context["tools"]["cc"]["future_field"] = "x".into();
+        assert!(context.get("libc_family").is_none());
+
+        let parsed: EnvironmentManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.variables["RCC_TARGET_LIBC"], "musl");
+        assert_eq!(parsed.target.tools.len(), manifest.target.tools.len());
+        assert_eq!(
+            parsed.target.tool(ToolKind::Cc),
+            manifest.target.tool(ToolKind::Cc)
+        );
+    }
+
+    #[test]
     fn target_manifest_has_versioned_identity_and_separate_flags() {
         let target = view(
             "linux-aarch64-gnu-glibc217",
@@ -1204,7 +1293,7 @@ mod tests {
     }
 
     #[test]
-    fn host_and_target_contexts_keep_independent_contracts() {
+    fn host_and_targets_keep_independent_contracts() {
         let host =
             view("host-macos-aarch64", "rust-host-contract-1", "host", '2');
         let target = view(
@@ -1244,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn json_is_strict_and_preserves_arrays() {
+    fn json_round_trips_and_preserves_arrays() {
         let target = view(
             "linux-aarch64-gnu-glibc217",
             "native-rcc-owned",
@@ -1265,13 +1354,6 @@ mod tests {
             serde_json::Value::String("native-rcc-owned".into())
         );
         assert!(!object.contains_key("target_runtime_contract_id"));
-
-        let mut value = serde_json::to_value(&manifest).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("unknown".into(), serde_json::Value::Bool(true));
-        assert!(serde_json::from_value::<EnvironmentManifest>(value).is_err());
     }
 
     #[test]

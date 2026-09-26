@@ -9,6 +9,11 @@ use std::{
 use sha2::{Digest, Sha256};
 
 fn main() {
+    // Same inputs as controller_build_identity.
+    buildinfo::emit_git_version(
+        "RCC_VERSION",
+        &["..", "../../Cargo.toml", "../../Cargo.lock"],
+    );
     println!("cargo:rerun-if-env-changed=RCC_EMBED_PACK");
     for name in [
         "RCC_LLVM_BUILD_DIR",

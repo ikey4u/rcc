@@ -67,7 +67,7 @@ mise setup
 | 多文件 C、静态库、可执行文件 | 已验收 | 已实现 |
 | Rust + cc-rs（vendored OpenSSL） | 已验收 | 已实现 |
 | OpenSSL + bundled SQLite | 已验收 | 已实现 |
-| 纯 Rust crate | 原则上可以（`panic=abort`） | 已验收（openssl / native-stack / libcap-ng） |
+| 纯 Rust crate（`panic=unwind`） | 已验收（x86_64 Alpine、aarch64 实机 `catch_unwind`） | 已验收（openssl / native-stack / libcap-ng；CentOS 7 实机 `catch_unwind`） |
 | C++（libc++ 闭包） | 已验收（iostream / exception / thread） | 已实现 |
 | cmake-rs / meson / autotools | **未验收** | **未验收** |
 | bindgen / libclang | **未验收** | **未验收** |

@@ -100,7 +100,7 @@ echo "==> cargo test"
 cargo test --workspace --locked
 
 echo "==> clippy"
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -D clippy::string_slice
 
 echo "==> metadata"
 "$repository/scripts/check-metadata.sh"

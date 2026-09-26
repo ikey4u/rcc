@@ -10,10 +10,12 @@ use rcc_core::pack::{
     PackOptions,
 };
 
+const RCC_VERSION: &str = env!("RCC_VERSION");
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rcc-pack",
-    version,
+    version = RCC_VERSION,
     about = "Create and inspect deterministic RCC native-toolchain packs"
 )]
 struct Cli {

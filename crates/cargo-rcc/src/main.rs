@@ -16,8 +16,8 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rcc_core::{
-    EnvironmentManifest, NATIVE_RCC_OWNED, RUSTC_LINUX_GNU_V0,
-    RUSTC_LINUX_MUSL_V0, RUSTC_MACOS_V0, RUSTC_WINDOWS_V0,
+    EnvironmentManifest, ENVIRONMENT_SCHEMA_VERSION, NATIVE_RCC_OWNED,
+    RUSTC_LINUX_GNU_V0, RUSTC_LINUX_MUSL_V0, RUSTC_MACOS_V0, RUSTC_WINDOWS_V0,
 };
 
 const LINUX_X64_MUSL: &str = "x86_64-unknown-linux-musl";
@@ -51,10 +51,11 @@ const HOST_WINDOWS_X64_GNU_PROFILE: &str = "host-windows-x86_64-gnu";
 const MACOS_AARCH64_PROFILE: &str = "macos-aarch64";
 const MACOS_X86_64: &str = "x86_64-apple-darwin";
 const MACOS_X86_64_PROFILE: &str = "macos-x86_64";
+const RCC_VERSION: &str = env!("RCC_VERSION");
 
 #[derive(Debug, Parser)]
 #[command(
-    version,
+    version = RCC_VERSION,
     name = "cargo-rcc",
     display_order = 1,
     styles = cargo_options::styles(),
@@ -241,7 +242,7 @@ pub fn plan_for_rust_target(
             rust_target,
             profile_id: profile_override.unwrap_or(profile_id).to_owned(),
             runtime_contract: RUSTC_LINUX_GNU_V0.to_owned(),
-            rustflags: vec!["-C".into(), "panic=abort".into()],
+            rustflags: Vec::new(),
         });
     }
 
@@ -257,8 +258,6 @@ pub fn plan_for_rust_target(
                 // `-lunwind`; cargo-rcc then exposes rust-std's libunwind.a
                 // through an isolated -L path so rustc's musl libc is not used.
                 "link-self-contained=no".into(),
-                "-C".into(),
-                "panic=abort".into(),
                 "-C".into(),
                 "target-feature=+crt-static".into(),
             ],
@@ -277,7 +276,7 @@ pub fn plan_for_rust_target(
             rust_target,
             profile_id: profile_override.unwrap_or(profile_id).to_owned(),
             runtime_contract: runtime_contract.to_owned(),
-            rustflags: vec!["-C".into(), "panic=abort".into()],
+            rustflags: Vec::new(),
         });
     }
 
@@ -552,8 +551,7 @@ fn execute_rcc(
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("rcc env failed while materializing {profile_id} / {runtime_contract}:\n{stderr}");
     }
-    let manifest: EnvironmentManifest = serde_json::from_slice(&output.stdout)
-        .context("failed to parse `rcc env --format json`")?;
+    let manifest = parse_environment_manifest(&output.stdout, &rcc)?;
 
     apply_rcc_environment(
         &mut cargo,
@@ -562,6 +560,36 @@ fn execute_rcc(
         rcc_args.cache_dir.as_deref(),
     )?;
     spawn_cargo(cargo)
+}
+
+/// Additions to the environment schema do not change its version, so rcc and
+/// cargo-rcc from different releases work together. A different version
+/// means an incompatible change; name the side that needs upgrading.
+fn parse_environment_manifest(
+    json: &[u8],
+    rcc: &Path,
+) -> Result<EnvironmentManifest> {
+    let value: serde_json::Value = serde_json::from_slice(json)
+        .context("failed to parse `rcc env --format json`")?;
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let supported = u64::from(ENVIRONMENT_SCHEMA_VERSION);
+    if schema_version != supported {
+        let upgrade = if schema_version > supported {
+            "cargo-rcc"
+        } else {
+            "rcc"
+        };
+        bail!(
+            "{} emits environment schema {schema_version}, but this cargo-rcc \
+             ({RCC_VERSION}) reads schema {supported}; upgrade {upgrade}",
+            rcc.display()
+        );
+    }
+    serde_json::from_value(value)
+        .context("failed to parse `rcc env --format json`")
 }
 
 fn add_host_context_to_env_command(
@@ -754,6 +782,24 @@ fn apply_rcc_environment(
 
         let unwind_dir = isolate_rustc_unwind(&plan.rust_target, cache_dir)?;
         let mut rustflags = plan.rustflags.clone();
+        if plan.rust_target == manifest.target.target_triple {
+            let variable =
+                |name: &str| manifest.variables.get(name).map(String::as_str);
+            match variable("RCC_TARGET_LIBC") {
+                Some(family) => rustflags.extend(
+                    libc_crate_cfg(family, variable("RCC_TARGET_LIBC_VERSION"))
+                        .map(String::from),
+                ),
+                None if plan.runtime_contract == RUSTC_LINUX_MUSL_V0 => {
+                    eprintln!(
+                        "cargo-rcc: warning: this rcc does not report its musl \
+                         version; the libc crate keeps its default musl ABI \
+                         (upgrade rcc if crates need statx or the 1.2.3+ layout)"
+                    );
+                }
+                None => {}
+            }
+        }
         if plan.runtime_contract == RUSTC_LINUX_GNU_V0 {
             let compat_obj =
                 ensure_glibc217_compat(cache_dir, cc, &plan.rust_target)?;
@@ -765,9 +811,8 @@ fn apply_rcc_environment(
             rustflags.push(format!("native={}", unwind_dir.display()));
         }
 
-        // Target-only rustflags. Do not put crt-static / panic=abort in the
-        // global CARGO_ENCODED_RUSTFLAGS: those would also apply to host build
-        // scripts.
+        // Target-only rustflags. Do not put crt-static in the global
+        // CARGO_ENCODED_RUSTFLAGS: it would also apply to host build scripts.
         let rustflags_key = format!(
             "CARGO_TARGET_{}_RUSTFLAGS",
             plan.rust_target.replace('-', "_").to_ascii_uppercase()
@@ -780,6 +825,24 @@ fn apply_rcc_environment(
         prepend_dir_to_path(cargo, cross_bin);
     }
     Ok(())
+}
+
+/// Rust's `libc` crate describes the musl 1.1 ABI unless told otherwise; the
+/// 1.2.3+ layout (statx, 1024-bit cpu_set_t, utmpx) sits behind this cfg.
+fn libc_crate_cfg(
+    libc_family: &str,
+    libc_version: Option<&str>,
+) -> Option<&'static str> {
+    if libc_family != "musl" {
+        return None;
+    }
+    let version = libc_version?
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (version.as_slice() >= [1, 2, 3].as_slice())
+        .then_some("--cfg=libc_unstable_musl_v1_2_3")
 }
 
 fn prepend_dir_to_path(cargo: &mut Command, directory: &str) {
@@ -958,6 +1021,65 @@ mod tests {
                 .rustflags
                 .iter()
                 .any(|flag| flag == "link-self-contained=no"));
+        }
+    }
+
+    #[test]
+    fn follows_staged_musl_version_for_libc_crate_abi() {
+        for (family, version, expected) in [
+            (
+                "musl",
+                Some("1.2.5"),
+                Some("--cfg=libc_unstable_musl_v1_2_3"),
+            ),
+            (
+                "musl",
+                Some("1.2.3"),
+                Some("--cfg=libc_unstable_musl_v1_2_3"),
+            ),
+            ("musl", Some("1.2.2"), None),
+            ("musl", Some("1.1.24"), None),
+            ("musl", None, None),
+            ("glibc", Some("2.17"), None),
+        ] {
+            assert_eq!(
+                libc_crate_cfg(family, version),
+                expected,
+                "{family} {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_the_side_to_upgrade_on_schema_mismatch() {
+        let rcc = Path::new("/opt/rcc");
+        for (json, upgrade) in [
+            (r#"{"schema_version":4}"#, "upgrade cargo-rcc"),
+            (r#"{"schema_version":2}"#, "upgrade rcc"),
+            (r#"{"variables":{}}"#, "upgrade rcc"),
+        ] {
+            let error =
+                parse_environment_manifest(json.as_bytes(), rcc).unwrap_err();
+            assert!(error.to_string().ends_with(upgrade), "{error}");
+        }
+    }
+
+    #[test]
+    fn leaves_panic_strategy_to_cargo_profile() {
+        for query in [
+            LINUX_X64_MUSL,
+            LINUX_X64_GNU,
+            LINUX_AARCH64_MUSL,
+            LINUX_AARCH64_GNU,
+            WINDOWS_X64_GNU,
+            WINDOWS_X64_GNULLVM,
+            WINDOWS_X64_MSVC,
+        ] {
+            let plan = plan_for_rust_target(query, None).unwrap();
+            assert!(
+                !plan.rustflags.iter().any(|flag| flag.starts_with("panic=")),
+                "{query}"
+            );
         }
     }
 

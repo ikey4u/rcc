@@ -27,10 +27,12 @@ use walkdir::WalkDir;
 
 use crate::{cache, engine, payload::Payload, toolchain};
 
+const RCC_VERSION: &str = env!("RCC_VERSION");
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rcc",
-    version,
+    version = RCC_VERSION,
     about = "Relocatable C/C++ cross-toolchain provider"
 )]
 pub struct Cli {

@@ -261,7 +261,9 @@ fn prepare_bound_invocation(
         .get(&kind)
         .cloned()
         .unwrap_or_default();
-    if !is_link {
+    if is_link {
+        injected = scope_runtime_selection_arguments(injected);
+    } else {
         injected.retain(|argument| !is_link_only_injected_argument(argument));
     }
     // Runtime link arguments are injected exactly once at the final bound
@@ -572,10 +574,33 @@ fn normalize_version(value: &str) -> Vec<u64> {
 fn is_link_only_injected_argument(argument: &str) -> bool {
     argument.starts_with("--ld-path=")
         || argument.starts_with("/clang:--ld-path=")
-        || argument.starts_with("--rtlib=")
+        || (argument.starts_with("-l") && argument.len() > 2)
+        || is_runtime_selection_argument(argument)
+}
+
+fn is_runtime_selection_argument(argument: &str) -> bool {
+    argument.starts_with("--rtlib=")
         || argument.starts_with("-rtlib=")
         || argument.starts_with("-unwindlib=")
         || argument.starts_with("--unwindlib=")
+}
+
+/// Clang only reads the runtime library selection when it adds default
+/// libraries or startfiles itself. Consumers such as rustc link with
+/// `-nodefaultlibs`, and whether a given selection is still read then depends
+/// on the target driver (Linux reads `--rtlib` for crtbegin, MinGW does not).
+/// Scoping them keeps the profile's choice without reporting RCC's own
+/// arguments as unused.
+fn scope_runtime_selection_arguments(injected: Vec<String>) -> Vec<String> {
+    let (selection, mut scoped): (Vec<_>, Vec<_>) = injected
+        .into_iter()
+        .partition(|argument| is_runtime_selection_argument(argument));
+    if !selection.is_empty() {
+        scoped.push("--start-no-unused-arguments".into());
+        scoped.extend(selection);
+        scoped.push("--end-no-unused-arguments".into());
+    }
+    scoped
 }
 
 fn is_link_invocation(kind: ToolKind, arguments: &[OsString]) -> bool {
@@ -822,5 +847,30 @@ mod tests {
             injected,
             vec!["--target=x86_64-unknown-linux-gnu".to_string()]
         );
+        assert!(is_link_only_injected_argument("-lkernel32"));
+        assert!(!is_link_only_injected_argument("-l"));
+    }
+
+    #[test]
+    fn scopes_runtime_selection_when_linking() {
+        let injected = vec![
+            "--target=x86_64-pc-windows-gnu".to_string(),
+            "--rtlib=compiler-rt".to_string(),
+            "-lkernel32".to_string(),
+            "-unwindlib=none".to_string(),
+        ];
+        assert_eq!(
+            scope_runtime_selection_arguments(injected),
+            vec![
+                "--target=x86_64-pc-windows-gnu".to_string(),
+                "-lkernel32".to_string(),
+                "--start-no-unused-arguments".to_string(),
+                "--rtlib=compiler-rt".to_string(),
+                "-unwindlib=none".to_string(),
+                "--end-no-unused-arguments".to_string(),
+            ]
+        );
+        let plain = vec!["--target=aarch64-apple-darwin".to_string()];
+        assert_eq!(scope_runtime_selection_arguments(plain.clone()), plain);
     }
 }

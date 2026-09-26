@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 description = "Cargo subcommand that builds Rust crates with RCC as the C/C++ toolchain and linker"
+build = "build.rs"
 
 [lints]
 workspace = true
@@ -15,3 +17,6 @@ cargo-options = "0.7.5"
 clap.workspace = true
 rcc-core = { path = "../rcc-core" }
 serde_json.workspace = true
+
+[build-dependencies]
+buildinfo = { path = "../buildinfo" }

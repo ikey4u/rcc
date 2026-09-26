@@ -74,6 +74,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "buildinfo"
+version = "0.1.0"
+
+[[package]]
 name = "cargo-options"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -88,6 +92,7 @@ name = "cargo-rcc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buildinfo",
  "cargo-options",
  "clap",
  "rcc-core",
@@ -362,6 +367,7 @@ name = "rcc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buildinfo",
  "clap",
  "dirs",
  "hex",
@@ -393,6 +399,7 @@ name = "rcc-pack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buildinfo",
  "clap",
  "rcc-core",
  "serde_json",
