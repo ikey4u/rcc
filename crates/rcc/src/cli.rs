@@ -18,14 +18,14 @@ use rcc_core::{
         EnvironmentFormat as CoreEnvironmentFormat, EnvironmentManifest,
     },
     layout::{launcher_path, validate_view_binding},
-    pack, registry,
-    schema::{ObjectFormat, Profile, ViewManifest},
+    overlay, pack, registry,
+    schema::{ObjectFormat, OverlayManifest, Profile, ViewManifest},
     ToolKind,
 };
 use serde::Serialize;
 use walkdir::WalkDir;
 
-use crate::{cache, engine, payload::Payload, toolchain};
+use crate::{cache, engine, home, payload::Payload, toolchain};
 
 const RCC_VERSION: &str = env!("RCC_VERSION");
 
@@ -121,8 +121,41 @@ pub enum Command {
         command: CacheCommand,
     },
 
+    /// Register or list sysroot overlays for a profile.
+    Sysroot {
+        #[command(subcommand)]
+        command: SysrootCommand,
+    },
+
     /// Print third-party notices carried by the payload.
     Licenses,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SysrootCommand {
+    /// Register an immutable overlay (extra headers/libraries) for a profile.
+    RegisterOverlay {
+        #[arg(long)]
+        profile: String,
+        /// Absolute path to the overlay tree on this machine.
+        #[arg(long)]
+        path: PathBuf,
+        /// Path to the overlay manifest JSON describing the tree.
+        #[arg(long)]
+        manifest: PathBuf,
+    },
+    /// List overlays registered for a profile.
+    List {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the content digest of an overlay tree (for the manifest).
+    Digest {
+        #[arg(long)]
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -315,11 +348,82 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Cache {
             command: CacheCommand::Gc { dry_run },
         } => garbage_collect_cache(options.cache_dir.as_deref(), dry_run),
+        Command::Sysroot { command } => {
+            sysroot_command(&options, command)?;
+            Ok(0)
+        }
         Command::Licenses => {
             print_licenses(&options)?;
             Ok(0)
         }
     }
+}
+
+fn sysroot_command(
+    options: &GlobalOptions,
+    command: SysrootCommand,
+) -> Result<()> {
+    match command {
+        SysrootCommand::Digest { path } => {
+            println!("{}", overlay::tree_digest(&path)?);
+        }
+        SysrootCommand::RegisterOverlay {
+            profile,
+            path,
+            manifest,
+        } => {
+            let home = home::resolve(options.home_dir.as_deref())?;
+            let base = find_profile(&profile)?;
+            let bytes = fs::read(&manifest).with_context(|| {
+                format!(
+                    "failed to read overlay manifest {}",
+                    manifest.display()
+                )
+            })?;
+            let overlay_manifest: OverlayManifest =
+                serde_json::from_slice(&bytes).with_context(|| {
+                    format!(
+                        "failed to parse overlay manifest {}",
+                        manifest.display()
+                    )
+                })?;
+            let absolute = path.canonicalize().with_context(|| {
+                format!("failed to resolve overlay path {}", path.display())
+            })?;
+            let registration =
+                overlay::register(&home, &overlay_manifest, &absolute, base)?;
+            println!(
+                "registered overlay {} for profile {} at {}",
+                registration.manifest.overlay_id,
+                registration.manifest.profile_id,
+                registration.root.display()
+            );
+        }
+        SysrootCommand::List { profile, json } => {
+            let home = home::resolve(options.home_dir.as_deref())?;
+            // Validate the profile id even though listing tolerates unknowns.
+            find_profile(&profile)?;
+            let registrations = overlay::list(&home, &profile)?;
+            if json {
+                serde_json::to_writer_pretty(
+                    io::stdout().lock(),
+                    &registrations,
+                )?;
+                println!();
+            } else if registrations.is_empty() {
+                println!("no overlays registered for {profile}");
+            } else {
+                for registration in &registrations {
+                    println!(
+                        "{}\t{}",
+                        registration.manifest.overlay_id,
+                        registration.root.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn print_licenses(options: &GlobalOptions) -> Result<()> {
