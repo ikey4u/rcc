@@ -634,6 +634,10 @@ pub struct ViewManifest {
     pub resource_dir: String,
     pub injected_args: BTreeMap<ToolKind, Vec<String>>,
     pub forbidden_env: BTreeSet<String>,
+    /// Stable identity strings of the overlays folded into this view, sorted.
+    /// Empty when no overlay is layered on the base profile.
+    #[serde(default)]
+    pub overlay_identities: Vec<String>,
 }
 
 impl ViewManifest {
@@ -726,6 +730,15 @@ impl ViewManifest {
         }
         for name in &self.forbidden_env {
             validate_env_name(name)?;
+        }
+        validate_unique_strings(
+            "overlay_identities",
+            &self.overlay_identities,
+        )?;
+        for identity in &self.overlay_identities {
+            if identity.len() > 256 {
+                return invalid("overlay identity exceeds 256 bytes");
+            }
         }
         Ok(())
     }
@@ -1260,6 +1273,7 @@ mod tests {
             forbidden_env: ["CPATH".into(), "LIBRARY_PATH".into()]
                 .into_iter()
                 .collect(),
+            overlay_identities: Vec::new(),
         };
         view.validate().unwrap();
         view.tools.remove(&ToolKind::Cc);

@@ -1201,6 +1201,7 @@ mod tests {
             forbidden_env: ["CPATH".into(), "LIBRARY_PATH".into()]
                 .into_iter()
                 .collect(),
+            overlay_identities: Vec::new(),
         }
     }
 

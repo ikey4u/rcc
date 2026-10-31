@@ -3,14 +3,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{ensure, Context, Result};
 use rcc_core::{
     contracts,
-    layout::{build_view_manifest, launcher_path, ControllerIdentity},
+    layout::{
+        build_view_manifest_with_overlays, launcher_path, ControllerIdentity,
+    },
+    overlay,
     pack::PackInspection,
     schema::{Profile, ToolKind, ViewManifest},
     view::{MaterializedView, ViewMaterializer},
 };
 
 use crate::{
-    cache, engine,
+    cache, engine, home,
     payload::{Payload, PayloadOrigin},
     provider,
 };
@@ -89,18 +92,22 @@ pub fn materialize(
     let contract = contracts::resolve(profile, contract_id)?;
     let external_sysroot =
         provider::resolve_external_sysroot(profile, home_directory)?;
+    let home = home::resolve(home_directory)?;
+    let overlays = overlay::list(&home, &profile.profile_id)
+        .context("failed to load registered overlays")?;
     let controller_identity = ControllerIdentity::new(
         CONTROLLER_BUILD_SHA256,
         &controller,
         engine::BUILD_ID,
     );
-    let manifest = build_view_manifest(
+    let manifest = build_view_manifest_with_overlays(
         &materializer,
         &pack,
         profile,
         &contract,
         &controller_identity,
         external_sysroot.as_ref(),
+        &overlays,
     )?;
     let materialized = materializer
         .materialize_verified(&pack_path, &pack, &controller, &manifest)

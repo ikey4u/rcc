@@ -1311,6 +1311,7 @@ mod tests {
                 .into_owned(),
             injected_args: BTreeMap::new(),
             forbidden_env: BTreeSet::new(),
+            overlay_identities: Vec::new(),
         };
         let bound_identity =
             crate::layout::recompute_view_identity(&view).unwrap();

@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::{
     digest::bytes_sha256,
+    overlay::OverlayRegistration,
     pack::PackInspection,
     policy::BUILTIN_FORBIDDEN_ENV,
     schema::{
@@ -56,6 +57,7 @@ struct IdentityInput<'a> {
     profile: &'a Profile,
     runtime_contract: &'a RuntimeContract,
     external_sysroot_identity: Option<&'a str>,
+    overlay_identities: &'a [String],
     policy_revision: &'static str,
 }
 
@@ -77,6 +79,7 @@ struct ViewBindingInput<'a> {
     resource_dir: BoundPath,
     injected_args: BTreeMap<ToolKind, Vec<String>>,
     forbidden_env: &'a BTreeSet<String>,
+    overlay_identities: &'a [String],
     policy_revision: &'static str,
 }
 
@@ -111,6 +114,32 @@ pub fn build_view_manifest(
     runtime_contract: &RuntimeContract,
     controller: &ControllerIdentity<'_>,
     external_sysroot: Option<&ExternalSysroot>,
+) -> Result<ViewManifest> {
+    build_view_manifest_with_overlays(
+        materializer,
+        pack,
+        profile,
+        runtime_contract,
+        controller,
+        external_sysroot,
+        &[],
+    )
+}
+
+/// Like [`build_view_manifest`], but layers the given registered overlays on
+/// the base profile: each overlay's search roots are injected ahead of the base
+/// sysroot (ARCH §9.4 lookup order), and its content identity is folded into
+/// the view identity so a view built with an overlay is distinct from one
+/// without. Overlays must bind to this profile and must not raise its ABI
+/// baseline.
+pub fn build_view_manifest_with_overlays(
+    materializer: &ViewMaterializer,
+    pack: &PackInspection,
+    profile: &Profile,
+    runtime_contract: &RuntimeContract,
+    controller: &ControllerIdentity<'_>,
+    external_sysroot: Option<&ExternalSysroot>,
+    overlays: &[OverlayRegistration],
 ) -> Result<ViewManifest> {
     let controller_build_sha256 = controller.build_sha256;
     let controller_sha256 = controller.executable.sha256();
@@ -165,6 +194,44 @@ pub fn build_view_manifest(
         );
     }
 
+    let mut overlay_identities = Vec::with_capacity(overlays.len());
+    for registration in overlays {
+        registration.manifest.validate().map_err(|error| {
+            anyhow::anyhow!("invalid overlay manifest: {error}")
+        })?;
+        registration
+            .manifest
+            .verify_compatible(profile)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "overlay {} is incompatible with profile {}: {error}",
+                    registration.manifest.overlay_id,
+                    profile.profile_id
+                )
+            })?;
+        ensure!(
+            registration.root.is_absolute(),
+            "overlay root must be absolute: {}",
+            registration.root.display()
+        );
+        overlay_identities.push(format!(
+            "{}@{}:{}",
+            registration.manifest.overlay_id,
+            registration.manifest.revision,
+            registration.manifest.tree_digest
+        ));
+    }
+    overlay_identities.sort();
+    {
+        let mut seen = BTreeSet::new();
+        for identity in &overlay_identities {
+            ensure!(
+                seen.insert(identity.as_str()),
+                "two overlays share identity {identity}"
+            );
+        }
+    }
+
     let identity_json = serde_json::to_vec(&IdentityInput {
         schema_version: SCHEMA_VERSION,
         controller_build_sha256,
@@ -175,6 +242,7 @@ pub fn build_view_manifest(
         runtime_contract,
         external_sysroot_identity: external_sysroot
             .map(|value| value.identity.as_str()),
+        overlay_identities: &overlay_identities,
         policy_revision: POLICY_REVISION,
     })
     .context("failed to encode toolchain identity input")?;
@@ -226,7 +294,7 @@ pub fn build_view_manifest(
                 driver_kind: static_driver_kind(profile, *kind),
             },
         );
-        let arguments = trusted_arguments(
+        let mut arguments = trusted_arguments(
             profile,
             *kind,
             &root,
@@ -235,6 +303,11 @@ pub fn build_view_manifest(
             &resource_dir,
             &cxx_headers,
         )?;
+        let overlay_args = overlay_arguments(profile, *kind, overlays);
+        if !overlay_args.is_empty() {
+            // Prepend so overlay search roots precede the base sysroot.
+            arguments.splice(0..0, overlay_args);
+        }
         if !arguments.is_empty() {
             injected_args.insert(*kind, arguments);
         }
@@ -260,6 +333,7 @@ pub fn build_view_manifest(
             .iter()
             .map(|name| (*name).to_owned())
             .collect(),
+        overlay_identities,
     };
     manifest
         .validate()
@@ -326,11 +400,48 @@ pub fn recompute_view_identity(view: &ViewManifest) -> Result<String> {
         resource_dir: bind_path(root, Path::new(&view.resource_dir))?,
         injected_args,
         forbidden_env: &view.forbidden_env,
+        overlay_identities: &view.overlay_identities,
         policy_revision: POLICY_REVISION,
     };
     Ok(bytes_sha256(
         &serde_json::to_vec(&input).context("failed to encode view binding")?,
     ))
+}
+
+/// Compiler arguments contributed by registered overlays for one tool kind.
+/// Overlays extend the Unix-style (gcc) Clang driver only; they are additive
+/// and injected ahead of the base sysroot so their headers and libraries take
+/// precedence. clang-cl and non-compile tools receive nothing.
+fn overlay_arguments(
+    profile: &Profile,
+    kind: ToolKind,
+    overlays: &[OverlayRegistration],
+) -> Vec<String> {
+    if profile.driver_kind == DriverKind::ClangCl
+        || !matches!(kind, ToolKind::Cc | ToolKind::Cxx)
+    {
+        return Vec::new();
+    }
+    let mut arguments = Vec::new();
+    for registration in overlays {
+        let root = registration.root.as_path();
+        for include in &registration.manifest.include_roots {
+            arguments.push("-isystem".into());
+            arguments.push(root.join(include).to_string_lossy().into_owned());
+        }
+        for framework in &registration.manifest.framework_roots {
+            let directory = root.join(framework).to_string_lossy().into_owned();
+            arguments.push("-iframework".into());
+            arguments.push(directory.clone());
+            arguments.push("-F".into());
+            arguments.push(directory);
+        }
+        for library in &registration.manifest.library_roots {
+            arguments.push("-L".into());
+            arguments.push(root.join(library).to_string_lossy().into_owned());
+        }
+    }
+    arguments
 }
 
 /// Validate that every mutable field in `view.json` remains bound to the
@@ -864,6 +975,134 @@ mod tests {
             .any(|argument| argument == "-unwindlib=libunwind"));
         assert!(cxx.iter().any(|argument| argument == "-stdlib=libc++"));
         assert_eq!(view.runtime_contract.contract_id, "rustc-linux-musl-v0");
+        validate_view_binding(&view).unwrap();
+    }
+
+    #[test]
+    fn layers_an_overlay_into_the_view() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let profile =
+            registry::resolve_target_profile("linux-x86_64-musl-static")
+                .unwrap();
+        for directory in [
+            "lib/clang/22",
+            "sysroots/linux-x86_64-musl-static/usr/include",
+            "sysroots/linux-x86_64-musl-static/usr/lib",
+            "sysroots/linux-x86_64-musl-static/include/c++/v1",
+        ] {
+            fs::create_dir_all(source.join(directory)).unwrap();
+        }
+        fs::write(source.join("lib/clang/22/stddef.h"), b"header").unwrap();
+        fs::write(
+            source.join(
+                "sysroots/linux-x86_64-musl-static/include/c++/v1/vector",
+            ),
+            b"header",
+        )
+        .unwrap();
+        fs::write(
+            source
+                .join("sysroots/linux-x86_64-musl-static/usr/include/stdio.h"),
+            b"stdio",
+        )
+        .unwrap();
+        fs::write(
+            source.join("sysroots/linux-x86_64-musl-static/usr/lib/libc.a"),
+            b"libc",
+        )
+        .unwrap();
+        let pack = create_pack(
+            &source,
+            &temporary.path().join("fixture.rccpack"),
+            &PackOptions::new(
+                "fixture",
+                "r1",
+                "aarch64-apple-darwin",
+                [profile.profile_id.as_str()],
+            ),
+        )
+        .unwrap();
+        let materializer =
+            ViewMaterializer::new(&temporary.path().join("cache")).unwrap();
+        let contract =
+            contracts::resolve(profile, contracts::RUSTC_LINUX_MUSL_V0)
+                .unwrap();
+        let controller = materializer
+            .persist_controller(&controller_fixture(temporary.path()))
+            .unwrap();
+        let build_sha = "11".repeat(32);
+        let identity = ControllerIdentity::new(
+            &build_sha,
+            &controller,
+            "llvm-22.1.8-aarch64-x86-minsize",
+        );
+        let baseline = build_view_manifest(
+            &materializer,
+            &pack,
+            profile,
+            &contract,
+            &identity,
+            None,
+        )
+        .unwrap();
+
+        // An overlay tree with headers and libraries bound to this profile.
+        let overlay_root = temporary.path().join("vendor");
+        fs::create_dir_all(overlay_root.join("include")).unwrap();
+        fs::create_dir_all(overlay_root.join("lib")).unwrap();
+        fs::write(overlay_root.join("include/vendor.h"), b"#pragma once\n")
+            .unwrap();
+        fs::write(overlay_root.join("lib/libvendor.a"), b"!<arch>\n").unwrap();
+        let manifest = crate::schema::OverlayManifest {
+            schema_version: SCHEMA_VERSION,
+            overlay_id: "vendor".into(),
+            profile_id: profile.profile_id.clone(),
+            revision: 1,
+            description: None,
+            target_triple: profile.target_triple.clone(),
+            libc_family: None,
+            libc_version: None,
+            minimum_os: None,
+            include_roots: vec!["include".into()],
+            library_roots: vec!["lib".into()],
+            framework_roots: Vec::new(),
+            tree_digest: crate::overlay::tree_digest(&overlay_root).unwrap(),
+        };
+        let registration = OverlayRegistration {
+            manifest,
+            root: overlay_root.clone(),
+        };
+
+        let view = build_view_manifest_with_overlays(
+            &materializer,
+            &pack,
+            profile,
+            &contract,
+            &identity,
+            None,
+            std::slice::from_ref(&registration),
+        )
+        .unwrap();
+
+        // The overlay search roots are injected, ahead of the base sysroot.
+        let include =
+            overlay_root.join("include").to_string_lossy().into_owned();
+        let library = overlay_root.join("lib").to_string_lossy().into_owned();
+        for kind in [ToolKind::Cc, ToolKind::Cxx] {
+            let args = &view.injected_args[&kind];
+            let isystem = args.iter().position(|a| *a == include).unwrap();
+            let sysroot = args
+                .iter()
+                .position(|a| a.starts_with("--sysroot="))
+                .unwrap();
+            assert!(isystem < sysroot, "overlay include must precede sysroot");
+            assert!(args.contains(&library));
+        }
+        assert_eq!(view.overlay_identities.len(), 1);
+        assert!(view.overlay_identities[0].starts_with("vendor@1:"));
+        // Layering an overlay yields a distinct view identity.
+        assert_ne!(view.identity, baseline.identity);
         validate_view_binding(&view).unwrap();
     }
 
