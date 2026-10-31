@@ -48,16 +48,19 @@ rcc sysroot list --profile <p>
 查找顺序（ARCH §9.4）：显式 overlay → RCC base sysroot → external managed SDK →
 无 host fallback。实现拆成可评审的增量：
 
-1. **Schema**：`OverlayManifest`（身份、ABI baseline、include/library/framework
-   roots、digest）及 `validate()`；拒绝绝对路径逃逸、提升 ABI baseline 的非法
-   声明。附单测。
-2. **Store / 解析**：在 `$RCC_HOME_DIR` 下持久化 per-profile overlay 注册，
-   内容寻址校验 overlay 目录 metadata identity。
-3. **View 集成**：overlay 搜索根按查找顺序并入 view；overlay digest 进入
-   ToolchainIdentity（§5.4）、view path 与 ViewManifest。
+1. **Schema**（已完成）：`OverlayManifest`（身份、ABI baseline、
+   include/library/framework roots、digest）及 `validate()`；`verify_compatible`
+   拒绝提升 ABI baseline；拒绝不安全路径。附单测。见 `crates/rcc-core/src/schema.rs`。
+2. **Store / 解析**（已完成）：`crates/rcc-core/src/overlay.rs` 在
+   `$RCC_HOME_DIR/overlays/<profile>/<id>.json` 持久化注册；`tree_digest` 内容
+   寻址校验（拒绝符号链接），`register`/`load`/`list`。附 tempfile 单测。
+3. **View 集成**（下一步）：overlay 搜索根按查找顺序并入 view；overlay digest
+   进入 ToolchainIdentity（§5.4）、view path 与 ViewManifest。需 LLVM engine
+   做真实 compile/link 验收。
 4. **Policy**：允许并记录显式 overlay 路径（§8.1 第 8 条），仍拒绝 host system roots。
 5. **输出 / CLI**：`sysroot register-overlay` / `sysroot list`；`print`、`env`
-   输出反映 overlay roots 与 identity。
+   输出反映 overlay roots 与 identity。与增量 3–4 一同暴露，避免暴露尚未影响
+   编译的半成品命令。
 6. **验收**：overlay fixture 的 compile/link/verify；负面测试（overlay 提升
    baseline、路径逃逸、未注册 overlay）。
 
