@@ -1,38 +1,38 @@
 # libcap-ng × linux-x86_64-gnu-glibc217
 
-问题：用 `capng` crate（链接 `-lcap-ng`）交叉编 **glibc 2.17** 的 linux x86_64 ELF。`cargo zigbuild --target x86_64-unknown-linux-gnu.2.17` 过不了；RCC 可以，产物最高 `GLIBC_` ≤ 2.17。
+Problem: use the `capng` crate (which links `-lcap-ng`) to cross-compile a **glibc 2.17** linux x86_64 ELF. `cargo zigbuild --target x86_64-unknown-linux-gnu.2.17` does not pass; RCC can, with artifacts at most `GLIBC_` ≤ 2.17.
 
-可运行的例子：`examples/libcap-ng-linux`。归档钉在同目录的 `libcap-ng-0.8.5.lock.json`，不进 `toolchains/`。
-
----
-
-## 问题
-
-`capng` 只是对 `libcap-ng` 的 FFI，`build.rs` 发出 `-lcap-ng`。交叉时还要同时满足：
-
-1. 链接期能找到 `libcap-ng`（静态 `.a` 或动态 `.so`）。
-2. 最终 ELF 的 `GLIBC_` 不超过 2.17。
-3. 官方 rust-std 把 `statx` / `copy_file_range` 做成 `extern_weak`。`profile.release` 里 `lto = true` 时，这些弱引用会被提升成强 `U`。
-
-Zig 的 `*.gnu.2.17` 用的是按版本裁过的 **stub `libc.so.6`**，abilist 里没有 `statx`。`zig cc` 再交给 LLD 时 `no_fallback`，缺符号一律硬错误，和是不是 weak 无关。改成 `.2.28` 能链过，但二进制会带 `GLIBC_2.28`，不是 2.17 合同。
-
-Zig 发行版里虽然带着一份 libcap-ng，也救不了 `.2.17` 这条链接。
-
-## 解决
-
-RCC 不走 Zig stub：
-
-- 链接输入是 CentOS 7 真 `libc.so.6`（符号上限 2.17）。
-- `libcap-ng` 不是 toolchain。例子用 RCC `cc` 按 lock 交叉编静态 `libcap-ng.a`，调用方设置 `LIBCAPNG_LIB_PATH` / `LIBCAPNG_LINK_TYPE=static`。
-- `cargo-rcc` 链入 hidden syscall shim（`statx` / `copy_file_range`），没有 glibc 版本符号。kernel 3.10 返回 `ENOSYS`，std 回退；较新 kernel 走真 syscall。产物不出现 `GLIBC_2.27` / `2.28`。
-
-`cargo-rcc` 只接受 rustc triple `x86_64-unknown-linux-gnu`，不要 Zig 的 `.2.17` / `.2.28` 后缀。
+A runnable example: `examples/libcap-ng-linux`. The archive is pinned in `libcap-ng-0.8.5.lock.json` in the same directory, and does not go into `toolchains/`.
 
 ---
 
-## 小例子
+## Problem
 
-`examples/libcap-ng-linux`：
+`capng` is just an FFI over `libcap-ng`, and its `build.rs` emits `-lcap-ng`. When cross-compiling, the following must all be satisfied at once:
+
+1. `libcap-ng` can be found at link time (static `.a` or dynamic `.so`).
+2. The final ELF's `GLIBC_` does not exceed 2.17.
+3. The official rust-std makes `statx` / `copy_file_range` into `extern_weak`. When `lto = true` in `profile.release`, these weak references get promoted into strong `U`.
+
+Zig's `*.gnu.2.17` uses a per-version trimmed **stub `libc.so.6`**, whose abilist has no `statx`. When `zig cc` then hands off to LLD, it is `no_fallback`, so missing symbols are always a hard error, regardless of whether they are weak. Switching to `.2.28` links fine, but the binary then carries `GLIBC_2.28`, not the 2.17 contract.
+
+Although the Zig distribution ships a copy of libcap-ng, that does not save the `.2.17` link either.
+
+## Solution
+
+RCC does not go through the Zig stub:
+
+- The link input is the real CentOS 7 `libc.so.6` (symbol ceiling 2.17).
+- `libcap-ng` is not a toolchain. The example uses RCC `cc` to cross-compile a static `libcap-ng.a` per the lock, and the caller sets `LIBCAPNG_LIB_PATH` / `LIBCAPNG_LINK_TYPE=static`.
+- `cargo-rcc` links in a hidden syscall shim (`statx` / `copy_file_range`), with no glibc versioned symbols. On kernel 3.10 it returns `ENOSYS` and std falls back; on newer kernels it goes through the real syscall. The artifact does not show `GLIBC_2.27` / `2.28`.
+
+`cargo-rcc` only accepts the rustc triple `x86_64-unknown-linux-gnu`, not Zig's `.2.17` / `.2.28` suffixes.
+
+---
+
+## Small example
+
+`examples/libcap-ng-linux`:
 
 ```toml
 [dependencies]
@@ -49,7 +49,7 @@ fn main() {
 }
 ```
 
-zigbuild（失败：stub 没有 `statx`）：
+zigbuild (fails: the stub has no `statx`):
 
 ```sh
 cargo zigbuild --release \
@@ -57,7 +57,7 @@ cargo zigbuild --release \
   --target x86_64-unknown-linux-gnu.2.17
 ```
 
-RCC：
+RCC:
 
 ```sh
 export RCC=/absolute/path/to/dist/rcc-release/rcc
@@ -72,4 +72,4 @@ LIBCAPNG_LIB_PATH=$prefix/lib LIBCAPNG_LINK_TYPE=static \
   examples/libcap-ng-linux/target/x86_64-unknown-linux-gnu/release/libcap-ng-linux
 ```
 
-`rcc verify` 要求 interpreter `/lib64/ld-linux-x86-64.so.2`、`DT_NEEDED` 含 `libc.so.6`、无 `libcap-ng.so`（静态进去了）、最高 `GLIBC_` ≤ 2.17。`scripts/verify-linux-x86_64-gnu.sh` 会跑这个例子；CentOS 7 上冒烟输出含 `libcap-ng-ok`。
+`rcc verify` requires the interpreter `/lib64/ld-linux-x86-64.so.2`, `DT_NEEDED` to contain `libc.so.6`, no `libcap-ng.so` (it went in statically), and highest `GLIBC_` ≤ 2.17. `scripts/verify-linux-x86_64-gnu.sh` runs this example; the smoke output on CentOS 7 contains `libcap-ng-ok`.

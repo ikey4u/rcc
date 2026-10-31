@@ -1,13 +1,13 @@
-# Linux / Windows / macOS：大型项目能力与正确性验收
+# Linux / Windows / macOS: large-project capability and correctness acceptance
 
-本文是当前 RCC release 对 Linux musl-static / gnu-glibc217（x86_64 与 aarch64）、Windows gnu/gnullvm/msvc，以及 macOS Mach-O 的能力边界、正确性定义和可重复验收入口。设计背景见 `docs/plan/IMPL_RCC_MACOS.md` 与 `docs/plan/IMPL_RCC_MACOS_CROSS.md`。各 OS 交叉矩阵见 `docs/design/RCC_MACOS.md`、`RCC_LINUX.md`、`RCC_WINDOWS.md`。
+This document is the capability boundaries, correctness definitions, and reproducible acceptance entry points of the current RCC release for Linux musl-static / gnu-glibc217 (x86_64 and aarch64), Windows gnu/gnullvm/msvc, and macOS Mach-O. For the design background see `docs/plan/IMPL_RCC_MACOS.md` and `docs/plan/IMPL_RCC_MACOS_CROSS.md`. For the per-OS cross matrices see `docs/design/RCC_MACOS.md`, `RCC_LINUX.md`, and `RCC_WINDOWS.md`.
 
-需要已经构建好的 **release `rcc`**（开发用 `cargo build -p rcc` 不够）。`mise check` 在能找到这份 `rcc` 时会跑下面的验收脚本；没有执行器时跳过运行时而不是失败。Apple SDK / Windows SDK 探测到才会跑对应的 macOS / MSVC 脚本。`cargo-rcc` 段落在本机 rust-std 未安装时 skip（`rustup target add <triple>`），不把 `mise check` 打挂。
+Requires an already-built **release `rcc`** (the development `cargo build -p rcc` is not enough). `mise check` runs the acceptance scripts below when it can find this `rcc`; when there is no executor it skips the runtime instead of failing. The corresponding macOS / MSVC scripts only run when the Apple SDK / Windows SDK is detected. The `cargo-rcc` section is skipped when the local rust-std is not installed (`rustup target add <triple>`), rather than failing `mise check`.
 
 ```sh
 export RCC=/absolute/path/to/dist/rcc-release/rcc   # Windows: .../rcc.exe
 mise check
-# 或单独跑脚本：
+# or run the scripts separately:
 ./scripts/verify-linux-x86_64-musl.sh
 ./scripts/verify-linux-x86_64-gnu.sh
 ./scripts/verify-linux-aarch64-musl.sh
@@ -22,104 +22,104 @@ mise check
 ./scripts/verify-sqlite.sh linux-x86_64-musl-static
 ```
 
-gnu 运行时使用 CentOS 7 Lima `rcc-x64-glibc217`（kernel 3.10 不能 virtiofs，验收脚本会把 ELF scp 到客户机 `/tmp` 再跑），**不要**在 Alpine 上跑 gnu 动态 ELF。要强制执行产物：先 `mise setup`，再 `RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh`（gnu 用 `verify-linux-x86_64-gnu.sh`）。
+The gnu runtime uses the CentOS 7 Lima `rcc-x64-glibc217` (kernel 3.10 cannot do virtiofs, so the acceptance script scp's the ELF to the guest's `/tmp` and runs it there); **do not** run gnu dynamic ELF on Alpine. To force execution of the artifacts: first `mise setup`, then `RCC_REQUIRE_RUNTIME=1 ./scripts/verify-linux-x86_64-musl.sh` (gnu uses `verify-linux-x86_64-gnu.sh`).
 
-交叉产物一般不能在编译宿主上执行：Windows 不跑 ELF/Mach-O，Linux 不跑 Mach-O。执行依赖匹配 OS 或模拟器（Linux：`qemu` / Lima；x64 PE：`wine64`；Mach-O：Darwin，x86_64 可用 Rosetta）。`RCC_REQUIRE_RUNTIME=1` 在没有执行器时失败。
+Cross artifacts generally cannot be executed on the build host: Windows does not run ELF/Mach-O, and Linux does not run Mach-O. Execution depends on a matching OS or emulator (Linux: `qemu` / Lima; x64 PE: `wine64`; Mach-O: Darwin, x86_64 can use Rosetta). `RCC_REQUIRE_RUNTIME=1` fails when there is no executor.
 
 ## musl-static
 
-`scripts/verify-linux-x86_64-musl.sh` 会：
+`scripts/verify-linux-x86_64-musl.sh` will:
 
 1. `rcc doctor --profile linux-x86_64-musl-static`
-2. 多翻译单元 C：编译、`ar`/`ranlib`、静态链接
-3. 原生 C++：iostream / exception / `std::thread`（静态 libc++）
-4. `cargo-rcc` 编译 vendored OpenSSL
-5. `cargo-rcc` 编译 OpenSSL + bundled SQLite
-6. `rcc verify` 拒绝 `PT_INTERP`、`DT_NEEDED`、任何 `GLIBC_`
-7. 运行时：`qemu-x86_64`，否则 Lima `rcc-x64`（Alpine）
+2. Multi-translation-unit C: compile, `ar`/`ranlib`, static link
+3. Native C++: iostream / exception / `std::thread` (static libc++)
+4. `cargo-rcc` compiling vendored OpenSSL
+5. `cargo-rcc` compiling OpenSSL + bundled SQLite
+6. `rcc verify` rejects `PT_INTERP`, `DT_NEEDED`, any `GLIBC_`
+7. Runtime: `qemu-x86_64`, otherwise Lima `rcc-x64` (Alpine)
 
-冒烟输出：native C 含 `rcc-c-ok`；native C++ 含 `rcc-cxx-ok`；OpenSSL 含 `OpenSSL`；native stack 含 `sqlite=rcc-musl`。
+Smoke outputs: native C contains `rcc-c-ok`; native C++ contains `rcc-cxx-ok`; OpenSSL contains `OpenSSL`; the native stack contains `sqlite=rcc-musl`.
 
 ## gnu glibc 2.17
 
-`scripts/verify-linux-x86_64-gnu.sh` 会：
+`scripts/verify-linux-x86_64-gnu.sh` will:
 
 1. `rcc doctor --profile linux-x86_64-gnu-glibc217`
-2. 多翻译单元 C（pthread + `clock_gettime`）
-3. 原生 C++：iostream / exception / `std::thread`（静态 libc++，无 `libstdc++`）
-4. `cargo-rcc --target x86_64-unknown-linux-gnu` 编 OpenSSL、native-stack，以及 `examples/libcap-ng-linux`（`capng` crate + `libcap-ng-0.8.5.lock.json` 钉死的静态 `libcap-ng.a`）
-5. `rcc verify`：`PT_INTERP=/lib64/ld-linux-x86-64.so.2`、`DT_NEEDED` 含 `libc.so.6`、最高 `GLIBC_` ≤ 2.17、无 `libstdc++.so.6` / `libgcc_s.so.1` / `libc++.so.1`
-6. 运行时：linux-user qemu，否则 Lima `rcc-x64-glibc217`（CentOS 7）
+2. Multi-translation-unit C (pthread + `clock_gettime`)
+3. Native C++: iostream / exception / `std::thread` (static libc++, no `libstdc++`)
+4. `cargo-rcc --target x86_64-unknown-linux-gnu` building OpenSSL, native-stack, and `examples/libcap-ng-linux` (`capng` crate + the static `libcap-ng.a` pinned by `libcap-ng-0.8.5.lock.json`)
+5. `rcc verify`: `PT_INTERP=/lib64/ld-linux-x86-64.so.2`, `DT_NEEDED` contains `libc.so.6`, highest `GLIBC_` ≤ 2.17, no `libstdc++.so.6` / `libgcc_s.so.1` / `libc++.so.1`
+6. Runtime: linux-user qemu, otherwise Lima `rcc-x64-glibc217` (CentOS 7)
 
-`-lcap-ng` 与 zigbuild `.2.17` 过不了的原因见 `docs/plan/LIBCAP_NG_GLIBC217.md`。调用方自己编静态 `libcap-ng.a` 并导出 `LIBCAPNG_LIB_PATH` / `LIBCAPNG_LINK_TYPE=static`；fat LTO 下 rustc 的 `statx` 由 `cargo-rcc` 的无版本 syscall shim 满足。
+For why `-lcap-ng` and zigbuild `.2.17` do not pass, see `docs/plan/LIBCAP_NG_GLIBC217.md`. The caller builds the static `libcap-ng.a` themselves and exports `LIBCAPNG_LIB_PATH` / `LIBCAPNG_LINK_TYPE=static`; under fat LTO rustc's `statx` is satisfied by `cargo-rcc`'s versionless syscall shim.
 
-本机一次性准备：
+One-time local preparation:
 
 ```sh
 brew install qemu lima lima-additional-guestagents
 mise setup
 ```
 
-## 现在能编什么
+## What can be built now
 
-| 类别 | musl-static | gnu-glibc217 |
+| Category | musl-static | gnu-glibc217 |
 | --- | --- | --- |
-| 多文件 C、静态库、可执行文件 | 已验收 | 已实现 |
-| Rust + cc-rs（vendored OpenSSL） | 已验收 | 已实现 |
-| OpenSSL + bundled SQLite | 已验收 | 已实现 |
-| 纯 Rust crate（`panic=unwind`） | 已验收（x86_64 Alpine、aarch64 实机 `catch_unwind`） | 已验收（openssl / native-stack / libcap-ng；CentOS 7 实机 `catch_unwind`） |
-| C++（libc++ 闭包） | 已验收（iostream / exception / thread） | 已实现 |
-| cmake-rs / meson / autotools | **未验收** | **未验收** |
-| bindgen / libclang | **未验收** | **未验收** |
+| Multi-file C, static libraries, executables | Accepted | Implemented |
+| Rust + cc-rs (vendored OpenSSL) | Accepted | Implemented |
+| OpenSSL + bundled SQLite | Accepted | Implemented |
+| Pure Rust crate (`panic=unwind`) | Accepted (x86_64 Alpine, aarch64 real-machine `catch_unwind`) | Accepted (openssl / native-stack / libcap-ng; CentOS 7 real-machine `catch_unwind`) |
+| C++ (libc++ closure) | Accepted (iostream / exception / thread) | Implemented |
+| cmake-rs / meson / autotools | **Not accepted** | **Not accepted** |
+| bindgen / libclang | **Not accepted** | **Not accepted** |
 
-“大型”在这里指：**数千个 C 翻译单元或 SQLite/OpenSSL 这种量级的 vendored C**。OpenSSL Configure 仍需要本机 `perl`。
+"Large" here means: **thousands of C translation units, or vendored C on the order of SQLite/OpenSSL**. OpenSSL Configure still needs a native `perl`.
 
-## 正确性分三层
+## Correctness is in three layers
 
-### 1. 工具链身份
+### 1. Toolchain identity
 
-- 对应 profile 的 `rcc doctor` 通过，`IN_PAYLOAD=yes`
-- 编译进程只使用 view 内的 `cc`/`ld.lld`/`ar` alias
+- The `rcc doctor` for the corresponding profile passes, `IN_PAYLOAD=yes`
+- The compilation process only uses the `cc`/`ld.lld`/`ar` aliases inside the view
 
-### 2. 产物闭包（`rcc verify`）
+### 2. Artifact closure (`rcc verify`)
 
-musl-static 可执行文件拒绝 interpreter、`DT_NEEDED`、`GLIBC_`。gnu 可执行文件必须带 2.17 解释器和 `libc.so.6`，且最高 `GLIBC_` 不超过 2.17。relocatable `.o` 只检查格式和架构。
+A musl-static executable rejects the interpreter, `DT_NEEDED`, `GLIBC_`. A gnu executable must carry the 2.17 interpreter and `libc.so.6`, and the highest `GLIBC_` must not exceed 2.17. A relocatable `.o` only has its format and architecture checked.
 
-### 3. 运行时冒烟
+### 3. Runtime smoke
 
-Apple Silicon 不能直接执行 x86_64 Linux ELF，Homebrew qemu 没有 `qemu-x86_64`。musl 走 Alpine VM；gnu 走 CentOS 7（恰好 glibc 2.17）。新 glibc 发行版上的向前兼容是加分项，不能替代 2.17 基线。Windows host 上只做编译 + `rcc verify`，不执行 ELF。Linux / Windows host 上不执行 Mach-O。
+Apple Silicon cannot directly execute x86_64 Linux ELF, and Homebrew qemu has no `qemu-x86_64`. musl goes through an Alpine VM; gnu goes through CentOS 7 (which happens to be glibc 2.17). Forward compatibility on newer glibc distributions is a bonus, and cannot replace the 2.17 baseline. On a Windows host only compile + `rcc verify` are done, ELF is not executed. On Linux / Windows hosts Mach-O is not executed.
 
-## 已知限制（验收失败时先看这里）
+## Known limitations (check here first when acceptance fails)
 
-- 必须使用 **release `rcc`**。
-- `cargo-rcc` 要求 rustc host 为 `aarch64-apple-darwin`、`x86_64-apple-darwin`、`x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、`x86_64-pc-windows-msvc`、`aarch64-pc-windows-msvc` 或 `x86_64-pc-windows-gnu`。macOS x86_64 / Linux AArch64 / Windows AArch64 controller 是发布脚本已接线，不是本仓库随附的 zip。Windows AArch64 必须在 ARM64 Windows 上编。
-- 稳定 rustc 不能按组件关闭 `link-self-contained`；adapter 使用 `=no`，并把 rust-std 的 `libunwind.a` 放到隔离 `-L`。
-- 上游若强行 `--sysroot=/usr` 或冲突 `--target`，RCC 会 fail-closed。
-- gnu 产物在 musl Alpine 上会因动态 loader 失败，这不是 bug。
+- A **release `rcc`** must be used.
+- `cargo-rcc` requires the rustc host to be `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, or `x86_64-pc-windows-gnu`. The macOS x86_64 / Linux AArch64 / Windows AArch64 controllers are wired up by the release scripts, not the zip bundled with this repository. Windows AArch64 must be built on ARM64 Windows.
+- Stable rustc cannot disable `link-self-contained` per component; the adapter uses `=no` and places rust-std's `libunwind.a` in an isolated `-L`.
+- If the upstream forces `--sysroot=/usr` or a conflicting `--target`, RCC will fail-closed.
+- gnu artifacts will fail on musl Alpine due to the dynamic loader; this is not a bug.
 
 ## Linux aarch64
 
-`scripts/verify-linux-aarch64-musl.sh` 与 `verify-linux-aarch64-gnu.sh` 复用 x86_64 的 C/C++/OpenSSL/SQLite 夹具，换成 aarch64 triple。musl 运行时可用 `qemu-aarch64` 或 Lima `rcc-arm64`（`mise setup`）。gnu aarch64 需要 glibc ≥ 2.17 的 aarch64 客户机，不要在 Alpine musl 上跑。
+`scripts/verify-linux-aarch64-musl.sh` and `verify-linux-aarch64-gnu.sh` reuse the x86_64 C/C++/OpenSSL/SQLite fixtures, switched to the aarch64 triple. The musl runtime can use `qemu-aarch64` or Lima `rcc-arm64` (`mise setup`). gnu aarch64 needs an aarch64 guest with glibc ≥ 2.17; do not run it on Alpine musl.
 
 ## Windows PE
 
-`scripts/verify-windows.sh <profile>` 编 `examples/windows-c`、`examples/windows-cxx` 和 `examples/windows-hello`，然后 `rcc verify` 检查 PE 架构，并拒绝 `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`。x86_64 gnu/gnullvm 在装了 `wine64` 时可跑 native C。profile：`windows-x86_64-gnu`、`windows-x86_64-gnullvm`、`windows-aarch64-gnullvm`、`windows-x86_64-msvc`、`windows-aarch64-msvc`。gnu/gnullvm 的 Clang 注入 `-lkernel32`，避免 Windows host 上缺 dllimport。
+`scripts/verify-windows.sh <profile>` builds `examples/windows-c`, `examples/windows-cxx`, and `examples/windows-hello`, then `rcc verify` checks the PE architecture and rejects `libgcc_s_*.dll` / `libstdc++-6.dll` / `libwinpthread-1.dll`. x86_64 gnu/gnullvm can run native C when `wine64` is installed. Profiles: `windows-x86_64-gnu`, `windows-x86_64-gnullvm`, `windows-aarch64-gnullvm`, `windows-x86_64-msvc`, `windows-aarch64-msvc`. The gnu/gnullvm Clang injects `-lkernel32` to avoid a missing dllimport on a Windows host.
 
-`windows-*-msvc` 在 Windows host 上可直接用已装的 VS / Kits；从其它 host 交叉需 `RCC_WINDOWS_SDK_ROOT` 与 `RCC_MSVC_TOOLS_ROOT`（或 `vendor/windows` 与 `vendor/msvc`）。clang-cl 注入 `/winsdkdir`、`/vctoolsdir` 和视图里的 `lld-link`。C++ 默认 `/EHsc`。`mise check` 在探测到 SDK + toolset 且 profile 在 pack 里时会跑 MSVC 验收；也可单独跑 `./scripts/verify-windows.sh windows-x86_64-msvc`。细节：[RCC_WINDOWS.md](design/RCC_WINDOWS.md)。
+`windows-*-msvc` can directly use the installed VS / Kits on a Windows host; cross-compiling from another host needs `RCC_WINDOWS_SDK_ROOT` and `RCC_MSVC_TOOLS_ROOT` (or `vendor/windows` and `vendor/msvc`). clang-cl injects `/winsdkdir`, `/vctoolsdir`, and the `lld-link` in the view. C++ defaults to `/EHsc`. `mise check` runs the MSVC acceptance when the SDK + toolset are detected and the profile is in the pack; it can also be run separately with `./scripts/verify-windows.sh windows-x86_64-msvc`. Details: [RCC_WINDOWS.md](design/RCC_WINDOWS.md).
 
 ## macOS Mach-O
 
-`scripts/verify-macos.sh` 编 `examples/macos-c` / `macos-cxx` / `macos-hello`，然后 `rcc verify` 检查 Mach-O 架构。Apple SDK 发现顺序：`RCC_APPLE_SDK_ROOT`、`$RCC_HOME_DIR/vendor/macos`，仅 macOS 上再回落到 `xcrun`。Linux / Windows 上先 `./scripts/setup-env.sh`（或 `mise setup`）。`mise check` 在探测到 SDK 时会跑 `macos-aarch64`，pack 含 `macos-x86_64`（x86_64 compiler-rt slice）时再跑后者。macOS 发布时 `stage-darwin-compiler-rt.sh` 必须把 x86_64 slice 并进 `libclang_rt.osx.a`。
+`scripts/verify-macos.sh` builds `examples/macos-c` / `macos-cxx` / `macos-hello`, then `rcc verify` checks the Mach-O architecture. Apple SDK discovery order: `RCC_APPLE_SDK_ROOT`, `$RCC_HOME_DIR/vendor/macos`, and only on macOS does it then fall back to `xcrun`. On Linux / Windows first run `./scripts/setup-env.sh` (or `mise setup`). `mise check` runs `macos-aarch64` when the SDK is detected, and runs the latter when the pack contains `macos-x86_64` (the x86_64 compiler-rt slice). On a macOS release, `stage-darwin-compiler-rt.sh` must merge the x86_64 slice into `libclang_rt.osx.a`.
 
-不在 Linux 或 Windows 上执行 Mach-O。Windows 上编完后拷到 Mac 再跑（需要时 `codesign --sign -`；x86_64 用 Rosetta）。Darwin 上若 arch 匹配（含 Rosetta）会执行 C hello；`RCC_REQUIRE_RUNTIME=1` 在非 Darwin 上失败。
+Mach-O is not executed on Linux or Windows. After building on Windows, copy to a Mac to run (`codesign --sign -` when needed; x86_64 uses Rosetta). On Darwin, if the arch matches (including Rosetta) the C hello is executed; `RCC_REQUIRE_RUNTIME=1` fails on non-Darwin.
 
 ## SQLite amalgamation
 
-`scripts/verify-sqlite.sh <profile>` 用 `rcc cc` 编官方 amalgamation。仓库里没有 SQLite 源码：锁文件是 `toolchains/sqlite-amalgamation-3500400.lock.json`，脚本把 zip 拉到 `.cache/`（`RCC_ARCHIVE_CACHE`）、解压后再编译、链接、`rcc verify`。stdout 冒烟为 `sqlite=rcc-ok`。`mise check` 对 payload 里且 `rcc doctor` 能绑定的每个 C profile 跑一遍；缺 SDK / 不在 pack 里则 skip。这是对单翻译单元量级 C 的覆盖，补充 `rusqlite` bundled 那条路径。
+`scripts/verify-sqlite.sh <profile>` uses `rcc cc` to build the official amalgamation. There is no SQLite source in the repository: the lock file is `toolchains/sqlite-amalgamation-3500400.lock.json`, and the script pulls the zip to `.cache/` (`RCC_ARCHIVE_CACHE`), unpacks it, then compiles, links, and `rcc verify`. The stdout smoke is `sqlite=rcc-ok`. `mise check` runs it once for each C profile that is in the payload and that `rcc doctor` can bind; it skips when the SDK is missing or it is not in the pack. This is coverage for single-translation-unit-scale C, complementing the `rusqlite` bundled path.
 
-## 扩展下一批大型项目时怎么加
+## How to add the next batch of large projects
 
-1. 新 crate 放在 `examples/`，带空 `[workspace]`，不要加入 RCC Cargo workspace。
-2. 纯 C 走 cc-rs；C++ 走 pack 内预编 libc++，不要混链宿主机 `libstdc++`。
-3. 在对应的 `scripts/verify-linux-x86_64-*.sh` 增加 `cargo-rcc build` 与 `rcc verify`。
-4. 若需要运行时断言，把可匹配的 stdout 片段交给 `run_guest`。
+1. Put the new crate in `examples/`, with an empty `[workspace]`, and do not add it to the RCC Cargo workspace.
+2. Pure C goes through cc-rs; C++ goes through the prebuilt libc++ in the pack, do not cross-link the host `libstdc++`.
+3. Add `cargo-rcc build` and `rcc verify` in the corresponding `scripts/verify-linux-x86_64-*.sh`.
+4. If a runtime assertion is needed, hand the matchable stdout fragment to `run_guest`.

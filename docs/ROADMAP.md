@@ -1,40 +1,46 @@
-# RCC 路线图 / Roadmap
+# RCC Roadmap
 
-> 状态日期：2026-10-31。
-> 本文是 RCC 的**实施路线图**：汇总已交付能力、梳理剩余工作并给出优先级。
-> 架构决策、验收门槛与长期分期以 [design/ARCH.md](design/ARCH.md) §15–§19 为权威来源；
-> 各 host 的交叉矩阵与当前实现以 [RCC_MACOS.md](design/RCC_MACOS.md)、
-> [RCC_LINUX.md](design/RCC_LINUX.md)、[RCC_WINDOWS.md](design/RCC_WINDOWS.md) 为准。
+> Status date: 2026-10-31.
+> This document is RCC's **implementation roadmap**: it summarizes delivered
+> capabilities, lays out the remaining work, and prioritizes it.
+> Architecture decisions, acceptance gates, and long-term phasing are owned by
+> [design/ARCH.md](design/ARCH.md) §15–§19; per-host cross matrices and the
+> current implementation are owned by [RCC_MACOS.md](design/RCC_MACOS.md),
+> [RCC_LINUX.md](design/RCC_LINUX.md), and [RCC_WINDOWS.md](design/RCC_WINDOWS.md).
 
-## 1. 当前状态总览
+## 1. Current status overview
 
-RCC 已越过 MVP：三份 host controller 已落地，核心控制层、profile registry、
-内容寻址 cache、immutable view 与 verifier 均可用，`cargo-rcc` adapter 对齐
-`cargo zigbuild`。工作区约 17k 行 Rust，`cargo test` 全绿（88 + 1）。
+RCC is past MVP: all three host controllers are in place, the core control
+layer, profile registry, content-addressed cache, immutable view, and verifier
+are all usable, and the `cargo-rcc` adapter aligns with `cargo zigbuild`. The
+workspace is roughly 17k lines of Rust; `cargo test` is fully green (88 + 1).
 
-### 1.1 已交付 (Delivered)
+### 1.1 Delivered
 
-| 领域 | 内容 |
+| Area | Contents |
 | --- | --- |
-| Host controller | macOS AArch64、Linux x86_64、Windows x86_64-msvc（静态集成 Clang/LLD/llvm-ar，LLVM 22.1.8） |
-| Host 发布脚本（已接线，须在匹配 arch 上编） | macOS x86_64、Linux AArch64、Windows AArch64 |
-| 控制层 CLI | `targets`、`print {tool,sysroot,resource-dir,manifest,identity}`、`env`、`cc/cxx/ar/ranlib/link/tool`、`verify`、`doctor`、`cache {status,verify,gc}`、`licenses` |
-| Target profile | Linux `{x86_64,aarch64}-{musl-static,gnu-glibc217}`；Windows `x86_64-gnu`、`{x86_64,aarch64}-gnullvm`、`x86_64-msvc`（`aarch64-msvc` 已注册） |
-| Host native profile | Linux x86_64/AArch64、Windows gnu/gnullvm/msvc、macOS x86_64/AArch64 |
-| Runtime contract | `native-rcc-owned` 及首批 `rustc-*-v0` consumer contract（Rust 产物可 unwind；musl 派生 libc ABI cfg） |
-| 消费者集成 | `cargo-rcc`；`env` 输出 JSON/sh/pwsh/Cargo/CMake fragment 与 pkg-config metadata；driver 查询兼容 |
-| 校验 | ELF、PE/COFF、Mach-O verifier；负面测试证明正式路径零系统 compiler/linker/binutils |
-| 外部 SDK | AppleDeveloperProvider、Windows SDK + MSVC Toolset provider（发现 + 校验，不再分发） |
+| Host controller | macOS AArch64, Linux x86_64, Windows x86_64-msvc (statically integrated Clang/LLD/llvm-ar, LLVM 22.1.8) |
+| Host release scripts (wired; must be built on the matching arch) | macOS x86_64, Linux AArch64, Windows AArch64 |
+| Control-layer CLI | `targets`, `print {tool,sysroot,resource-dir,manifest,identity}`, `env`, `cc/cxx/ar/ranlib/link/tool`, `verify`, `doctor`, `cache {status,verify,gc}`, `licenses` |
+| Target profiles | Linux `{x86_64,aarch64}-{musl-static,gnu-glibc217}`; Windows `x86_64-gnu`, `{x86_64,aarch64}-gnullvm`, `x86_64-msvc` (`aarch64-msvc` registered) |
+| Host native profiles | Linux x86_64/AArch64, Windows gnu/gnullvm/msvc, macOS x86_64/AArch64 |
+| Runtime contract | `native-rcc-owned` plus the first `rustc-*-v0` consumer contracts (Rust artifacts can unwind; musl-derived libc ABI cfg) |
+| Consumer integration | `cargo-rcc`; `env` emits JSON/sh/pwsh/Cargo/CMake fragments and pkg-config metadata; driver-query compatible |
+| Verification | ELF, PE/COFF, Mach-O verifiers; negative tests prove zero system compiler/linker/binutils on the sanctioned path |
+| External SDKs | AppleDeveloperProvider, Windows SDK + MSVC Toolset provider (discovery + validation, no longer distributed) |
 
-详见 `git log` 与各 design 文档；ARCH §15 的 Phase 1–3 多数条目已勾选。
+See `git log` and the individual design documents for details; most Phase 1–3
+items in ARCH §15 are already checked off.
 
-## 2. 剩余工作与优先级
+## 2. Remaining work and priorities
 
-### P0 — sysroot overlay manifest 与派生 profile（验收中）
+### P0 — sysroot overlay manifest and derived profiles (in acceptance)
 
-ARCH §9.4、§7.1、Phase 2 最后一项。overlay provider **已实现并单测**，
-增量 1–5 全部落地，增量 6（真实 compile/link 验收）已在 Linux 通过，
-Windows / macOS 交叉验收进行中（在本机交叉编译，在 MCP 远端机器运行）。目标行为：
+ARCH §9.4, §7.1, the last Phase 2 item. The overlay provider is **implemented
+and unit-tested**: increments 1–5 are all landed, and increment 6 (real
+compile/link acceptance) has passed on Linux. Windows / macOS cross-acceptance
+is in progress (cross-compiled on this machine, run on the remote MCP
+machines). Target behavior:
 
 ```
 rcc sysroot register-overlay \
@@ -44,58 +50,77 @@ rcc sysroot register-overlay \
 rcc sysroot list --profile <p>
 ```
 
-查找顺序（ARCH §9.4）：显式 overlay → RCC base sysroot → external managed SDK →
-无 host fallback。实现拆成可评审的增量：
+Lookup order (ARCH §9.4): explicit overlay → RCC base sysroot → external managed
+SDK → no host fallback. The implementation is split into reviewable increments:
 
-1. **Schema**（已完成）：`OverlayManifest`（身份、ABI baseline、
-   include/library/framework roots、digest）及 `validate()`；`verify_compatible`
-   拒绝提升 ABI baseline；拒绝不安全路径。附单测。见 `crates/rcc-core/src/schema.rs`。
-2. **Store / 解析**（已完成）：`crates/rcc-core/src/overlay.rs` 在
-   `$RCC_HOME_DIR/overlays/<profile>/<id>.json` 持久化注册；`tree_digest` 内容
-   寻址校验（拒绝符号链接），`register`/`load`/`list`。附 tempfile 单测。
-3. **View 集成**（已完成）：`build_view_manifest_with_overlays`
-   （`crates/rcc-core/src/layout.rs`）按查找顺序将 overlay 的
-   include/library/framework roots 注入 gcc 风格 cc/cxx 参数（`-isystem` /
-   `-L` / `-iframework`+`-F`，置于 base sysroot 之前）；每个 overlay 的
-   `id@revision:tree_digest` 折叠进 ToolchainIdentity（§5.4）、view path 与
-   ViewManifest.overlay_identities。`toolchain::materialize` 加载已注册 overlay。附单测。
-4. **Policy**（已完成，无需放宽）：overlay roots 作为受信任的 injected args 注入，
-   dispatch 仅对用户显式参数做 forbidden_roots 校验，故 overlay 路径天然允许；
-   host system roots 仍被拒绝。§8.1 第 8 条由此满足，无需改动 policy。
-5. **输出 / CLI**（已完成）：`rcc sysroot register-overlay` / `sysroot list` /
-   `sysroot digest`（`crates/rcc/src/cli.rs`）。与增量 3–4 一同暴露。
-6. **验收**（Linux 已通过 / Windows·macOS 进行中）：overlay fixture 的
-   compile/run/verify。Linux `linux-x86_64-musl-static` 已通过——未注册 overlay 时
-   编译按预期失败（缺 `vendor.h`），注册后编译成功、`rcc verify` 通过、运行输出
-   `vendor_answer=42`（退出码 0）。Windows `windows-x86_64-gnu`（mingw-w64，
-   gcc 风格）在本机交叉编译并在 MCP Windows 机器运行；macOS 待办。负面测试
-   （overlay 提升 baseline、路径逃逸、未注册 overlay）由 schema/overlay 单测覆盖。
+1. **Schema** (done): `OverlayManifest` (identity, ABI baseline,
+   include/library/framework roots, digest) plus `validate()`;
+   `verify_compatible` rejects raising the ABI baseline and rejects unsafe
+   paths. Unit-tested. See `crates/rcc-core/src/schema.rs`.
+2. **Store / resolution** (done): `crates/rcc-core/src/overlay.rs` persists
+   registrations under `$RCC_HOME_DIR/overlays/<profile>/<id>.json`;
+   `tree_digest` is a content-addressed check (rejects symlinks), with
+   `register`/`load`/`list`. Unit-tested with tempfiles.
+3. **View integration** (done): `build_view_manifest_with_overlays`
+   (`crates/rcc-core/src/layout.rs`) injects the overlay's
+   include/library/framework roots into gcc-style cc/cxx arguments (`-isystem` /
+   `-L` / `-iframework`+`-F`, placed ahead of the base sysroot) in lookup
+   order; each overlay's `id@revision:tree_digest` is folded into the
+   ToolchainIdentity (§5.4), the view path, and
+   ViewManifest.overlay_identities. `toolchain::materialize` loads the
+   registered overlays. Unit-tested.
+4. **Policy** (done, no relaxation needed): overlay roots are injected as
+   trusted injected args, and dispatch only checks user-supplied arguments
+   against forbidden_roots, so overlay paths are allowed naturally; host system
+   roots remain rejected. §8.1 item 8 is thereby satisfied with no policy
+   change.
+5. **Output / CLI** (done): `rcc sysroot register-overlay` / `sysroot list` /
+   `sysroot digest` (`crates/rcc/src/cli.rs`). Exposed together with
+   increments 3–4.
+6. **Acceptance** (Linux passed / Windows·macOS in progress): compile/run/verify
+   of an overlay fixture. Linux `linux-x86_64-musl-static` has passed — without
+   a registered overlay the compile fails as expected (missing `vendor.h`);
+   after registration the compile succeeds, `rcc verify` passes, and running
+   the artifact prints `vendor_answer=42` (exit code 0). Windows
+   `windows-x86_64-gnu` (mingw-w64, gcc-style) is cross-compiled here and run on
+   the MCP Windows machine; macOS is pending. Negative tests (overlay raising
+   the baseline, path escape, unregistered overlay) are covered by the
+   schema/overlay unit tests.
 
-冻结项 ARCH §19 #10（overlay manifest schema 与 ABI baseline 提升策略）随增量 1 落定。
+Frozen item ARCH §19 #10 (overlay manifest schema and ABI-baseline promotion
+policy) was settled with increment 1.
 
-### P1 — 发布完整性 (Release integrity)
+### P1 — Release integrity
 
-README「Limits」与 ARCH Phase 4。面向真实分发：
+README "Limits" and ARCH Phase 4. For real distribution:
 
-- [ ] 生成 SBOM（controller + engine build ID + 各 pack/sysroot digest + 外部 SDK identity）。
-- [ ] Release code signing / notarization / Windows Authenticode（当前 `.rccpack`
-  仅 SHA-256 校验，非发行方签名）。
-- [ ] 可复现 pack 构建与长期 CVE / source-offer 流程自动化。
+- [ ] Generate an SBOM (controller + engine build ID + each pack/sysroot digest
+  + external SDK identity).
+- [ ] Release code signing / notarization / Windows Authenticode (currently a
+  `.rccpack` is only SHA-256 checked, not publisher-signed).
+- [ ] Reproducible pack builds and automation of the long-term CVE /
+  source-offer process.
 
-### P2 — macOS universal2（Phase 3）
+### P2 — macOS universal2 (Phase 3)
 
-- [ ] universal2 工具（`lipo`，ARCH §7.1 列为 Phase 3）与合并 slice 后的
-  ad-hoc signature 复验（§4 Mach-O verifier 注记）。
+- [ ] universal2 tooling (`lipo`, listed as Phase 3 in ARCH §7.1) and
+  re-verification of the ad-hoc signature after merging slices (§4 Mach-O
+  verifier note).
 
-### P3 — 生态扩展评估（Phase 3–4，先评估后立项）
+### P3 — Ecosystem expansion assessment (Phase 3–4, assess before committing)
 
-- [ ] 独立 libclang pack（bindgen 能力；独立版本/动态加载/许可证，不并入 core）。
-- [ ] 签名 remote pack 与 slim edition（不改变 full edition 的离线承诺）。
-- [ ] 更多 host arch 与有限、固定的新 ABI baseline。
-- [ ] 依据真实消费者失败数据扩展 driver 查询兼容与 diagnostics。
+- [ ] Standalone libclang pack (bindgen capability; independently
+  versioned/dynamically loaded/licensed, not folded into core).
+- [ ] Signed remote pack and a slim edition (without changing the full
+  edition's offline guarantee).
+- [ ] More host arches and a limited, fixed set of new ABI baselines.
+- [ ] Extend driver-query compatibility and diagnostics based on real consumer
+  failure data.
 
-## 3. 边界约束（不随路线图改变）
+## 3. Boundary constraints (invariant across the roadmap)
 
-ARCH §2.2 / §18 的产品边界始终成立：RCC 不编译 Rust/Zig、不驱动 Cargo、
-不携带 CMake/Ninja/pkg-config，不在正式路径回落系统 toolchain，保持 native
-provider 定位，不演变为通用构建系统或包管理器。
+The product boundaries in ARCH §2.2 / §18 always hold: RCC does not compile
+Rust/Zig, does not drive Cargo, does not carry CMake/Ninja/pkg-config, does not
+fall back to the system toolchain on the sanctioned path, stays positioned as a
+native provider, and does not evolve into a general build system or package
+manager.

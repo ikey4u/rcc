@@ -1,10 +1,12 @@
 # RCC
 
-RCC is a relocatable C/C++ toolchain. A single multicall `rcc` statically links
-Clang, LLD, and llvm-ar (LLVM 22.1.8). Headers, sysroots, and compiler-rt ship
-as an embedded resource pack. First use materializes a read-only view; `cc`,
-`cxx`, `ld64.lld` / `ld.lld` / `lld-link`, `ar`, and `ranlib` are hardlinks of
-that same controller.
+**A relocatable, hermetic C/C++ cross-toolchain in a single binary.**
+
+One `rcc` multicall executable statically links Clang, LLD, and llvm-ar
+(LLVM 22.1.8). Headers, sysroots, and compiler-rt ship as an embedded resource
+pack. First use verifies that pack and materializes an immutable, read-only
+view; `cc`, `cxx`, `ld.lld` / `ld64.lld` / `lld-link`, `ar`, and `ranlib` are
+hardlinks of that same controller. No system toolchain is ever invoked.
 
 RCC does not replace Cargo or rustc, does not compile Zig, and does not ship a
 Rust standard library. `cargo-rcc` is the Cargo adapter (`cargo rcc`, same role
@@ -14,6 +16,60 @@ Design: [docs/design/ARCH.md](docs/design/ARCH.md). Per-OS matrices:
 [macOS](docs/design/RCC_MACOS.md), [Linux](docs/design/RCC_LINUX.md),
 [Windows](docs/design/RCC_WINDOWS.md). Delivered status and remaining work:
 [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Highlights
+
+- **Single static binary.** One `rcc` multicall executable statically links
+  Clang, LLD, and llvm-ar (LLVM 22.1.8) — no system compiler, no runtime
+  dependency to install alongside it.
+- **Hermetic and fail-closed.** RCC never invokes the host `clang`, `gcc`, or
+  `ld`. Conflicting flags and host search-path variables (`CPATH`, `SDKROOT`,
+  `LIBRARY_PATH`, `DYLD_*`, …) fail closed rather than leaking into a build.
+- **Relocatable and content-addressed.** The resource pack is embedded and
+  SHA-256 verified; first use materializes an immutable, content-addressed
+  view, and every tool alias is a hardlink of the one controller.
+- **Cross everything.** Linux (musl-static / glibc 2.17), Windows (hermetic
+  MinGW gnu & gnullvm, managed MSVC), and macOS (arm64 / x86_64) targets from
+  any supported host.
+- **Verifiable output.** Every artifact carries a reproducible
+  ToolchainIdentity; `rcc verify` checks ELF, PE/COFF, and Mach-O, and negative
+  tests prove zero system compiler/linker/binutils on the sanctioned path.
+- **Sysroot overlays.** Layer vendor headers and libraries onto a base sysroot
+  with `rcc sysroot register-overlay`, folded into the toolchain identity and
+  without raising the ABI baseline.
+- **Cargo integration.** `cargo rcc` drops in as `cc` and linker; artifacts
+  unwind like a plain `cargo build`.
+- **External SDKs, never redistributed.** Apple and Windows/MSVC SDKs are
+  discovered and validated at runtime, not packed — license-clean by design.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    invoke["cc · cxx · ld.lld / ld64.lld / lld-link · ar · ranlib<br/>(hardlink aliases of rcc)"]
+
+    subgraph controller["rcc — single static multicall binary"]
+        dispatch["dispatch + hermetic driver policy"]
+        engine["statically linked engine<br/>Clang · LLD · llvm-ar (LLVM 22.1.8)"]
+        dispatch --- engine
+    end
+
+    profiles["profile registry<br/>target + host profiles<br/>(triple · sysroot · contract)"]
+    overlays["sysroot overlays<br/>(optional vendor roots)"]
+    pack[("embedded .rccpack<br/>headers · sysroots · compiler-rt")]
+    cache[("content-addressed cache<br/>immutable read-only view")]
+    sdk["external SDKs<br/>Apple · Windows / MSVC<br/>(discovered, never packed)"]
+    out["verified artifact<br/>ELF · PE/COFF · Mach-O"]
+
+    invoke --> dispatch
+    profiles --> dispatch
+    pack -->|SHA-256 verify| cache
+    overlays --> cache
+    dispatch -->|first-use materialization| cache
+    cache --> dispatch
+    sdk -.->|runtime discovery| dispatch
+    dispatch ==>|no system clang / gcc / ld| out
+```
 
 ## Controllers and targets
 
@@ -83,6 +139,26 @@ Arguments after `--` go to the bound alias. Do not restate `--target`,
 `--sysroot`, or the linker: the profile owns those. Conflicting flags and host
 search-path variables (`CPATH`, `SDKROOT`, `LIBRARY_PATH`, `DYLD_*`, …) fail
 closed. `rcc env --format sh` emits the matching unsets.
+
+## Sysroot overlays
+
+An overlay layers an explicit, immutable set of target headers and libraries on
+top of a base profile — for a vendor SDK, a board support package, or any extra
+roots — without raising the profile's ABI baseline. Registered overlays are
+content-addressed and folded into the toolchain identity, so a build's output
+reflects exactly which overlays were in effect.
+
+```sh
+rcc sysroot digest --path <vendor-sysroot>
+rcc sysroot register-overlay \
+  --profile linux-aarch64-gnu-glibc217 \
+  --path <vendor-sysroot> \
+  --manifest <overlay-manifest>
+rcc sysroot list --profile linux-aarch64-gnu-glibc217
+```
+
+Lookup order is explicit overlay → RCC base sysroot → external managed SDK, with
+no host fallback.
 
 ## cargo-rcc
 

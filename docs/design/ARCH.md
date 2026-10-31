@@ -1,179 +1,250 @@
-# RCC 可移植 C/C++ 工具链与 Sysroot 架构设计
+# RCC Relocatable C/C++ Toolchain and Sysroot Architecture Design
 
-> [!NOTE] 文档状态
-> 本文记录 RCC 的目标架构、已采纳决策、资源布局、平台策略和验收门槛。Apple Silicon macOS、Linux x86_64 与 Windows x86_64-msvc 三份 controller 已落地；交叉矩阵与**当前实现**以 [RCC_MACOS.md](RCC_MACOS.md)、[RCC_LINUX.md](RCC_LINUX.md)、[RCC_WINDOWS.md](RCC_WINDOWS.md) 为准。其余 host/profile 仍按路线图。
+> [!NOTE] Document status
+> This document records RCC's target architecture, adopted decisions, resource
+> layout, platform strategy, and acceptance gates. The three controllers for
+> Apple Silicon macOS, Linux x86_64, and Windows x86_64-msvc have landed; the
+> cross matrix and **current implementation** are governed by
+> [RCC_MACOS.md](RCC_MACOS.md), [RCC_LINUX.md](RCC_LINUX.md), and
+> [RCC_WINDOWS.md](RCC_WINDOWS.md). The remaining host/profile combinations
+> still follow the roadmap.
 
-| 属性 | 值 |
+| Attribute | Value |
 |---|---|
-| 状态 | Accepted；macOS AArch64 / Linux x86_64 / Windows x86_64-msvc controller 已实现 |
-| 目标版本 | MVP |
-| 实现语言 | Rust 控制层；静态链接经过裁剪的 LLVM/Clang/LLD/llvm-ar 组件；C++ C ABI bridge |
-| 产品定位 | 可重定位的 C/C++ 编译、归档、链接及 target sysroot/runtime provider |
-| 主要消费者 | Cargo/rustc、cc-rs、CMake、其他构建系统、直接调用者 |
-| 目标平台 | Linux、Windows、macOS；首批架构为 x86_64 与 AArch64 |
-| 核心约束 | 不包含 Zig；不分发 Cargo、rustc 或 Rust 标准库；正式路径不调用系统 C/C++ compiler、linker 或 binutils |
-| 发行形态 | 每个 host OS/arch 一个自解包、静态 multicall executable；payload 只含资源 |
+| Status | Accepted; macOS AArch64 / Linux x86_64 / Windows x86_64-msvc controllers implemented |
+| Target version | MVP |
+| Implementation language | Rust control layer; statically linked, trimmed LLVM/Clang/LLD/llvm-ar components; C++ C ABI bridge |
+| Product positioning | Relocatable C/C++ compile, archive, link, and target sysroot/runtime provider |
+| Primary consumers | Cargo/rustc, cc-rs, CMake, other build systems, direct callers |
+| Target platforms | Linux, Windows, macOS; first architectures are x86_64 and AArch64 |
+| Core constraints | No Zig included; does not distribute Cargo, rustc, or the Rust standard library; the official path does not invoke the system C/C++ compiler, linker, or binutils |
+| Distribution form | One self-extracting, statically linked multicall executable per host OS/arch; the payload contains only resources |
 
-## 1. 摘要
+## 1. Summary
 
-cargo-zigbuild 可以拆成两层：
+cargo-zigbuild can be split into two layers:
 
-1. Cargo 编排层：调用 Cargo/rustc，设置 linker 与 build script 环境。
-2. Native toolchain 层：Zig 提供 C/C++ driver、linker、libc headers、CRT、compiler runtime、C++ runtime 和跨目标 sysroot。
+1. Cargo orchestration layer: invokes Cargo/rustc and sets up the linker and
+   build-script environment.
+2. Native toolchain layer: Zig provides the C/C++ driver, linker, libc headers,
+   CRT, compiler runtime, C++ runtime, and cross-target sysroot.
 
-RCC 只替代第二层。它对应的是类似 **zig cc / zig c++ / zig ar / linker + sysroot** 的能力，而不是 cargo-zigbuild 这一 Cargo wrapper。
+RCC replaces only the second layer. It corresponds to capabilities such as
+**zig cc / zig c++ / zig ar / linker + sysroot**, not to cargo-zigbuild, the
+Cargo wrapper.
 
-> [!IMPORTANT] 最终边界
-> RCC 不发现 Rust workspace，不调用 cargo metadata，不启动 Cargo/rustc，不安装 target rust-std，也不解析 Cargo 产物。外部消费者通过 RCC 暴露的稳定工具路径、环境清单和 profile manifest 使用它。若未来需要 cargo-zigbuild 风格的一键命令，应作为独立的 Cargo adapter 项目实现，而不是扩张 RCC core。
+> [!IMPORTANT] Final boundary
+> RCC does not discover Rust workspaces, does not call cargo metadata, does not
+> launch Cargo/rustc, does not install target rust-std, and does not parse Cargo
+> artifacts. External consumers use it through the stable tool paths,
+> environment manifests, and profile manifests that RCC exposes. If a
+> cargo-zigbuild-style one-shot command is needed in the future, it should be
+> implemented as a standalone Cargo adapter project rather than by expanding the
+> RCC core.
 
-RCC 负责：
+RCC is responsible for:
 
-- 在 RCC executable 中静态提供 Clang driver/cc1/cc1as、LLD flavor 与 llvm-ar/ranlib personality，并按 profile 裁剪 target backend。
-- 提供目标 C/C++ headers、CRT、libc、compiler runtime、unwind、C++ runtime 和 linker stubs。
-- 将 target、ABI、libc、CRT、C++ ABI、最低 OS 版本固化为不可变 profile。
-- 为构建系统提供真实 executable path；这些路径是同一 RCC controller 的内容寻址 hardlink alias，不要求把“命令 + 参数”塞进一个环境变量。
-- 阻断 Clang 的 host GCC 探测、host include/library 搜索和系统 linker fallback。
-- 校验工具链资源和最终 ELF、PE/COFF、Mach-O 产物。
+- Statically providing the Clang driver/cc1/cc1as, the LLD flavors, and the
+  llvm-ar/ranlib personality within the RCC executable, trimming the target
+  backend per profile.
+- Providing target C/C++ headers, CRT, libc, compiler runtime, unwind, C++
+  runtime, and linker stubs.
+- Fixing target, ABI, libc, CRT, C++ ABI, and minimum OS version into immutable
+  profiles.
+- Providing real executable paths to build systems; these paths are
+  content-addressed hardlink aliases of the same RCC controller, and do not
+  require packing "command + arguments" into a single environment variable.
+- Blocking Clang's host GCC probing, host include/library search, and system
+  linker fallback.
+- Validating toolchain resources and the final ELF, PE/COFF, and Mach-O
+  artifacts.
 
-RCC 不负责：
+RCC is not responsible for:
 
-- 编译 Rust 源码或携带 Rust toolchain。
-- 调度 workspace、依赖、build script、proc-macro、test 或 runner。
-- 携带 CMake、Ninja、pkg-config、Python、Perl、NASM、bindgen 或共享 libclang。
-- 提供 OpenSSL、GTK、数据库客户端等第三方 target 软件包。
+- Compiling Rust source or carrying a Rust toolchain.
+- Scheduling workspaces, dependencies, build scripts, proc-macros, tests, or
+  runners.
+- Carrying CMake, Ninja, pkg-config, Python, Perl, NASM, bindgen, or a shared
+  libclang.
+- Providing third-party target packages such as OpenSSL, GTK, or database
+  clients.
 
-因此，安装 RCC 后仍需外部 Rust toolchain 才能构建 Rust。rustc 生成 Rust object，再把最终链接交给 RCC 的 linker path；cc-rs 等消费者把 C/C++ 编译交给 RCC 的 compiler path。
+Therefore, after installing RCC, an external Rust toolchain is still required to
+build Rust. rustc produces Rust objects and then hands the final link to RCC's
+linker path; consumers such as cc-rs hand C/C++ compilation to RCC's compiler
+path.
 
-### 1.1 可行性判断
+### 1.1 Feasibility assessment
 
-| 需求 | 判断 | 说明 |
+| Requirement | Assessment | Notes |
 |---|:---:|---|
-| RCC 控制层使用 Rust | 可行 | CLI、profile、缓存、物化、策略和校验均可用 Rust 实现 |
-| 不安装、不调用 Zig | 可行 | 用 Clang、LLD、LLVM utilities 和自维护 sysroot/runtime 替代 |
-| 不支持 Zig 源码和 Zig 标准库 | 可行 | payload 中不需要 Zig frontend、build.zig 或 Zig std |
-| 不依赖系统 C/C++ compiler/linker | 可行 | compiler/linker 代码静态进入 RCC，正式子阶段只重执行当前 controller 的受验证绝对 alias |
-| 不依赖任何系统内容 | 不可行 | RCC 子工具仍依赖 host kernel/loader/base OS ABI；macOS 和 MSVC 还存在专有 SDK 数据边界 |
-| 每台机器只下载一个文件 | 可行 | 每个 host triple 发布一个 executable，首次使用按需物化资源 |
-| compiler/linker 永远只有一个 physical binary | 可行 | tool aliases 是同一缓存 controller inode 的 hardlink；不再物化 clang/lld/llvm-ar child executable |
-| 运行时完全零落盘 | 不现实 | headers、libraries、runtime、manifest 与供构建系统消费的 executable aliases 必须拥有真实路径 |
-| 一个 executable 同时运行于三种 OS | 不可行 | ELF、PE、Mach-O host 格式不同，必须分别发布 |
-| 任意 host 到任意 macOS target 完全自包含 | 不可承诺 | Apple SDK 不进入 RCC 发布包，正式支持要求 macOS host 合法安装 SDK |
-| 安装 RCC 后单独编译 Rust | 不在范围 | RCC 不含 Cargo、rustc 和 rust-std |
+| RCC control layer uses Rust | Feasible | CLI, profiles, caching, materialization, policy, and validation can all be implemented in Rust |
+| Do not install or invoke Zig | Feasible | Replaced by Clang, LLD, LLVM utilities, and a self-maintained sysroot/runtime |
+| No support for Zig source or the Zig standard library | Feasible | The payload does not need the Zig frontend, build.zig, or the Zig std |
+| No dependency on the system C/C++ compiler/linker | Feasible | Compiler/linker code is static within RCC; official sub-stages only re-execute the current controller's validated absolute aliases |
+| No dependency on any system content | Infeasible | RCC sub-tools still depend on the host kernel/loader/base OS ABI; macOS and MSVC additionally have a proprietary SDK data boundary |
+| Download only one file per machine | Feasible | One executable is released per host triple, materializing resources on demand on first use |
+| Only ever one physical compiler/linker binary | Feasible | Tool aliases are hardlinks of the same cached controller inode; no separate clang/lld/llvm-ar child executables are materialized |
+| Fully zero-disk at runtime | Unrealistic | Headers, libraries, runtime, manifests, and the executable aliases consumed by build systems must have real paths |
+| One executable running on all three OSes | Infeasible | ELF, PE, and Mach-O host formats differ and must be released separately |
+| Fully self-contained from any host to any macOS target | Cannot be promised | The Apple SDK is not in the RCC release package; official support requires a legally installed SDK on a macOS host |
+| Compile Rust standalone after installing RCC | Out of scope | RCC does not include Cargo, rustc, or rust-std |
 
-## 2. 需求边界
+## 2. Requirement boundaries
 
-### 2.1 目标
+### 2.1 Goals
 
-- 提供可直接调用的 C compiler、C++ compiler、archiver、ranlib 和 link driver。
-- 支持生成 Linux ELF、Windows PE/COFF、macOS Mach-O。
-- 允许消费者用 Rust target triple 作为别名，但内部必须解析为完整 native profile。
-- 为每个 profile 提供完整且闭合的基础 sysroot/runtime。
-- 支持 host profile 与 target profile 两套上下文，避免 host 侧原生依赖回落到系统工具链。
-- 所有 compiler/linker/archiver entry 由当前 controller 静态提供；需要进程边界时只通过绝对 hardlink alias 重执行同一 controller，并校验 controller digest。
-- 正式 profile 不读取 host 的开发工具目录、系统 include/library 路径或 PATH 中的编译工具。
-- 工具路径、sysroot 路径、默认 flags、runtime 所有权和 ABI identity 可机器读取。
-- 单文件发行物在离线环境中具备首批内嵌 profile 的全部 native 能力。
-- 工具链视图可并发、安全、可恢复地物化到内容寻址缓存。
+- Provide directly invocable C compiler, C++ compiler, archiver, ranlib, and
+  link driver.
+- Support generating Linux ELF, Windows PE/COFF, and macOS Mach-O.
+- Allow consumers to use a Rust target triple as an alias, but internally it
+  must resolve to a complete native profile.
+- Provide a complete and closed base sysroot/runtime for each profile.
+- Support two contexts, host profile and target profile, to prevent host-side
+  native dependencies from falling back to the system toolchain.
+- All compiler/linker/archiver entries are statically provided by the current
+  controller; when a process boundary is needed, it only re-executes the same
+  controller through an absolute hardlink alias and verifies the controller
+  digest.
+- Official profiles do not read the host's developer tool directories, system
+  include/library paths, or the build tools on PATH.
+- Tool paths, sysroot paths, default flags, runtime ownership, and ABI identity
+  are machine-readable.
+- The single-file distribution has the full native capability of the initial
+  embedded profiles in an offline environment.
+- Toolchain views materialize into the content-addressed cache concurrently,
+  safely, and recoverably.
 
-### 2.2 非目标
+### 2.2 Non-goals
 
-- 不编译 .rs 或 .zig 源码，不实现 Cargo/rustc/Zig。
-- 不读取 Cargo.toml、rust-toolchain.toml 或 workspace metadata。
-- 不启动 Cargo、rustc、build script、proc-macro 或 target runner。
-- 不自动设置当前 shell，也不持久修改项目配置；只输出供消费者使用的配置。
-- 不实现 C/C++ package manager 或通用 Linux distribution sysroot。
-- 不承诺任意第三方构建脚本都遵守 RCC 输出的 CC/CXX/linker。
-- MVP 不提供共享 libclang、CMake、Ninja、pkgconf、Autotools、NASM 或 MASM。
-- MVP 不支持 Android、iOS、32 位目标、任意 target JSON 和任意 libc 版本。
-- 不处理 Developer ID 签名、公证、Windows Authenticode 或安装包。
+- Does not compile .rs or .zig source, and does not implement Cargo/rustc/Zig.
+- Does not read Cargo.toml, rust-toolchain.toml, or workspace metadata.
+- Does not launch Cargo, rustc, build scripts, proc-macros, or target runners.
+- Does not automatically configure the current shell or persistently modify
+  project configuration; it only emits configuration for consumers to use.
+- Does not implement a C/C++ package manager or a general Linux distribution
+  sysroot.
+- Does not promise that arbitrary third-party build scripts respect the CC/CXX/
+  linker that RCC emits.
+- The MVP does not provide a shared libclang, CMake, Ninja, pkgconf, Autotools,
+  NASM, or MASM.
+- The MVP does not support Android, iOS, 32-bit targets, arbitrary target JSON,
+  or arbitrary libc versions.
+- Does not handle Developer ID signing, notarization, Windows Authenticode, or
+  installer packages.
 
-### 2.3 “不依赖系统 toolchain”的精确定义
+### 2.3 The precise meaning of "no dependency on the system toolchain"
 
-正式 RCC-managed 路径不得调用或隐式搜索：
+The official RCC-managed path must not invoke or implicitly search:
 
-- host 的 clang、gcc、cc、c++、cl.exe；
-- host 的 ld、link.exe、ar、lib.exe、ranlib、dlltool；
-- Xcode 自带 clang/ld 或 Visual Studio compiler/linker；
-- host GCC installation、默认 compiler resource directory；
-- host 的 /usr/include、/usr/lib、SDK include/library 或由环境变量注入的等价路径。
+- The host's clang, gcc, cc, c++, or cl.exe;
+- The host's ld, link.exe, ar, lib.exe, ranlib, or dlltool;
+- Xcode's bundled clang/ld or Visual Studio compiler/linker;
+- The host GCC installation or the default compiler resource directory;
+- The host's /usr/include, /usr/lib, SDK include/library, or equivalent paths
+  injected via environment variables.
 
-允许的 host 依赖仅包括：
+The only permitted host dependencies are:
 
-- kernel、process、filesystem、dynamic loader 和基础 OS runtime；
-- 用户输入的源码、对象、静态库和显式注册的 sysroot overlay；
-- AppleDeveloperProvider 或 Windows SDK/MSVC Toolset provider 中明确登记的数据文件；
-- 消费者自身，例如 Cargo、rustc、CMake；它们不属于 RCC 的 toolchain 保证。
+- The kernel, process, filesystem, dynamic loader, and base OS runtime;
+- User-supplied source, objects, static libraries, and explicitly registered
+  sysroot overlays;
+- Data files explicitly registered in the AppleDeveloperProvider or the Windows
+  SDK/MSVC Toolset provider;
+- The consumers themselves, such as Cargo, rustc, and CMake; they are not part
+  of RCC's toolchain guarantee.
 
-> [!WARNING] 保证边界
-> RCC 可以保证自身 multicall alias 的进程树不调用系统 compiler/linker。它不能在没有沙箱的情况下阻止任意外部 build script 硬编码 /usr/bin/cc 或其他绝对路径。因此“整个项目绝不运行系统工具”只能由消费者配合或额外沙箱保证。
+> [!WARNING] Guarantee boundary
+> RCC can guarantee that the process tree of its own multicall aliases does not
+> invoke the system compiler/linker. It cannot, without a sandbox, prevent an
+> arbitrary external build script from hard-coding /usr/bin/cc or another
+> absolute path. Therefore "the entire project never runs system tools" can only
+> be guaranteed with consumer cooperation or an additional sandbox.
 
-## 3. 支持模型
+## 3. Support model
 
-### 3.1 Profile 状态
+### 3.1 Profile states
 
-- **Hermetic**：compiler、linker、基础 sysroot/runtime 全部来自 RCC。
-- **Managed SDK**：compiler/linker 来自 RCC，专有 SDK 数据由受控 provider 接入。
-- **Overlay**：在基础 profile 上增加用户显式注册的 target headers/libraries。
-- **Unsupported**：RCC 不生成工具路径，也不静默回落系统工具。
+- **Hermetic**: compiler, linker, and the base sysroot/runtime all come from
+  RCC.
+- **Managed SDK**: the compiler/linker comes from RCC, and proprietary SDK data
+  is brought in via a controlled provider.
+- **Overlay**: target headers/libraries explicitly registered by the user are
+  added on top of a base profile.
+- **Unsupported**: RCC does not generate tool paths and does not silently fall
+  back to system tools.
 
-### 3.2 首批 target profile
+### 3.2 Initial target profiles
 
-下表中的 native profile ID 是 RCC 的稳定接口；Rust triple 只是消费者别名。
+The native profile IDs in the table below are RCC's stable interface; the Rust
+triple is only a consumer alias.
 
-| Native profile | Rust alias | Runtime 策略 | 状态 | 阶段 | Host 约束 |
+| Native profile | Rust alias | Runtime policy | Status | Phase | Host constraint |
 |---|---|---|:---:|:---:|---|
-| linux-x86_64-musl-static | x86_64-unknown-linux-musl | 固定 musl；默认静态 | Hermetic | MVP | 所有正式 host |
-| linux-aarch64-musl-static | aarch64-unknown-linux-musl | 固定 musl；默认静态 | Hermetic | MVP | 所有正式 host |
-| linux-x86_64-gnu-glibc217 | x86_64-unknown-linux-gnu | glibc 2.17 baseline；默认动态 | Hermetic | MVP | 所有正式 host |
-| linux-aarch64-gnu-glibc217 | aarch64-unknown-linux-gnu | glibc 2.17 baseline；默认动态 | Hermetic | MVP | 所有正式 host |
-| windows-x86_64-gnu | x86_64-pc-windows-gnu | MinGW-w64 + 固定 GNU runtime 闭包 | Hermetic | MVP | 所有正式 host |
-| windows-x86_64-gnullvm | x86_64-pc-windows-gnullvm | LLVM-MinGW/UCRT/compiler-rt/libunwind | Hermetic | Phase 2 | 所有正式 host |
-| windows-aarch64-gnullvm | aarch64-pc-windows-gnullvm | LLVM-MinGW/UCRT/compiler-rt/libunwind | Hermetic | Phase 2 | 所有正式 host |
-| macos-x86_64 | x86_64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host；Linux/Windows 交叉为尽最大努力（自备 SDK） |
-| macos-aarch64 | aarch64-apple-darwin | Apple SDK + RCC 固定 libc++ headers + 系统 libc++ ABI | Managed SDK | MVP | 正式支持限 macOS host；Linux/Windows 交叉为尽最大努力（自备 SDK） |
-| windows-x86_64-msvc | x86_64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | 已交付 | Windows host 可发现已装 VS/Kits；其它 host 自备两棵树 |
-| windows-aarch64-msvc | aarch64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | 已接线 | 与 x86_64-msvc 相同；toolset 需 `lib/arm64` |
+| linux-x86_64-musl-static | x86_64-unknown-linux-musl | Fixed musl; static by default | Hermetic | MVP | All official hosts |
+| linux-aarch64-musl-static | aarch64-unknown-linux-musl | Fixed musl; static by default | Hermetic | MVP | All official hosts |
+| linux-x86_64-gnu-glibc217 | x86_64-unknown-linux-gnu | glibc 2.17 baseline; dynamic by default | Hermetic | MVP | All official hosts |
+| linux-aarch64-gnu-glibc217 | aarch64-unknown-linux-gnu | glibc 2.17 baseline; dynamic by default | Hermetic | MVP | All official hosts |
+| windows-x86_64-gnu | x86_64-pc-windows-gnu | MinGW-w64 + fixed GNU runtime closure | Hermetic | MVP | All official hosts |
+| windows-x86_64-gnullvm | x86_64-pc-windows-gnullvm | LLVM-MinGW/UCRT/compiler-rt/libunwind | Hermetic | Phase 2 | All official hosts |
+| windows-aarch64-gnullvm | aarch64-pc-windows-gnullvm | LLVM-MinGW/UCRT/compiler-rt/libunwind | Hermetic | Phase 2 | All official hosts |
+| macos-x86_64 | x86_64-apple-darwin | Apple SDK + RCC fixed libc++ headers + system libc++ ABI | Managed SDK | MVP | Official support limited to macOS hosts; Linux/Windows cross is best-effort (bring your own SDK) |
+| macos-aarch64 | aarch64-apple-darwin | Apple SDK + RCC fixed libc++ headers + system libc++ ABI | Managed SDK | MVP | Official support limited to macOS hosts; Linux/Windows cross is best-effort (bring your own SDK) |
+| windows-x86_64-msvc | x86_64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | Delivered | Windows hosts can discover an installed VS/Kits; other hosts bring both trees |
+| windows-aarch64-msvc | aarch64-pc-windows-msvc | Windows SDK + MSVC Toolset | Managed SDK | Wired up | Same as x86_64-msvc; the toolset needs `lib/arm64` |
 
-glibc 2.17 是候选 baseline，必须在 Phase 0 完成来源、补丁、许可证和真实发行环境验证后冻结。musl、MinGW、GCC runtime、LLVM 和 libc++ 均必须固定到精确版本，不能只写 1.2.x 或 latest。
+glibc 2.17 is the candidate baseline and must be frozen in Phase 0 after source,
+patch, license, and real-world distribution-environment validation are complete.
+musl, MinGW, the GCC runtime, LLVM, and libc++ must all be pinned to exact
+versions, not merely written as 1.2.x or latest.
 
-### 3.3 Host 发行物
+### 3.3 Host distributions
 
-建议首批 host：
+Recommended initial hosts:
 
-| Host | 发行物 | 说明 |
+| Host | Distribution | Notes |
 |---|---|---|
-| Linux x86_64 | rcc-linux-x86_64 | 已交付 |
-| Windows x86_64 | rcc-windows-x86_64.exe | 已交付：MSVC 宿主编 PE（需 VS 编 controller）；gnu/gnullvm **目标**不要求最终用户装 VS |
-| macOS AArch64 | rcc-macos-aarch64 | 已交付 |
-| Linux AArch64 | rcc-linux-aarch64 | 已接线：`scripts/build-linux-aarch64-release.sh`（须在 aarch64 Linux 上编） |
-| macOS x86_64 | rcc-macos-x86_64 | 已接线：`scripts/build-macos-x64-release.sh`（Apple Silicon 交叉或 Intel + Xcode clang；LLVM 22.1.8 无官方 macOS x64 包） |
-| Windows AArch64 | rcc-windows-aarch64.exe | 已接线：`scripts/build-windows-arm64-release.sh`；须在 ARM64 Windows 上编，本仓库不产出该二进制 |
+| Linux x86_64 | rcc-linux-x86_64 | Delivered |
+| Windows x86_64 | rcc-windows-x86_64.exe | Delivered: the MSVC host builds the PE (building the controller requires VS); the gnu/gnullvm **targets** do not require the end user to install VS |
+| macOS AArch64 | rcc-macos-aarch64 | Delivered |
+| Linux AArch64 | rcc-linux-aarch64 | Wired up: `scripts/build-linux-aarch64-release.sh` (must be built on aarch64 Linux) |
+| macOS x86_64 | rcc-macos-x86_64 | Wired up: `scripts/build-macos-x64-release.sh` (Apple Silicon cross or Intel + Xcode clang; LLVM 22.1.8 has no official macOS x64 package) |
+| Windows AArch64 | rcc-windows-aarch64.exe | Wired up: `scripts/build-windows-arm64-release.sh`; must be built on ARM64 Windows, and this repository does not produce that binary |
 
-每个 host 发行物中的静态 Clang/LLD engine 必须拥有闭合的 host runtime：不得依赖系统 libstdc++、共享 LLVM dylib 或开发工具安装。依赖基础 libc、UCRT 或 macOS system runtime 是 host ABI 依赖，不是开发 toolchain 依赖。
+The static Clang/LLD engine in each host distribution must have a closed host
+runtime: it must not depend on the system libstdc++, a shared LLVM dylib, or a
+developer-tool installation. Depending on the base libc, UCRT, or macOS system
+runtime is a host ABI dependency, not a developer-toolchain dependency.
 
-### 3.4 HostNativeProfile 矩阵
+### 3.4 HostNativeProfile matrix
 
-HostNativeProfile 面向消费者生成的 host 原生代码，不等同于“RCC 外层 binary 能否启动”。其 ABI 必须与消费者 host artifact 一致。
+HostNativeProfile targets the host-native code generated by consumers; it is not
+equivalent to "whether the outer RCC binary can launch." Its ABI must be
+consistent with the consumer's host artifacts.
 
-| Host profile ID | Consumer host alias | Native runtime | Provider | 阶段 |
+| Host profile ID | Consumer host alias | Native runtime | Provider | Phase |
 |---|---|---|---|:---:|
-| host-linux-x86_64-gnu-glibc217 | x86_64-unknown-linux-gnu | RCC glibc/GNU runtime closure | 无 | MVP |
-| host-linux-aarch64-gnu-glibc217 | aarch64-unknown-linux-gnu | RCC glibc/GNU runtime closure | 无 | 已交付 |
-| host-windows-x86_64-gnu | x86_64-pc-windows-gnu | RCC MinGW/GNU runtime closure | 无 | MVP |
-| host-windows-x86_64-gnullvm | x86_64-pc-windows-gnullvm | RCC LLVM-MinGW runtime closure | 无 | Phase 2 |
-| host-windows-x86_64-msvc | x86_64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | 已交付（Windows host） |
-| host-windows-aarch64-msvc | aarch64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | 已接线 |
+| host-linux-x86_64-gnu-glibc217 | x86_64-unknown-linux-gnu | RCC glibc/GNU runtime closure | None | MVP |
+| host-linux-aarch64-gnu-glibc217 | aarch64-unknown-linux-gnu | RCC glibc/GNU runtime closure | None | Delivered |
+| host-windows-x86_64-gnu | x86_64-pc-windows-gnu | RCC MinGW/GNU runtime closure | None | MVP |
+| host-windows-x86_64-gnullvm | x86_64-pc-windows-gnullvm | RCC LLVM-MinGW runtime closure | None | Phase 2 |
+| host-windows-x86_64-msvc | x86_64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | Delivered (Windows host) |
+| host-windows-aarch64-msvc | aarch64-pc-windows-msvc | MSVC ABI/UCRT/STL | Windows SDK + MSVC Toolset | Wired up |
 | host-macos-aarch64 | aarch64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | MVP |
-| host-macos-x86_64 | x86_64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | 已交付 |
+| host-macos-x86_64 | x86_64-apple-darwin | Apple system ABI + RCC libc++ headers | AppleDeveloperProvider | Delivered |
 
-默认解析规则：
+Default resolution rules:
 
-- Linux/macOS 可由当前 OS/arch 和消费者显式给出的 host alias 得到唯一 profile。
-- Windows 必须显式给出 GNU、gnullvm 或 MSVC ABI，不能只凭 OS/arch 猜测。
-- RCC 不探测已安装 rustc 来推断 host ABI；外部 adapter 负责传入。
-- 未在矩阵中的 host ABI 直接 unsupported，不回落系统 compiler/linker。
+- Linux/macOS can derive a unique profile from the current OS/arch and the host
+  alias explicitly given by the consumer.
+- Windows must explicitly state the GNU, gnullvm, or MSVC ABI; it cannot be
+  guessed from OS/arch alone.
+- RCC does not probe an installed rustc to infer the host ABI; an external
+  adapter is responsible for passing it in.
+- A host ABI not in the matrix is directly unsupported, with no fallback to the
+  system compiler/linker.
 
-## 4. 总体架构
+## 4. Overall architecture
 
 ~~~mermaid
 flowchart TB
@@ -219,126 +290,177 @@ flowchart TB
   Artifact --> Verify[Artifact Verifier]
 ~~~
 
-架构分成三个平面：
+The architecture splits into three planes:
 
-1. **控制平面**：解析 profile、验证 pack、物化 view、打印配置。
-2. **执行平面**：profile-bound controller alias、参数策略、静态 Clang/LLD/LLVM entry points。
-3. **资源平面**：sysroot、CRT、libc、runtime、SDK descriptor 和 overlay。
+1. **Control plane**: resolves profiles, validates packs, materializes views,
+   and prints configuration.
+2. **Execution plane**: profile-bound controller aliases, argument policy, and
+   static Clang/LLD/LLVM entry points.
+3. **Resource plane**: sysroot, CRT, libc, runtime, SDK descriptors, and
+   overlays.
 
-RCC 无 daemon。控制平面生成不可变 view 后，消费者可重复直接调用同一 controller 的 profile-bound alias；高频编译不需要每次重新解压或重新解析整个 payload。
+RCC has no daemon. After the control plane generates an immutable view,
+consumers can repeatedly and directly invoke the profile-bound aliases of the
+same controller; high-frequency compilation does not require re-extracting or
+re-parsing the entire payload each time.
 
-### 4.1 组件职责
+### 4.1 Component responsibilities
 
-| 组件 | 主要职责 | 明确不做 |
+| Component | Primary responsibility | Explicitly does not do |
 |---|---|---|
-| CLI / machine API | 选择 profile，输出路径、环境和 manifest | 不启动消费者构建 |
-| Profile Registry | 解析 target、ABI、runtime 与 consumer alias | 不接受未经测试的任意组合 |
-| Pack Resolver | 选择当前 host 与 target 所需资源 | 不从 PATH 猜测工具 |
-| Materializer | digest 校验、锁、解压、原子发布、GC | 不修改项目目录 |
-| SDK Providers | 注册、验证 Apple developer data、Windows SDK 与 MSVC Toolset | 不复制专有 SDK 进发布包 |
-| Toolchain View Builder | 组装稳定相对布局与 view manifest | 不产生可变的隐式搜索路径 |
-| Profile-bound Multicall Alias | 同一 RCC inode 的 hardlink，根据 argv[0] 与相邻 manifest 选择 personality | 不包含第二套 launcher 代码，不依赖 shell script |
-| Hermetic Driver Policy | 固定 target/sysroot/runtime，拒绝污染参数 | 不重写完整 Clang/MSVC 参数语言 |
-| Static Engine Bridge | 以稳定 C ABI 调用 Clang driver/cc1/cc1as、LLD 与 llvm-ar entry | 不允许 C++ exception 穿过 Rust FFI，不提供共享 libLLVM/libclang |
-| Clang/LLD/LLVM Components | 编译、归档、资源处理和链接；由 source build 静态链接 | 不从系统 toolchain 补缺 |
-| Artifact Verifier | 检查格式、架构、ABI 与依赖闭包 | 不运行跨平台产物 |
+| CLI / machine API | Selects the profile and emits paths, environment, and manifest | Does not launch consumer builds |
+| Profile Registry | Resolves target, ABI, runtime, and consumer alias | Does not accept untested arbitrary combinations |
+| Pack Resolver | Selects the resources needed for the current host and target | Does not guess tools from PATH |
+| Materializer | digest verification, locking, extraction, atomic publish, GC | Does not modify the project directory |
+| SDK Providers | Registers and validates Apple developer data, the Windows SDK, and the MSVC Toolset | Does not copy proprietary SDKs into the release package |
+| Toolchain View Builder | Assembles the stable relative layout and the view manifest | Does not produce mutable implicit search paths |
+| Profile-bound Multicall Alias | A hardlink of the same RCC inode that selects personality based on argv[0] and the adjacent manifest | Contains no second launcher codebase and does not depend on shell scripts |
+| Hermetic Driver Policy | Fixes target/sysroot/runtime and rejects polluting arguments | Does not rewrite the full Clang/MSVC argument language |
+| Static Engine Bridge | Calls the Clang driver/cc1/cc1as, LLD, and llvm-ar entries via a stable C ABI | Does not allow C++ exceptions to cross the Rust FFI and does not provide a shared libLLVM/libclang |
+| Clang/LLD/LLVM Components | Compile, archive, process resources, and link; statically linked from a source build | Does not fill gaps from the system toolchain |
+| Artifact Verifier | Checks format, architecture, ABI, and dependency closure | Does not run cross-platform artifacts |
 
-### 4.2 消费者边界
+### 4.2 Consumer boundary
 
-RCC 暴露两类接口：
+RCC exposes two kinds of interfaces:
 
-- **控制接口**：rcc print、rcc env、rcc sysroot、rcc doctor、rcc cache。
-- **工具接口**：rcc cc、rcc cxx、rcc ar、rcc ranlib、rcc link，以及由 rcc print tool 返回的 profile-bound controller alias path。
+- **Control interface**: rcc print, rcc env, rcc sysroot, rcc doctor, rcc cache.
+- **Tool interface**: rcc cc, rcc cxx, rcc ar, rcc ranlib, rcc link, and the
+  profile-bound controller alias paths returned by rcc print tool.
 
-### 4.3 静态引擎与进程模型
+### 4.3 Static engine and process model
 
-RCC 不把官方 `clang`、`lld`、`llvm-ar` 可执行文件当作 payload 成员。发布构建从固定 LLVM source archive 生成 target-aware 静态 libraries，再通过一层很薄的 C++ C ABI bridge 接入 Rust controller：
+RCC does not treat the official `clang`, `lld`, and `llvm-ar` executables as
+payload members. The release build generates target-aware static libraries from
+a fixed LLVM source archive and then brings them into the Rust controller
+through a thin C++ C ABI bridge:
 
-- Clang driver 与 integrated `cc1`/`cc1as` 入口处理 C/C++/assembly；
-- LLD 只链接当前 host edition 交付的 flavor；macOS AArch64 首版只包含 Mach-O LLD；
-- llvm-ar 入口同时提供 ar 与 ranlib personality；
-- 每个 entry 都是 one-shot process contract，不尝试在一个长生命周期进程内反复复用 LLVM 全局状态；
-- bridge 不让 C++ exception 或 LLVM fatal error 穿过 FFI；fatal 结果必须转成进程退出。
+- The Clang driver and the integrated `cc1`/`cc1as` entries handle
+  C/C++/assembly;
+- LLD links only the flavor delivered by the current host edition; the first
+  macOS AArch64 release includes only the Mach-O LLD;
+- The llvm-ar entry provides both the ar and ranlib personalities;
+- Each entry is a one-shot process contract and does not try to repeatedly reuse
+  LLVM global state within a single long-lived process;
+- The bridge does not let C++ exceptions or LLVM fatal errors cross the FFI;
+  fatal results must be turned into process exits.
 
-Clang driver 的链接 job 仍然需要一个 executable path。RCC 将当前 controller 持久化为 `controllers/<controller-sha>/rcc`，再按 flavor 为 view 创建 hardlink（Mach-O 为 `launchers/ld64.lld`、ELF 为 `launchers/ld.lld`、MSVC COFF 为 `launchers/lld-link.exe`）；Clang 通过绝对 `--ld-path` 重执行这个 alias。新的进程读取相邻 `view.json`，选择静态 LLD entry。`cc`、`cxx`、`ar` 和 `ranlib` 同理，所以进程树可能有多个 RCC process，但磁盘上没有独立 Clang/LLD/llvm-ar binary。RCC 对 Clang 22.1.8 应用固定、带摘要的 integrated-cc1 补丁，使普通 compile+link 的 frontend 保持进程内执行；只有 linker 阶段 self-reexec。
+The Clang driver's link jobs still require an executable path. RCC persists the
+current controller as `controllers/<controller-sha>/rcc` and then creates a
+hardlink for the view per flavor (`launchers/ld64.lld` for Mach-O,
+`launchers/ld.lld` for ELF, `launchers/lld-link.exe` for MSVC COFF); Clang
+re-executes this alias via an absolute `--ld-path`. The new process reads the
+adjacent `view.json` and selects the static LLD entry. `cc`, `cxx`, `ar`, and
+`ranlib` work the same way, so the process tree may have multiple RCC processes,
+but there are no separate Clang/LLD/llvm-ar binaries on disk. RCC applies a
+fixed, digest-pinned integrated-cc1 patch to Clang 22.1.8, keeping the frontend
+of an ordinary compile+link in-process; only the linker stage self-reexecs.
 
-这种 multicall + self-reexec 模型和 Zig 的工具入口思路相近，同时保留构建系统要求的真实 executable path。静态集成的主要收益不是保证极小，而是：按 target/flavor 编译、final-link dead stripping、单一 controller identity/签名、无独立 child binary 供应链，以及能直接定制 LLVM 配置。Clang AST/Sema/CodeGen、LLVM backend 和 LLD 本身仍然很大；加入 X86/WebAssembly 等 backend 或额外 tools 时 release 体积会增加。
+This multicall + self-reexec model is close to Zig's tool-entry approach while
+retaining the real executable paths that build systems require. The main benefit
+of static integration is not guaranteed minimality, but rather: compilation
+targeted per target/flavor, final-link dead stripping, a single controller
+identity/signature, no separate child-binary supply chain, and the ability to
+customize the LLVM configuration directly. Clang's AST/Sema/CodeGen, the LLVM
+backend, and LLD itself are still large; adding backends such as
+X86/WebAssembly or extra tools increases release size.
 
-控制接口可以生成 Cargo、cc-rs 或 CMake 所需的配置文本，但只写到 stdout 或用户显式指定的输出文件。RCC 不执行 Cargo/CMake，也不推断 workspace。
+The control interface can generate the configuration text needed by Cargo,
+cc-rs, or CMake, but writes only to stdout or a user-specified output file. RCC
+does not run Cargo/CMake and does not infer workspaces.
 
-## 5. 核心数据模型
+## 5. Core data model
 
 ### 5.1 ToolchainProfile
 
-target triple 不足以描述完整 ABI。每个 profile 至少包含：
+A target triple is not enough to describe the full ABI. Each profile contains at
+least:
 
-| 类别 | 字段 |
+| Category | Fields |
 |---|---|
-| 身份 | profile_id、schema_version、revision、digest |
-| 目标 | clang_target、arch、vendor、os、environment、object_format |
-| Driver | driver_kind、linker_flavor、assembler_kind、response_file_dialect |
-| OS ABI | libc_family、libc_version、minimum_os、dynamic_loader |
-| Runtime | crt_mode、compiler_runtime、unwind_runtime、thread_runtime |
-| C++ | cxx_abi、cxx_headers、cxx_runtime、static_or_dynamic_policy |
-| 资源 | sysroot_pack、resource_dir、SDK provider、overlay policy |
-| 搜索 | include roots、library roots、framework roots、禁止路径 |
-| 集成 | consumer aliases、query emulation、environment templates |
-| 验证 | format checks、allowed dependencies、ABI baseline checks |
+| Identity | profile_id, schema_version, revision, digest |
+| Target | clang_target, arch, vendor, os, environment, object_format |
+| Driver | driver_kind, linker_flavor, assembler_kind, response_file_dialect |
+| OS ABI | libc_family, libc_version, minimum_os, dynamic_loader |
+| Runtime | crt_mode, compiler_runtime, unwind_runtime, thread_runtime |
+| C++ | cxx_abi, cxx_headers, cxx_runtime, static_or_dynamic_policy |
+| Resources | sysroot_pack, resource_dir, SDK provider, overlay policy |
+| Search | include roots, library roots, framework roots, forbidden paths |
+| Integration | consumer aliases, query emulation, environment templates |
+| Validation | format checks, allowed dependencies, ABI baseline checks |
 
-driver_kind 至少区分：
+driver_kind distinguishes at least:
 
-- clang-gcc：Linux、MinGW、gnullvm 和 macOS 的 Clang 风格 driver。
-- clang-cl：MSVC 风格 C/C++ compile。
-- lld-link：MSVC 风格最终链接；不能假设所有目标都经过同一个 Unix Clang shim。
+- clang-gcc: the Clang-style driver for Linux, MinGW, gnullvm, and macOS.
+- clang-cl: MSVC-style C/C++ compile.
+- lld-link: MSVC-style final link; one cannot assume all targets go through the
+  same Unix Clang shim.
 
 ### 5.2 HostNativeProfile
 
-RCC 的静态 engine 运行在 host；消费者还可能需要为 host 生成 C/C++ 代码。HostNativeProfile 描述：
+RCC's static engine runs on the host; consumers may also need to generate C/C++
+code for the host. HostNativeProfile describes:
 
-- host triple 与最低 host OS；
-- host executable 的 runtime closure；
-- host 原生 C/C++ profile 与可执行产物 ABI；
-- host SDK provider 需求；
-- 可供消费者配置 host build dependency 的 compiler/linker paths。
+- The host triple and minimum host OS;
+- The runtime closure of the host executable;
+- The host-native C/C++ profile and the ABI of executable artifacts;
+- Host SDK provider requirements;
+- The compiler/linker paths that consumers can configure for host build
+  dependencies.
 
-> [!IMPORTANT] Host 与 target 必须分开
-> Cargo build.rs、proc-macro 或 generator 属于 host；它们间接使用的 C/C++ 也必须选择 host profile。target profile 只用于最终 target 代码。RCC 输出两套路径，但不替消费者决定哪个进程属于哪一侧。
+> [!IMPORTANT] Host and target must be kept separate
+> Cargo build.rs, proc-macros, and generators belong to the host; the C/C++ they
+> indirectly use must also select the host profile. The target profile is used
+> only for the final target code. RCC emits both sets of paths but does not
+> decide for the consumer which process belongs to which side.
 
-Windows 是最困难的 host：
+Windows is the hardest host:
 
-- 若消费者的 Rust host 是 MSVC，host 原生依赖通常需要 clang-cl/lld-link、Windows SDK 和 MSVC Toolset provider。
-- 若要求一台没有 VS Build Tools 的 bare Windows host 完全工作，MVP 只能承诺 RCC 自身 native 工具和 GNU/gnullvm consumer 路线；不能泛化承诺任意 MSVC Rust host 原生依赖。
+- If the consumer's Rust host is MSVC, host-native dependencies usually need
+  clang-cl/lld-link, the Windows SDK, and the MSVC Toolset provider.
+- To make a bare Windows host without VS Build Tools fully work, the MVP can
+  only promise RCC's own native tools and the GNU/gnullvm consumer route; it
+  cannot generally promise host-native dependencies for an arbitrary MSVC Rust
+  host.
 
 ### 5.3 RuntimeOwnership
 
-同一最终链接中，CRT、libc、compiler runtime 和 unwind 只能有一个所有者。profile 需要显式的 runtime ownership mode：
+Within a single final link, the CRT, libc, compiler runtime, and unwind can have
+only one owner. A profile needs an explicit runtime ownership mode:
 
-| Mode | 适用场景 | RCC 行为 |
+| Mode | Applicable scenario | RCC behavior |
 |---|---|---|
-| rcc-owned | 直接 C/C++ executable/shared library | 注入 profile 的 CRT、libc、compiler/C++ runtime |
-| consumer-owned | 消费者已提供完整 startup/runtime | 不重复注入；只提供 linker 与明确请求的 sysroot |
-| split-contract | rustc 等消费者只拥有部分 self-contained 组件 | 按版本化 contract 分配 crto/libc/unwind/linker/mingw 等所有权 |
+| rcc-owned | Direct C/C++ executable/shared library | Injects the profile's CRT, libc, and compiler/C++ runtime |
+| consumer-owned | The consumer already provides a complete startup/runtime | Does not re-inject; provides only the linker and the explicitly requested sysroot |
+| split-contract | A consumer such as rustc owns only some self-contained components | Allocates ownership of crto/libc/unwind/linker/mingw, etc., per a versioned contract |
 
-Rust 的 musl、windows-gnu 和 gnullvm target 可能随 rust-std 携带 self-contained CRT、libc 或 unwind 组件。RCC 不探测 rustc，因此 Rust 集成必须由独立、版本化的 consumer contract 指明：
+Rust's musl, windows-gnu, and gnullvm targets may carry self-contained CRT,
+libc, or unwind components with rust-std. RCC does not probe rustc, so Rust
+integration must be specified by a separate, versioned consumer contract:
 
-- 对应 Rust target alias；
-- rustc 的 link-self-contained 组件策略；
-- 哪些 search path 和 library 由消费者提供；
-- RCC 可注入和不可注入的 runtime；
-- 已验证的 rustc 版本范围。
+- The corresponding Rust target alias;
+- rustc's link-self-contained component policy;
+- Which search paths and libraries are provided by the consumer;
+- Which runtimes RCC may and may not inject;
+- The validated range of rustc versions.
 
-不满足 contract 时不得猜测或重复链接。通用 native profile 的正确性不能自动等价为 Rust linker 集成正确性。
+When the contract is not satisfied, RCC must not guess or re-link. The
+correctness of a generic native profile cannot be automatically equated with the
+correctness of Rust linker integration.
 
-每个 runtime contract 都有稳定 contract_id。任何会生成 compiler/linker alias 的命令都必须解析一个 contract：
+Each runtime contract has a stable contract_id. Any command that generates a
+compiler/linker alias must resolve a contract:
 
-- 直接 rcc cc/cxx/link 默认使用 native-rcc-owned。
-- Cargo/Rust 格式必须显式选择 rust-<target>-<contract-revision>。
-- consumer-owned 只能引用已注册、可验证的 contract，不能用一个布尔开关临时拼装。
-- contract_id 进入 view path、ViewManifest、alias identity 和 ToolchainIdentity；不同 contract 不能复用同一 alias path。
+- Direct rcc cc/cxx/link uses native-rcc-owned by default.
+- The Cargo/Rust format must explicitly select rust-<target>-<contract-revision>.
+- consumer-owned can only reference a registered, verifiable contract; it cannot
+  be assembled ad hoc with a boolean switch.
+- contract_id enters the view path, ViewManifest, alias identity, and
+  ToolchainIdentity; different contracts cannot reuse the same alias path.
 
 ### 5.4 ToolchainIdentity
 
-一次 native 工具链视图的 identity 至少包含：
+The identity of a native toolchain view contains at least:
 
 ~~~text
 rcc release version and controller source-build digest
@@ -353,53 +475,72 @@ runtime ownership contract
 policy flags
 ~~~
 
-Cargo/rustc 版本不属于 RCC core identity。若外部 Rust adapter 使用 RCC，它应把 Rust toolchain identity 和 RCC toolchain identity 一起记录在自己的构建报告中。
+The Cargo/rustc version is not part of the RCC core identity. If an external
+Rust adapter uses RCC, it should record both the Rust toolchain identity and the
+RCC toolchain identity in its own build report.
 
-### 5.5 ViewManifest 与 InvocationPlan
+### 5.5 ViewManifest and InvocationPlan
 
-ViewManifest 是物化后的机器可读事实，包含所有真实路径、digest、profile 和 runtime contract。
+ViewManifest is the machine-readable fact after materialization, containing all
+real paths, digests, profiles, and runtime contracts.
 
-InvocationPlan 是单次 profile-bound alias 调用经规范化后的执行计划，包含：
+InvocationPlan is the normalized execution plan for a single profile-bound alias
+invocation, containing:
 
-- tool kind 与 driver personality；
-- 输入参数和 response file dialect；
-- 注入、拒绝与保留的 flags；
-- 过滤后的环境；
-- controller alias 的绝对路径、controller digest 与静态 engine entry；
-- sysroot/resource/runtime 路径；
-- 预期输出类型和可选 verifier。
+- The tool kind and driver personality;
+- The input arguments and response file dialect;
+- The injected, rejected, and preserved flags;
+- The filtered environment;
+- The absolute path of the controller alias, the controller digest, and the
+  static engine entry;
+- The sysroot/resource/runtime paths;
+- The expected output type and an optional verifier.
 
-InvocationPlan 只描述一次 native tool 调用，不包含 workspace、Cargo features、Cargo.lock 或 Rust target std。
+InvocationPlan describes only a single native tool invocation and does not
+include workspace, Cargo features, Cargo.lock, or the Rust target std.
 
-## 6. 单文件发行与资源物化
+## 6. Single-file distribution and resource materialization
 
-### 6.1 “单 binary”的产品定义
+### 6.1 The product definition of "single binary"
 
-> [!IMPORTANT] 单文件是安装边界
-> 用户下载和安装时只有一个 RCC executable。Clang/LLD/llvm-ar 的代码也只存在于这个静态 multicall executable。首次使用后，RCC 缓存中会出现同一 controller 的 hardlink aliases、headers、libraries、runtime 和 manifests，但不会解包独立的 compiler/linker executable。
+> [!IMPORTANT] The single file is the installation boundary
+> When a user downloads and installs, there is only one RCC executable. The code
+> for Clang/LLD/llvm-ar also exists only in this static multicall executable.
+> After first use, the RCC cache will contain hardlink aliases of the same
+> controller, plus headers, libraries, runtime, and manifests, but it will not
+> unpack separate compiler/linker executables.
 
-每个 host OS/arch 独立发布。外层 executable 包含 Rust controller、静态 engine 和带 footer index 的分块压缩 resource payload。headers/runtime 仍需物化，因为编译器和 linker 必须按路径读取它们；tool alias 仍需落盘，因为 CC/CXX/linker API 要求真实 executable path。平台签名只针对最终 controller；cache hardlink 不引入第二个待签名 executable 内容。
+Each host OS/arch is released independently. The outer executable contains the
+Rust controller, the static engine, and a chunk-compressed resource payload with
+a footer index. Headers/runtime still need materialization because the compiler
+and linker must read them by path; tool aliases still need to be on disk because
+the CC/CXX/linker API requires real executable paths. Platform signing applies
+only to the final controller; cache hardlinks do not introduce a second
+executable content to be signed.
 
-### 6.2 Payload 分层
+### 6.2 Payload layering
 
-| Pack | 内容 | MVP 是否内嵌 |
+| Pack | Contents | Embedded in MVP |
 |---|---|:---:|
-| Controller | RCC executable、payload index、profile registry、policy | 是；不作为 pack 文件 |
-| Static engine | 裁剪 Clang、LLD flavors、llvm-ar/ranlib、必要 LLVM backend | 是；链接进 controller，不作为 pack 文件 |
-| Tool aliases | cc/cxx/linker/ar/ranlib personality paths | 运行时由 controller cache hardlink 生成，不在 pack |
-| Clang resource | builtin headers、resource metadata | 是 |
-| Linux sysroots | libc headers、CRT、stubs、runtime、C++ runtime | 是 |
-| Windows GNU sysroot | MinGW headers/import libs、CRT、GNU runtime 闭包 | 是 |
-| External SDK descriptors | Apple、Windows、MSVC Toolset 发现和验证规则 | 是；SDK 内容否 |
-| Compliance | notices、SBOM、source provenance、pack manifest | 是 |
-| Build tools | CMake、Ninja、pkgconf、Python、NASM | 否 |
-| Bindgen kit | shared libclang | 否；后续可独立设计 |
+| Controller | RCC executable, payload index, profile registry, policy | Yes; not a pack file |
+| Static engine | Trimmed Clang, LLD flavors, llvm-ar/ranlib, required LLVM backends | Yes; linked into the controller, not a pack file |
+| Tool aliases | cc/cxx/linker/ar/ranlib personality paths | Generated at runtime by the controller cache hardlinks, not in a pack |
+| Clang resource | builtin headers, resource metadata | Yes |
+| Linux sysroots | libc headers, CRT, stubs, runtime, C++ runtime | Yes |
+| Windows GNU sysroot | MinGW headers/import libs, CRT, GNU runtime closure | Yes |
+| External SDK descriptors | Apple, Windows, and MSVC Toolset discovery and validation rules | Yes; SDK contents no |
+| Compliance | notices, SBOM, source provenance, pack manifest | Yes |
+| Build tools | CMake, Ninja, pkgconf, Python, NASM | No |
+| Bindgen kit | shared libclang | No; can be designed separately later |
 
-为满足“安装后首批 target 离线可用”，MVP 的 Hermetic profile 必须内嵌，不以首次联网下载补齐。后续可以提供单独的 slim edition 或签名扩展 pack，但不能把它宣传成 full single-binary edition。
+To satisfy "the initial targets are available offline after installation," the
+MVP's Hermetic profiles must be embedded and not completed by a first-use
+network download. A separate slim edition or signed extension pack may be offered
+later, but it cannot be advertised as the full single-binary edition.
 
-### 6.3 内容寻址缓存
+### 6.3 Content-addressed cache
 
-逻辑布局：
+Logical layout:
 
 ~~~text
 cache/
@@ -410,7 +551,7 @@ cache/
     launchers/
       cc       -> hardlink to controllers/.../rcc
       cxx      -> hardlink to controllers/.../rcc
-      ld64.lld -> hardlink to controllers/.../rcc # 当前 Mach-O profile
+      ld64.lld -> hardlink to controllers/.../rcc # current Mach-O profile
       ar       -> hardlink to controllers/.../rcc
       ranlib   -> hardlink to controllers/.../rcc
     view.json
@@ -419,26 +560,63 @@ cache/
   logs/
 ~~~
 
-物化规则：
+Materialization rules:
 
-1. 只展开当前 host 与请求 profile 所需的 resource pack；pack 中不得出现 compiler/linker/archiver executable。
-2. 解压前验证 pack manifest，解压后验证每个文件 digest。
-3. 拒绝绝对 archive path、父目录逃逸、设备文件和 symlink escape。
-4. 在同一 filesystem 的随机临时目录完成；先封存所有成员与子目录，再原子 rename，最后将 view 根目录切为只读。根目录只读位是发布完成的 ready marker，alias 在读取 manifest 前拒绝尚未封存的根目录，因此构建中断不会暴露可执行的半成品 view。
-5. 使用跨进程锁；中断后只留下可识别、可回收的临时目录。
-6. 运行中的 RCC 计算自身 executable SHA-256，将它只读持久化到 `controllers/<sha256>/rcc`，再从这一 inode 为 view 创建 hardlink aliases；不复制一份大 controller 到每个 profile。
-7. 发行信任根验证 controller、静态 engine build identity、resource pack 和 profile manifests；这些内容在发布时可签名。
-8. 运行时 view.json 是无发行方签名的内容寻址组合清单，因为它包含本机 path、external SDK 和 overlay。RCC 每次由已验证的静态成员与本地资源 identity 复算它。
-9. 完成的 view 设置为只读；物化/复用路径验证 resource tree metadata 和 external SDK/overlay identity，alias 启动时验证只读 ready marker、view identity、controller digest 与 engine build ID。为避免每个编译进程重复读取全部 headers，普通 alias 启动不重新哈希每个 resource member；`doctor` 与 `cache verify` 执行全资源摘要校验。
-10. 复用 view 前重新验证 identity、精确树 metadata、alias digest 与 controller binding；doctor/cache verify 执行全资源 digest 检查。热路径发现的损坏 view 立即隔离并从可信 payload 重建。
-11. 升级产生新 identity，不原地替换旧 view；controller GC 仅删除已无 view 引用且无活动锁的 digest。
-12. external SDK 只记录 canonical path、版本、完整文件 manifest identity 和验证结果，不复制进 cache；它和用户 overlay 属于本地信任输入，不冒充发行方签名内容。
+1. Expand only the resource packs needed by the current host and requested
+   profile; no compiler/linker/archiver executable may appear in a pack.
+2. Verify the pack manifest before extraction and verify each file's digest
+   after extraction.
+3. Reject absolute archive paths, parent-directory escapes, device files, and
+   symlink escapes.
+4. Complete the work in a random temporary directory on the same filesystem;
+   seal all members and subdirectories first, then atomically rename, and
+   finally flip the view root directory to read-only. The read-only bit on the
+   root directory is the ready marker for publish completion, and an alias
+   rejects an unsealed root directory before reading the manifest, so a build
+   interruption never exposes an executable half-finished view.
+5. Use a cross-process lock; after an interruption only an identifiable,
+   reclaimable temporary directory remains.
+6. The running RCC computes its own executable SHA-256, persists it read-only to
+   `controllers/<sha256>/rcc`, and then creates hardlink aliases for the view
+   from this inode; it does not copy a large controller into each profile.
+7. The release trust root verifies the controller, the static engine build
+   identity, the resource packs, and the profile manifests; this content can be
+   signed at release time.
+8. At runtime, view.json is a content-addressed composition manifest without a
+   distributor signature, because it contains local paths, external SDK, and
+   overlay. RCC recomputes it each time from validated static members and local
+   resource identities.
+9. The completed view is set read-only; the materialize/reuse path validates the
+   resource tree metadata and the external SDK/overlay identity, and on alias
+   startup it validates the read-only ready marker, the view identity, the
+   controller digest, and the engine build ID. To avoid every compile process
+   re-reading all headers, ordinary alias startup does not re-hash every resource
+   member; `doctor` and `cache verify` perform full-resource digest validation.
+10. Before reusing a view, re-validate the identity, the exact tree metadata, the
+    alias digest, and the controller binding; doctor/cache verify perform a
+    full-resource digest check. A corrupted view found on the hot path is
+    immediately quarantined and rebuilt from the trusted payload.
+11. Upgrades produce a new identity and do not replace the old view in place;
+    controller GC only deletes digests that no view references and that have no
+    active locks.
+12. An external SDK only records its canonical path, version, full file-manifest
+    identity, and validation result; it is not copied into the cache. It and the
+    user overlay are local trusted inputs and do not masquerade as
+    distributor-signed content.
 
-同一用户运行的恶意进程仍能尝试修改 cache，并在验证与执行之间制造竞态。普通用户权限和 digest 只能检测，不能构成强安全边界。构建不可信 workspace 时，必须把 RCC view 只读挂载到隔离用户、容器或 OS sandbox；cache 不得被描述成抵御同 UID 攻击者的安全边界。
+A malicious process running as the same user can still try to modify the cache
+and create a race between validation and execution. Ordinary user permissions
+and digests can only detect this, not form a strong security boundary. When
+building an untrusted workspace, the RCC view must be mounted read-only into an
+isolated user, container, or OS sandbox; the cache must not be described as a
+security boundary against a same-UID attacker.
 
-### 6.4 Multicall alias 方案
+### 6.4 Multicall alias approach
 
-构建系统通常要求 CC 或 linker 是一个 executable path，不能稳定携带额外 profile 参数。因此 RCC 将同一个缓存 controller hardlink 成多个 basename，并把 profile 固化在相邻 view.json 中：
+Build systems usually require CC or the linker to be a single executable path and
+cannot stably carry extra profile arguments. Therefore RCC hardlinks the same
+cached controller into multiple basenames and fixes the profile in the adjacent
+view.json:
 
 ~~~text
 views/<identity>/<profile>/<runtime-contract>/
@@ -447,49 +625,111 @@ views/<identity>/<profile>/<runtime-contract>/
     cxx
     ar
     ranlib
-    <lld-flavor> # ld64.lld、ld.lld 或 lld-link
+    <lld-flavor> # ld64.lld, ld.lld, or lld-link
   view.json
 ~~~
 
-RCC 优先使用 hardlink，因为 controller blob 与 view 都由同一 cache root 管理，天然位于同一 filesystem；它不依赖 shell、批处理或管理员 symlink 权限。alias 根据 `argv[0]` 和相邻 manifest 选择 tool kind、profile、runtime contract 与静态 entry，然后在 one-shot process 中执行。Windows 必须验证 hardlink/code-signing 行为；若平台签名策略要求复制，复制目标仍必须与 controller SHA-256 绑定，不能退回独立 launcher 实现。
+RCC prefers hardlinks because the controller blob and the view are both managed
+under the same cache root and are naturally on the same filesystem; it does not
+depend on a shell, batch file, or administrator symlink privileges. The alias
+selects the tool kind, profile, runtime contract, and static entry based on
+`argv[0]` and the adjacent manifest, and then executes in a one-shot process.
+Windows must validate hardlink/code-signing behavior; if the platform signing
+policy requires a copy, the copy target must still be bound to the controller
+SHA-256 and cannot fall back to a separate launcher implementation.
 
-hardlink 不复制文件数据：五个 alias 与 controller 是一个 physical binary，只增加目录项。权限处理不得对 alias inode 做会污染共享 controller 的可写 chmod；删除 view 只需修改父目录。若 cache filesystem 不支持 hardlink，RCC 必须明确失败或采用可审计的 clone/copy fallback，不能偷偷生成脚本 wrapper。
+Hardlinks do not copy file data: the five aliases and the controller are one
+physical binary, adding only directory entries. Permission handling must not
+perform a writable chmod on an alias inode that would pollute the shared
+controller; deleting a view only requires modifying the parent directory. If the
+cache filesystem does not support hardlinks, RCC must fail explicitly or use an
+auditable clone/copy fallback, and must not silently generate a script wrapper.
 
-### 6.5 为什么不内嵌三个上游 binary
+### 6.5 Why not embed the three upstream binaries
 
-官方 LLVM release 中的 `clang`、`lld`、`llvm-ar` 是面向通用发行的完整 executable。直接压进 payload 会带来三套 Mach-O/ELF/PE 入口、独立运行时闭包和签名对象，并且很难让 linker 对跨 executable 的重复 LLVM 代码做 dead stripping。静态 source build 让 RCC 能控制：
+The `clang`, `lld`, and `llvm-ar` in an official LLVM release are complete
+executables aimed at general distribution. Compressing them directly into the
+payload would bring three sets of Mach-O/ELF/PE entries, separate runtime
+closures, and signed objects, and would make it hard for the linker to
+dead-strip duplicated LLVM code across executables. A static source build lets
+RCC control:
 
-- `LLVM_TARGETS_TO_BUILD` 与交付 profile 对齐；macOS AArch64 MVP 默认只有 AArch64；
-- 只保留需要的 LLD flavor 与 llvm-ar personality；
-- 关闭 static analyzer、assertions、zlib、zstd、libxml2、libedit、libpfm、curl、tests/examples/benchmarks；
-- 使用 `MinSizeRel`、关闭 LLVM LTO，并依赖 final-link dead stripping；
-- 用一个 controller SHA-256 与 engine build ID 做缓存、SBOM、签名和诊断。
+- `LLVM_TARGETS_TO_BUILD` aligned with the delivered profiles; the macOS AArch64
+  MVP defaults to AArch64 only;
+- Keeping only the needed LLD flavors and the llvm-ar personality;
+- Disabling the static analyzer, assertions, zlib, zstd, libxml2, libedit,
+  libpfm, curl, and tests/examples/benchmarks;
+- Using `MinSizeRel`, disabling LLVM LTO, and relying on final-link dead
+  stripping;
+- Using a single controller SHA-256 and engine build ID for caching, SBOM,
+  signing, and diagnostics.
 
-因此“单 binary”不再只是把多个 binary 当压缩数据塞进另一个 binary。代价是 RCC 必须维护精确的 LLVM source version、entry source、C++ bridge、static library 链接顺序和 fatal/exit contract；LLVM 升级也需要完整 ABI/行为验收。
+Thus "single binary" is no longer merely stuffing multiple binaries as
+compressed data into another binary. The cost is that RCC must maintain the
+exact LLVM source version, entry source, C++ bridge, static library link order,
+and fatal/exit contract; an LLVM upgrade also requires full ABI/behavior
+acceptance.
 
-### 6.6 macOS AArch64 release 构建链
+### 6.6 macOS AArch64 release build chain
 
-发布输入分成两个角色，不能混淆：
+The release inputs are split into two roles that must not be confused:
 
-| 输入 | 固定摘要 | 用途 | 是否进入 payload |
+| Input | Fixed digest | Purpose | Enters payload |
 |---|---|---|:---:|
-| `llvm-project-22.1.8.src.tar.xz` | `922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888` | 构建真正链接进 RCC 的 LLVM/Clang/LLD/llvm-ar 静态组件 | 代码进入 controller；source 不进入 |
-| `LLVM-22.1.8-macOS-ARM64.tar.xz` | `f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f` | 提供 bootstrap Clang/llvm-ar；提取 Clang resource、libc++ headers 与 runtime | 只有 resource 文件进入 |
+| `llvm-project-22.1.8.src.tar.xz` | `922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888` | Builds the LLVM/Clang/LLD/llvm-ar static components actually linked into RCC | Code enters the controller; source does not |
+| `LLVM-22.1.8-macOS-ARM64.tar.xz` | `f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f` | Provides the bootstrap Clang/llvm-ar; extracts the Clang resource, libc++ headers, and runtime | Only resource files enter |
 
-默认 source build 使用 `LLVM_ENABLE_PROJECTS=clang;lld`、`LLVM_TARGETS_TO_BUILD=AArch64`、`MinSizeRel`、`LLVM_ENABLE_LTO=OFF`、static libraries；关闭 analyzer、assertions、zlib、zstd、libxml2、libedit、libpfm、curl、httplib、bindings、tests、examples、benchmarks 和 docs。构建 `clang`、`lld`、`llvm-ar`、`llvm-config` targets 是为了生成、验证并枚举所需 static library closure；它们的 standalone executables 不进入 RCC 或 resource pack。
+The default source build uses `LLVM_ENABLE_PROJECTS=clang;lld`,
+`LLVM_TARGETS_TO_BUILD=AArch64`, `MinSizeRel`, `LLVM_ENABLE_LTO=OFF`, and static
+libraries; it disables the analyzer, assertions, zlib, zstd, libxml2, libedit,
+libpfm, curl, httplib, bindings, tests, examples, benchmarks, and docs. Building
+the `clang`, `lld`, `llvm-ar`, and `llvm-config` targets is to generate,
+validate, and enumerate the required static library closure; their standalone
+executables do not enter RCC or the resource pack.
 
-release pipeline 按以下顺序执行：
+The release pipeline executes in the following order:
 
-1. 在创建 output 前验证两个 archive SHA-256，并核对固定 root layout。
-2. 用官方 binary archive 中的 Clang 22 编译固定 source archive。构建脚本从 `RCC_MACOS_BUILD_SDKROOT`、`SDKROOT` 或 `xcrun` 显式解析 build-time macOS SDK，并将其作为 sysroot 传给 bootstrap compiler；LLVM host tools 采用 Apple linker。这些都是 release 构建期依赖，不进入 RCC，也不构成安装后的 toolchain fallback。实测 LLVM 22.1.8 ThinLTO + ld64.lld 在 host tablegen 的 Mach-O archive 回扫上不可靠，因此默认明确关闭 LTO 且不设置 `LLVM_USE_LINKER=lld`。
-3. 校验并应用 `scripts/patches/clang-integrated-cc1-multijob.patch`（SHA-256 `41d5e092ac23ac44c90714e95425a3be25775bf0127d5f9539000f306863b759`），再将 source/build/prefix 通过 `RCC_LLVM_SOURCE_DIR`、`RCC_LLVM_BUILD_DIR`、`RCC_LLVM_BOOTSTRAP_PREFIX` 交给 Rust build script，由 bridge 编译并静态链接；脚本同时设置 `RCC_LLVM_SOURCE_SHA256` 与由 targets/build type/LTO/commit/patch 规范化得到的 `RCC_ENGINE_BUILD_ID`。默认 ID 为 `llvm-22.1.8-aarch64-macho-minsizerel-nolto-ca7933e47d3a-patch-41d5e092ac23`，非默认 deployment target 与 init-cache 摘要会作为后缀进入 ID。
-4. 用 staging script 只提取 `lib/clang/22`、`include/c++/v1`、LLVM license 和两份 lock provenance；断言 stage 不存在 `bin/` 与 `launchers/`。
-5. 生成并验证 `.rccpack`，再通过 `RCC_EMBED_PACK` 完成最终 controller 链接。
-6. 最终验收检查只存在一个发行 tool executable、resource pack 无 compiler/linker/archiver/launcher executable、动态依赖不含 LLVM/Clang/LLD dylib，并执行 C/C++/archive/link smoke tests。compiler-rt 等资源文件可保留上游 mode，不把文件 mode 当成 tool 分类。
+1. Verify the SHA-256 of both archives before creating any output, and check the
+   fixed root layout.
+2. Compile the fixed source archive with Clang 22 from the official binary
+   archive. The build script explicitly resolves the build-time macOS SDK from
+   `RCC_MACOS_BUILD_SDKROOT`, `SDKROOT`, or `xcrun`, and passes it as the sysroot
+   to the bootstrap compiler; the LLVM host tools use the Apple linker. These are
+   all release build-time dependencies, do not enter RCC, and do not constitute a
+   post-install toolchain fallback. In practice, LLVM 22.1.8 ThinLTO + ld64.lld
+   is unreliable on the Mach-O archive back-scan of host tablegen, so LTO is
+   explicitly disabled by default and `LLVM_USE_LINKER=lld` is not set.
+3. Verify and apply `scripts/patches/clang-integrated-cc1-multijob.patch` (SHA-256
+   `41d5e092ac23ac44c90714e95425a3be25775bf0127d5f9539000f306863b759`), then pass
+   the source/build/prefix to the Rust build script via `RCC_LLVM_SOURCE_DIR`,
+   `RCC_LLVM_BUILD_DIR`, and `RCC_LLVM_BOOTSTRAP_PREFIX`, where the bridge
+   compiles and statically links them; the script also sets
+   `RCC_LLVM_SOURCE_SHA256` and `RCC_ENGINE_BUILD_ID`, normalized from
+   targets/build type/LTO/commit/patch. The default ID is
+   `llvm-22.1.8-aarch64-macho-minsizerel-nolto-ca7933e47d3a-patch-41d5e092ac23`,
+   and a non-default deployment target and init-cache digest enter the ID as
+   suffixes.
+4. Use the staging script to extract only `lib/clang/22`, `include/c++/v1`, the
+   LLVM license, and the two lock provenances; assert that `bin/` and
+   `launchers/` do not exist in the stage.
+5. Generate and verify the `.rccpack`, then complete the final controller link
+   via `RCC_EMBED_PACK`.
+6. The final acceptance check confirms that only one distributed tool executable
+   exists, that the resource pack has no compiler/linker/archiver/launcher
+   executable, that dynamic dependencies contain no LLVM/Clang/LLD dylib, and
+   runs C/C++/archive/link smoke tests. Resource files such as compiler-rt may
+   retain the upstream mode; file mode is not used as the tool classification.
 
-默认配置记录在 `toolchains/llvm-project-22.1.8-source.lock.json`；bootstrap 的 URL、digest、attestation 与 commit 记录在 `toolchains/llvm-22.1.8-macos-arm64.lock.json`。允许通过显式 CMake init-cache 或受控环境变量定制 backend/build type/LTO，但任何变化必须进入 engine build ID、SBOM 与验收矩阵；本地自定义版不能冒充官方 profile identity。
+The default configuration is recorded in
+`toolchains/llvm-project-22.1.8-source.lock.json`; the bootstrap's URL, digest,
+attestation, and commit are recorded in
+`toolchains/llvm-22.1.8-macos-arm64.lock.json`. Customizing the backend/build
+type/LTO is allowed via an explicit CMake init-cache or controlled environment
+variables, but any change must enter the engine build ID, the SBOM, and the
+acceptance matrix; a locally customized build cannot masquerade as the official
+profile identity.
 
-## 7. 公共接口
+## 7. Public interface
 
 ### 7.1 CLI
 
@@ -517,36 +757,47 @@ rcc cache gc
 rcc licenses
 ~~~
 
-rcc cc/cxx/link 适合直接调用和调试；高频构建应先用 rcc print tool 获取 profile-bound controller alias path。
+rcc cc/cxx/link is suitable for direct invocation and debugging; high-frequency
+builds should first use rcc print tool to obtain the profile-bound controller
+alias path.
 
-公开 tool kind 按 profile 声明：
+Public tool kinds are declared per profile:
 
-| Kind | 实际工具/personality | MVP |
+| Kind | Actual tool/personality | MVP |
 |---|---|:---:|
-| cc、cxx、linker | 静态 Clang driver 或 LLD personality | 是 |
-| ar、ranlib、lib | llvm-ar、llvm-ranlib、llvm-lib | 是 |
-| rc、windres、dlltool | llvm-rc、llvm-windres、llvm-dlltool | Windows profile 是 |
-| objcopy、strip | llvm-objcopy、llvm-strip | Linux/Windows profile 是 |
+| cc, cxx, linker | Static Clang driver or LLD personality | Yes |
+| ar, ranlib, lib | llvm-ar, llvm-ranlib, llvm-lib | Yes |
+| rc, windres, dlltool | llvm-rc, llvm-windres, llvm-dlltool | Yes for Windows profiles |
+| objcopy, strip | llvm-objcopy, llvm-strip | Yes for Linux/Windows profiles |
 | lipo | llvm-lipo | Phase 3 |
-| nm、readobj | LLVM inspection tools | verifier 内部；公开为可选 |
+| nm, readobj | LLVM inspection tools | Internal to the verifier; optionally public |
 
-请求 profile 未声明的 kind 时必须返回 unsupported，不能搜索 PATH。
+When a kind not declared by the requested profile is requested, it must return
+unsupported and must not search PATH.
 
-### 7.2 输出契约
+### 7.2 Output contract
 
-- print 子命令成功时 stdout 只包含所请求的单个值和换行；诊断写 stderr。
-- env 支持 versioned JSON、POSIX shell、PowerShell、Cargo config fragment 和 CMake toolchain fragment。
-- JSON 顶层必须包含 schema_version、toolchain_identity、profile_id、host_profile_id。
-- 单 profile 输出和 tool path identity 必须包含 runtime_contract_id。
-- 双 host-target 输出必须分别包含 host_runtime_contract_id 和 target_runtime_contract_id，禁止共用一个含义含混的 contract。
-- tool path 必须是绝对路径，指向 immutable view。
-- exit code、signal、stdout 和 stderr 默认忠实传播所选静态 engine entry 的结果。
-- 路径和 flags 分字段输出，不把带空格的 command string 伪装成 executable path。
-- secret、credential 和用户目录在 trace/report 中默认脱敏。
+- On success, a print subcommand emits only the single requested value and a
+  newline to stdout; diagnostics go to stderr.
+- env supports versioned JSON, POSIX shell, PowerShell, a Cargo config fragment,
+  and a CMake toolchain fragment.
+- The JSON top level must contain schema_version, toolchain_identity,
+  profile_id, and host_profile_id.
+- Single-profile output and tool path identity must contain runtime_contract_id.
+- Dual host-target output must contain host_runtime_contract_id and
+  target_runtime_contract_id separately; a single contract with ambiguous
+  meaning may not be shared.
+- The tool path must be an absolute path pointing into the immutable view.
+- By default, the exit code, signal, stdout, and stderr faithfully propagate the
+  result of the selected static engine entry.
+- Paths and flags are emitted as separate fields; a command string with spaces
+  is never disguised as an executable path.
+- Secrets, credentials, and user directories are redacted by default in
+  traces/reports.
 
-### 7.3 Driver 查询兼容
+### 7.3 Driver query compatibility
 
-profile-bound alias 至少代理构建系统常用查询：
+A profile-bound alias proxies at least the queries build systems commonly use:
 
 - -dumpmachine
 - --print-target-triple
@@ -556,11 +807,12 @@ profile-bound alias 至少代理构建系统常用查询：
 - -print-prog-name=<name>
 - --version
 
-查询结果必须来自 ViewManifest，不能触发 host GCC/toolchain 自动探测。
+Query results must come from the ViewManifest and must not trigger host
+GCC/toolchain auto-probing.
 
-### 7.4 环境名兼容
+### 7.4 Environment name compatibility
 
-env 输出可提供 Rust/Cargo 生态常见 alias：
+env output can provide aliases common in the Rust/Cargo ecosystem:
 
 ~~~text
 CC_<target-with-hyphens>
@@ -577,9 +829,10 @@ PKG_CONFIG_SYSROOT_DIR_<target>
 PKG_CONFIG_LIBDIR_<target>
 ~~~
 
-这些只是输出模板。RCC 不写入父进程环境，也不声称任意消费者都遵守它们。
+These are only output templates. RCC does not write to the parent process
+environment and does not claim that any consumer respects them.
 
-## 8. Native 调用流程
+## 8. Native invocation flow
 
 ~~~mermaid
 sequenceDiagram
@@ -609,95 +862,145 @@ sequenceDiagram
 
 ### 8.1 Hermetic driver contract
 
-仅传 --sysroot 不足以阻止 host 污染。正式 profile-bound alias 必须：
+Passing --sysroot alone is not enough to stop host pollution. An official
+profile-bound alias must:
 
-1. 固定 target triple、driver kind、resource directory、linker flavor 和 runtime contract。
-2. 调用 controller 内的静态 Clang/LLD/LLVM entry；需要进程边界时只重执行受验证的绝对 hardlink alias。
-3. 禁用或钉死 Clang 的 host GCC installation 探测。
-4. 对 Hermetic profile 使用受控 include/library 搜索；必要时以 nostdinc、nostdinc++、nostdlib 后显式恢复 profile 路径。
-5. 清理或拒绝 CPATH、C_INCLUDE_PATH、CPLUS_INCLUDE_PATH、OBJC_INCLUDE_PATH、LIBRARY_PATH、COMPILER_PATH、GCC_EXEC_PREFIX、INCLUDE、LIB、SDKROOT 等未在 plan 中登记的变量。
-6. 拒绝覆盖 target、sysroot、resource-dir、toolchain prefix 或 linker 的冲突 flags。
-7. 拒绝任何可能切换 view 外工具或加载外部 compiler plugin 的选项，例如 -fno-integrated-as、-B、--gcc-toolchain、-fuse-ld、--ld-path、-specs、plugin/load 选项及等价 MSVC 选项；RCC 自身生成并绑定的 linker alias 除外。
-8. 允许 workspace/user source path 和显式注册 overlay；拒绝已知 host system roots。
-9. 保持 response file 的 GCC、COFF/MSVC 方言和编码规则，规范化后再转交。
-10. 记录 controller digest、engine build ID、所选 entry/self-reexec alias、搜索目录和 runtime contract，供 doctor 和 verifier 审计。
-11. 没有任何系统 compiler/linker fallback；缺资源时直接失败。
+1. Fix the target triple, driver kind, resource directory, linker flavor, and
+   runtime contract.
+2. Call the static Clang/LLD/LLVM entry within the controller; when a process
+   boundary is needed, only re-execute the validated absolute hardlink alias.
+3. Disable or pin Clang's host GCC installation probing.
+4. Use controlled include/library search for Hermetic profiles; when necessary,
+   explicitly restore the profile paths after nostdinc, nostdinc++, and
+   nostdlib.
+5. Clean or reject variables not registered in the plan, such as CPATH,
+   C_INCLUDE_PATH, CPLUS_INCLUDE_PATH, OBJC_INCLUDE_PATH, LIBRARY_PATH,
+   COMPILER_PATH, GCC_EXEC_PREFIX, INCLUDE, LIB, and SDKROOT.
+6. Reject conflicting flags that override the target, sysroot, resource-dir,
+   toolchain prefix, or linker.
+7. Reject any option that could switch to a tool outside the view or load an
+   external compiler plugin, such as -fno-integrated-as, -B, --gcc-toolchain,
+   -fuse-ld, --ld-path, -specs, plugin/load options, and equivalent MSVC options;
+   except the linker alias that RCC itself generates and binds.
+8. Allow workspace/user source paths and explicitly registered overlays; reject
+   known host system roots.
+9. Keep the GCC and COFF/MSVC dialect and encoding rules of response files,
+   normalizing before forwarding.
+10. Record the controller digest, engine build ID, the selected entry/self-reexec
+    alias, search directories, and runtime contract, for auditing by doctor and
+    the verifier.
+11. Have no system compiler/linker fallback at all; fail directly when a resource
+    is missing.
 
-RCC 将 hermeticity 分成两个可审计等级：
+RCC splits hermeticity into two auditable levels:
 
-- **toolchain-hermetic**：RCC 不调用 view 外 compiler/linker/binutils，不主动加入 host 搜索路径；所有正式 profile 必须满足。
-- **filesystem-hermetic**：编译/链接子进程只能读取 workspace、immutable view、显式 overlay/SDK 和声明的临时目录；需要受支持的 OS sandbox 或只读隔离环境。
+- **toolchain-hermetic**: RCC does not invoke a compiler/linker/binutils outside
+  the view and does not proactively add host search paths; all official profiles
+  must satisfy this.
+- **filesystem-hermetic**: the compile/link subprocess can only read the
+  workspace, the immutable view, explicit overlays/SDK, and declared temporary
+  directories; requires a supported OS sandbox or a read-only isolated
+  environment.
 
-alias policy 必须递归解析 response file，并对所有 path-bearing flags、linker script、SEARCH_DIR/INCLUDE、COFF .drectve 和 Mach-O autolink 输入做策略处理。递归有深度、大小和循环限制。没有 filesystem sandbox 时，源码中的绝对 include 或对象内嵌指令仍可能读取 host 文件；此时报告必须标记 filesystem_hermetic=false，保证不得扩大为“没有任何 host 文件读取”。
+The alias policy must recursively resolve response files and apply policy
+processing to all path-bearing flags, linker scripts, SEARCH_DIR/INCLUDE, COFF
+.drectve, and Mach-O autolink inputs. The recursion has depth, size, and cycle
+limits. Without a filesystem sandbox, an absolute include in the source or an
+embedded directive in an object may still read host files; in this case the
+report must mark filesystem_hermetic=false and must not be inflated into "no host
+file reads at all."
 
-### 8.2 编译、归档与链接
+### 8.2 Compile, archive, and link
 
-- C/C++ 编译由 Clang driver 完成。
-- .s/.S 只承诺 Clang integrated assembler 支持的语法；NASM/MASM 不属于 MVP。
-- 归档使用 llvm-ar/llvm-ranlib；COFF profile 可提供 llvm-lib personality。
-- Unix 风格最终链接使用 Clang driver 补齐 profile 参数，再选择同一 view 中的 LLD。
-- MSVC 风格最终链接使用静态 lld-link personality；不能强制套用 Unix driver。
-- Windows resource、import library 和 Mach-O lipo 工具按正式 profile 需要加入 host native core。
-- rcc-owned 链接按 profile 固定 CRT 顺序、runtime、dynamic loader 和 C++ standard library。
-- consumer-owned/split-contract 链接严格遵守 runtime ownership，不自动“补全”可能重复的库。
+- C/C++ compilation is done by the Clang driver.
+- .s/.S promise only the syntax supported by the Clang integrated assembler;
+  NASM/MASM are not part of the MVP.
+- Archiving uses llvm-ar/llvm-ranlib; COFF profiles can provide the llvm-lib
+  personality.
+- Unix-style final link uses the Clang driver to fill in the profile arguments,
+  then selects the LLD in the same view.
+- MSVC-style final link uses the static lld-link personality; the Unix driver
+  cannot be forced upon it.
+- Windows resource, import library, and Mach-O lipo tools are added to the host
+  native core as official profiles require.
+- rcc-owned links fix the CRT order, runtime, dynamic loader, and C++ standard
+  library per profile.
+- consumer-owned/split-contract links strictly follow runtime ownership and do
+  not automatically "complete" potentially duplicated libraries.
 
-### 8.3 参数冲突策略
+### 8.3 Argument conflict policy
 
-| 输入 | 默认策略 |
+| Input | Default policy |
 |---|---|
-| 用户更改 target/sysroot/resource-dir | 失败 |
-| 用户指定另一个 linker 或 toolchain prefix | 失败 |
-| 用户添加 workspace include/library | 允许并记录 |
-| 用户添加已注册 overlay 路径 | 允许并进入 identity |
-| 用户指向 host 系统 include/library | 失败 |
-| 用户请求不属于 profile 的 CRT/STL | 失败 |
-| 用户切换 external assembler/linker/toolchain discovery | 失败 |
-| 未知 Clang warning/codegen flag | 透传 |
-| 未知 linker flag | 仅当确认不改变 tool/search/runtime 时透传；否则失败 |
+| User changes target/sysroot/resource-dir | Fail |
+| User specifies another linker or toolchain prefix | Fail |
+| User adds workspace include/library | Allow and record |
+| User adds a registered overlay path | Allow and enter into identity |
+| User points at host system include/library | Fail |
+| User requests a CRT/STL not belonging to the profile | Fail |
+| User switches external assembler/linker/toolchain discovery | Fail |
+| Unknown Clang warning/codegen flag | Pass through |
+| Unknown linker flag | Pass through only when confirmed not to change tool/search/runtime; otherwise fail |
 
-RCC 不提供“继续构建但偷偷使用系统 linker”的 debug override。需要实验外部工具时，用户应直接调用外部工具，并明确离开 RCC 的受支持路径。
+RCC does not provide a debug override that "continues the build but secretly uses
+the system linker." When experimenting with external tools, the user should
+invoke the external tool directly and explicitly leave RCC's supported path.
 
-## 9. 消费者集成
+## 9. Consumer integration
 
-### 9.1 直接 C/C++
+### 9.1 Direct C/C++
 
-直接用户可用 rcc cc/cxx/ar/link，也可先取得 profile-bound alias path。一个纯 native 构建的正确性只依赖 profile、输入和显式 overlay，不涉及 Rust。
+Direct users can use rcc cc/cxx/ar/link, or first obtain a profile-bound alias
+path. The correctness of a pure native build depends only on the profile, the
+inputs, and explicit overlays, and does not involve Rust.
 
-### 9.2 Cargo、rustc 与 cc-rs
+### 9.2 Cargo, rustc, and cc-rs
 
-RCC 只输出集成信息：
+RCC only emits integration information:
 
-- target linker alias；
-- target CC/CXX/AR/RANLIB；
-- host CC/CXX/AR/RANLIB/linker；
-- sysroot/resource-dir flags；
-- runtime ownership contract；
-- Cargo config fragment 和 target-scoped env template。
+- The target linker alias;
+- The target CC/CXX/AR/RANLIB;
+- The host CC/CXX/AR/RANLIB/linker;
+- The sysroot/resource-dir flags;
+- The runtime ownership contract;
+- The Cargo config fragment and the target-scoped env template.
 
-外部 adapter 或用户负责：
+The external adapter or the user is responsible for:
 
-- 选择 Cargo/rustc 和安装 target rust-std；
-- 区分 host build dependency 与 target dependency；
-- 把 host/target 两套变量放到正确进程；
-- 选择与 rustc self-contained 资源匹配的 RCC consumer contract；
-- 运行 Cargo并处理其退出状态、artifact 和 runner。
+- Selecting Cargo/rustc and installing the target rust-std;
+- Distinguishing host build dependencies from target dependencies;
+- Placing both the host and target sets of variables into the correct process;
+- Selecting the RCC consumer contract that matches rustc's self-contained
+  resources;
+- Running Cargo and handling its exit status, artifacts, and runner.
 
-> [!CAUTION] 不能只配置 target CC
-> build.rs 或 proc-macro 的 host 原生依赖若没有 host compiler/linker 配置，可能回落到系统工具链。RCC 的 cargo 格式输出必须同时给出 host 与 target mapping；外部 adapter 必须完整采用。
+> [!CAUTION] Configuring only the target CC is not enough
+> If the host-native dependencies of build.rs or a proc-macro have no
+> host-compiler/linker configuration, they may fall back to the system
+> toolchain. RCC's cargo-format output must provide both the host and target
+> mappings; the external adapter must adopt them in full.
 
-如果 build script 硬编码 gcc、cl.exe 或绝对路径，RCC 无法在无沙箱情况下接管。此类项目不属于 RCC core 的兼容承诺。
+If a build script hard-codes gcc, cl.exe, or an absolute path, RCC cannot take
+over without a sandbox. Such projects are not part of the RCC core's
+compatibility promise.
 
-### 9.3 CMake 和其他构建系统
+### 9.3 CMake and other build systems
 
-RCC 可以输出 CMake toolchain fragment，内容包括 compiler path、sysroot、target 和 find-root policy；但不携带或运行 CMake/Ninja。
+RCC can emit a CMake toolchain fragment containing the compiler path, sysroot,
+target, and find-root policy; but it does not carry or run CMake/Ninja.
 
-RCC sysroot 可携带 pkg-config metadata，并输出 PKG_CONFIG_SYSROOT_DIR/LIBDIR；但不携带或运行 pkg-config/pkgconf。
+The RCC sysroot can carry pkg-config metadata and emit
+PKG_CONFIG_SYSROOT_DIR/LIBDIR; but it does not carry or run pkg-config/pkgconf.
 
-bindgen 需要共享 libclang。RCC MVP 只含静态集成的 Clang driver/frontend，不提供 shared libclang，因此不会因为安装 RCC 就自动获得 bindgen 能力。后续若加入 libclang，应作为独立 host pack，有单独版本、动态加载和许可证策略。
+bindgen needs a shared libclang. The RCC MVP only includes the statically
+integrated Clang driver/frontend and does not provide a shared libclang, so
+installing RCC does not automatically grant bindgen capability. If libclang is
+added later, it should be a separate host pack with its own version, dynamic
+loading, and license policy.
 
 ### 9.4 Sysroot overlay
 
-overlay 是显式、不可变输入：
+An overlay is an explicit, immutable input:
 
 ~~~text
 rcc sysroot register-overlay \
@@ -706,350 +1009,490 @@ rcc sysroot register-overlay \
   --manifest <overlay-manifest>
 ~~~
 
-查找顺序：
+Lookup order:
 
-1. 显式 overlay；
-2. RCC base sysroot；
-3. external managed SDK；
-4. 不存在 host fallback。
+1. Explicit overlay;
+2. RCC base sysroot;
+3. External managed SDK;
+4. No host fallback exists.
 
-overlay manifest 至少声明目标 profile、headers、libraries、runtime 需求、ABI baseline 和 digest。overlay 提升 glibc/GLIBCXX 或最低 OS 版本时默认失败，除非它声明一个新的派生 profile。
+An overlay manifest declares at least the target profile, headers, libraries,
+runtime requirements, ABI baseline, and digest. When an overlay raises
+glibc/GLIBCXX or the minimum OS version, it fails by default unless it declares a
+new derived profile.
 
-## 10. Sysroot 与 Runtime 策略
+## 10. Sysroot and runtime strategy
 
-### 10.1 通用资源闭包
+### 10.1 General resource closure
 
-每个 Hermetic profile 至少包含：
+Each Hermetic profile contains at least:
 
-- OS/UAPI headers；
-- libc headers；
-- CRT startup/end objects；
-- link-time system libraries 或 import stubs；
-- compiler runtime；
-- unwind/exception runtime；
-- C++ headers 和 standard library；
-- thread runtime；
-- dynamic loader identity；
-- pkg-config/CMake 等消费者可读取的 metadata；
-- 许可证、来源、补丁和 SBOM。
+- OS/UAPI headers;
+- libc headers;
+- CRT startup/end objects;
+- link-time system libraries or import stubs;
+- compiler runtime;
+- unwind/exception runtime;
+- C++ headers and standard library;
+- thread runtime;
+- dynamic loader identity;
+- consumer-readable metadata such as pkg-config/CMake;
+- license, provenance, patches, and SBOM.
 
-profile 必须明确每个动态 runtime 的部署策略：
+A profile must specify the deployment strategy for each dynamic runtime:
 
-- 静态进入最终 binary；
-- 由 target OS baseline 保证；
-- 由 RCC 生成的 runtime bundle 随产物复制；
-- 或要求用户显式提供。
+- Statically into the final binary;
+- Guaranteed by the target OS baseline;
+- A runtime bundle generated by RCC and copied alongside the artifact;
+- Or required to be explicitly provided by the user.
 
-不能只列出 libstdc++、libgcc、libunwind、winpthreads 名称而不定义产物闭包。
+It is not enough to list names such as libstdc++, libgcc, libunwind, and
+winpthreads without defining the artifact closure.
 
 ### 10.2 Linux
 
-Linux sysroot 不能从构建机复制 /usr/include 或 /usr/lib。它应由固定源码、固定配置和可复现脚本生成，包含 Linux UAPI、libc、CRT、动态 loader stubs、compiler/unwind runtime 和 C++ runtime。
+A Linux sysroot cannot copy /usr/include or /usr/lib from the build machine. It
+should be generated from fixed source, a fixed configuration, and a reproducible
+script, containing the Linux UAPI, libc, CRT, dynamic loader stubs,
+compiler/unwind runtime, and C++ runtime.
 
-策略：
+Policy:
 
-- musl profile 默认静态，musl 与 runtime 固定到精确版本。
-- glibc profile 默认动态；完全静态优先选择 musl，避免 glibc NSS 等运行时问题。
-- glibc baseline 以 sysroot 和 symbol-version verifier 共同保证。
-- GNU profile 的 libgcc_s/libstdc++ 与 Clang/LLD 必须形成一个经过测试的闭包。
-- compiler-rt/libc++ 路线必须是另一个显式 profile，不能透明替换 GNU runtime。
-- Linux kernel baseline 无法仅靠 ELF metadata 完整证明，必须结合真实旧内核/发行版运行矩阵。
+- musl profiles are static by default, with musl and the runtime pinned to exact
+  versions.
+- glibc profiles are dynamic by default; for fully static, prefer musl to avoid
+  runtime issues such as glibc NSS.
+- The glibc baseline is guaranteed jointly by the sysroot and a symbol-version
+  verifier.
+- The libgcc_s/libstdc++ of GNU profiles and Clang/LLD must form a tested
+  closure.
+- The compiler-rt/libc++ route must be another explicit profile and must not
+  transparently replace the GNU runtime.
+- The Linux kernel baseline cannot be fully proven by ELF metadata alone and must
+  be combined with a real old-kernel/distribution run matrix.
 
 ### 10.3 Windows
 
-Windows profile 必须拆分三条 ABI 路线：
+Windows profiles must split into three ABI routes:
 
-1. **windows-gnu**：MinGW-w64 headers/import libraries、CRT、GNU exception/unwind、libgcc/libstdc++ 及可能的 winpthreads。
-2. **windows-gnullvm**：LLVM-MinGW/UCRT、compiler-rt、libunwind、libc++。
-3. **windows-msvc**：clang-cl/lld-link + Windows SDK Provider + MSVC Toolset Provider。
+1. **windows-gnu**: MinGW-w64 headers/import libraries, CRT, GNU
+   exception/unwind, libgcc/libstdc++, and possibly winpthreads.
+2. **windows-gnullvm**: LLVM-MinGW/UCRT, compiler-rt, libunwind, libc++.
+3. **windows-msvc**: clang-cl/lld-link + Windows SDK Provider + MSVC Toolset
+   Provider.
 
-Windows SDK 只提供 UCRT/UM/shared 等部分，不能替代 MSVC Toolset 的 STL、vcruntime、CRT headers/libraries。两个 provider 必须独立建模、独立校验。
+The Windows SDK only provides parts such as UCRT/UM/shared and cannot replace the
+MSVC Toolset's STL, vcruntime, and CRT headers/libraries. The two providers must
+be modeled and validated independently.
 
-当前实现：Windows SDK（Kits 10）与 MSVC toolset 分开发现、一起进入 view 身份。clang-cl 注入 `/winsdkdir`、`/vctoolsdir` 和视图内 `lld-link`。用法见 [RCC_WINDOWS.md](RCC_WINDOWS.md)。
+Current implementation: the Windows SDK (Kits 10) and the MSVC toolset are
+discovered separately and enter the view identity together. clang-cl injects
+`/winsdkdir`, `/vctoolsdir`, and the in-view `lld-link`. See
+[RCC_WINDOWS.md](RCC_WINDOWS.md) for usage.
 
-不同 CRT、exception model、C++ ABI 或 library format 不得混用。PE verifier 需要检查 machine、subsystem、imports、runtime DLL、API-set/import symbol baseline 和路径泄漏；只检查 DLL 名称不够。
+Different CRTs, exception models, C++ ABIs, or library formats must not be mixed.
+The PE verifier needs to check the machine, subsystem, imports, runtime DLL,
+API-set/import symbol baseline, and path leakage; checking DLL names alone is not
+enough.
 
-MVP 自包含路线为 windows-gnu 与 windows-gnullvm。MSVC 是 Managed SDK：clang-cl/lld-link 已交付，Windows SDK 与 MSVC Toolset 由调用方提供。
+The MVP self-contained routes are windows-gnu and windows-gnullvm. MSVC is a
+Managed SDK: clang-cl/lld-link are delivered, and the Windows SDK and MSVC
+Toolset are provided by the caller.
 
 ### 10.4 macOS
 
-RCC 不下载、复制或再分发 Apple SDK。正式支持仅在 Apple-branded macOS host：
+RCC does not download, copy, or redistribute the Apple SDK. Official support is
+only on an Apple-branded macOS host:
 
-- RCC 使用自带 Clang 和 ld64.lld，不调用 Xcode clang/ld。
-- AppleDeveloperProvider 将 SDK root、SDK build/version、TBD schema、platform metadata 和 libc++ header source 作为一个不可拆分的 identity 注册。
-- 默认 C++ headers 来自 RCC 固定、开源且经过 SDK/deployment-target 兼容验证的 libc++ pack，避免依赖 Xcode compiler toolchain。
-- 若某 profile 必须使用 Xcode toolchain 中的 libc++ headers，则 header root 作为 external AppleLibcxx source 显式登记；仍不调用其中的 clang/ld。
-- framework、TBD stubs、deployment target 和 symbol availability 进入 profile identity。
-- SDK 自动发现只是便利功能；必须支持用户显式 SDK path，不能把 xcrun 设为 artifact generation 依赖。
-- ld64.lld 若不能通过某 SDK/profile 的正式 fixture，RCC 应将该 profile 标为 unsupported，不能 fallback 到系统 ld。
+- RCC uses its bundled Clang and ld64.lld and does not invoke Xcode clang/ld.
+- The AppleDeveloperProvider registers the SDK root, SDK build/version, TBD
+  schema, platform metadata, and the libc++ header source as one indivisible
+  identity.
+- The default C++ headers come from an RCC-fixed, open-source libc++ pack that
+  has been validated for SDK/deployment-target compatibility, avoiding a
+  dependency on the Xcode compiler toolchain.
+- If a profile must use the libc++ headers from the Xcode toolchain, the header
+  root is explicitly registered as an external AppleLibcxx source; the clang/ld
+  within it is still not invoked.
+- Frameworks, TBD stubs, the deployment target, and symbol availability enter the
+  profile identity.
+- SDK auto-discovery is merely a convenience feature; an explicitly
+  user-provided SDK path must be supported, and xcrun must not be a dependency
+  for artifact generation.
+- If ld64.lld cannot pass the official fixture for a given SDK/profile, RCC
+  should mark that profile unsupported and must not fall back to the system ld.
 
-Apple Silicon executable、dylib 和 bundle 需要满足平台 code-signature 规则。RCC 应使用 ld64.lld 的受验证能力，或自带最小 ad-hoc signer；不得要求系统 codesign 才能完成基础构建。Developer ID、entitlement、公证仍是非目标。
+Apple Silicon executables, dylibs, and bundles need to satisfy the platform
+code-signature rules. RCC should use ld64.lld's validated capability or bundle a
+minimal ad-hoc signer; it must not require the system codesign to complete a
+basic build. Developer ID, entitlements, and notarization remain non-goals.
 
-Mach-O verifier 检查 CPU、platform/min version、load commands、dylib/framework、RPATH、symbol availability 和 code signature。universal2 若后续支持，合并 slices 后必须重新验证并按需重新生成 ad-hoc signature。
+The Mach-O verifier checks the CPU, platform/min version, load commands,
+dylib/framework, RPATH, symbol availability, and code signature. If universal2 is
+supported later, the merged slices must be re-validated and the ad-hoc signature
+regenerated as needed.
 
-> [!DANGER] Apple 许可边界
-> “技术上可从非 macOS host 链接 Mach-O”不等价于可以合法分发 Apple SDK。RCC 不把非 macOS host 到 macOS 宣传为完整、自包含或正式支持路径。
+> [!DANGER] Apple licensing boundary
+> "Technically being able to link Mach-O from a non-macOS host" is not equivalent
+> to being allowed to legally distribute the Apple SDK. RCC does not advertise
+> non-macOS host to macOS as a complete, self-contained, or officially supported
+> path.
 
-## 11. 产物校验与可复现性
+## 11. Artifact validation and reproducibility
 
 ### 11.1 Verifier
 
-| 格式 | 必查项目 | 无法仅靠静态检查证明 |
+| Format | Must-check items | Cannot be proven by static checks alone |
 |---|---|---|
-| ELF | machine、interpreter、needed libs、RPATH、symbol versions、static policy | 所有内核行为与动态环境 |
-| PE/COFF | machine、subsystem、imports、API baseline、CRT/STL、PDB path | 所有 Windows 版本兼容 |
-| Mach-O | CPU、min OS、load dylib/framework、RPATH、signature | 所有 SDK symbol 运行行为 |
+| ELF | machine, interpreter, needed libs, RPATH, symbol versions, static policy | All kernel behavior and dynamic environment |
+| PE/COFF | machine, subsystem, imports, API baseline, CRT/STL, PDB path | Compatibility with all Windows versions |
+| Mach-O | CPU, min OS, load dylib/framework, RPATH, signature | Runtime behavior of all SDK symbols |
 
-linker alias 可在成功后自动调用轻量 verifier；rcc verify 可独立运行。验证失败时，即使静态 LLD entry 返回 0，RCC alias 仍返回失败。
+The linker alias can automatically invoke a lightweight verifier after success;
+rcc verify can run independently. On a validation failure, even if the static LLD
+entry returns 0, the RCC alias still returns failure.
 
-### 11.2 Native 层可复现性
+### 11.2 Native-layer reproducibility
 
-- pack、profile、SDK identity 和 overlay digest 固定；
-- archive 使用 deterministic mode；
-- response file、tool path 和搜索路径稳定；
-- 支持 path remapping 与 SOURCE_DATE_EPOCH；
-- 不把随机 materialization path 写入产物；
-- 两次相同 native invocation 的差异必须可解释。
+- Pack, profile, SDK identity, and overlay digests are fixed;
+- Archives use deterministic mode;
+- Response files, tool paths, and search paths are stable;
+- Supports path remapping and SOURCE_DATE_EPOCH;
+- Does not write random materialization paths into artifacts;
+- The differences between two identical native invocations must be explainable.
 
-RCC 只能承诺 native invocation 层。外部 Cargo/build script、生成器、网络和源码依赖的可复现性不属于 RCC core。
+RCC can only promise the native invocation layer. The reproducibility of external
+Cargo/build scripts, generators, the network, and source dependencies is not part
+of the RCC core.
 
-## 12. 安全、供应链与许可证
+## 12. Security, supply chain, and licensing
 
-### 12.1 威胁模型
+### 12.1 Threat model
 
-- 信任官方签名发行物，不信任损坏 archive、共享可写 cache 和未登记 SDK/overlay。
-- hash 用于完整性；远程扩展 pack 还需要签名、版本、回滚和过期策略。
-- multicall alias 不继承会改变 toolchain 搜索的环境变量。
-- view manifest 与 alias 必须位于同一受保护 identity 目录。外层 RCC/发行签名只作为静态 engine 与 resource pack 的 trust anchor；运行时 view 由内容寻址组合验证。
-- cache 完整性校验用于发现损坏，不承诺抵御拥有同一用户权限的恶意 workspace；强隔离需要不同用户、只读挂载或 OS sandbox。
-- 外部源码和构建系统不受 RCC 信任，也不受 RCC 沙箱保护。
+- Trust officially signed distributions; do not trust corrupted archives, a
+  shared writable cache, or unregistered SDK/overlay.
+- Hashes are used for integrity; remote extension packs additionally need
+  signing, versioning, rollback, and expiration policies.
+- Multicall aliases do not inherit environment variables that would change the
+  toolchain search.
+- The view manifest and the alias must be in the same protected identity
+  directory. The outer RCC/distributor signature serves only as the trust anchor
+  for the static engine and resource packs; the runtime view is verified by
+  content-addressed composition.
+- Cache integrity checks are for detecting corruption and do not promise defense
+  against a malicious workspace holding the same user's permissions; strong
+  isolation requires a different user, a read-only mount, or an OS sandbox.
+- External source and build systems are not trusted by RCC and are not protected
+  by an RCC sandbox.
 
-### 12.2 发布要求
+### 12.2 Release requirements
 
-- static engine 与每个 resource pack 都有 schema/build ID、digest、上游 source archive、commit、补丁、完整 CMake 参数和可重建说明。
-- 每个 host 发行物生成 SPDX 或 CycloneDX SBOM。
-- rcc licenses 可离线输出 Rust controller crates、LLVM、libc、MinGW、GCC runtime、libc++ 和其他实际嵌入文件的 notice。
-- LLVM 组件保留 Apache-2.0 WITH LLVM-exception notice。
-- glibc、libstdc++、MinGW-w64 及 Runtime Library Exception 必须逐文件审查。
-- Apple SDK、完整 Windows SDK、MSVC Toolset 不进入 RCC 发布包。
-- 最终 RCC executable 进入签名、notarization/Authenticode 和恶意软件扫描流程；cache aliases 必须验证与这一 controller 相同的内容 digest/签名身份。
-- LLVM/Clang/LLD CVE 以 engine/controller release 为升级单位，sysroot/runtime CVE 以 resource pack 为升级单位；controller schema、engine build ID 与 pack revision 相互解耦并共同进入 toolchain identity。
+- The static engine and each resource pack have a schema/build ID, digest,
+  upstream source archive, commit, patches, full CMake arguments, and rebuild
+  instructions.
+- Each host distribution generates an SPDX or CycloneDX SBOM.
+- rcc licenses can offline-emit the notices for the Rust controller crates, LLVM,
+  libc, MinGW, GCC runtime, libc++, and other actually embedded files.
+- LLVM components retain the Apache-2.0 WITH LLVM-exception notice.
+- glibc, libstdc++, MinGW-w64, and the Runtime Library Exception must be reviewed
+  file by file.
+- The Apple SDK, the full Windows SDK, and the MSVC Toolset do not enter the RCC
+  release package.
+- The final RCC executable goes through signing, notarization/Authenticode, and
+  malware scanning; cache aliases must verify the same content digest/signature
+  identity as this controller.
+- LLVM/Clang/LLD CVEs are upgraded at the granularity of an engine/controller
+  release, and sysroot/runtime CVEs at the granularity of a resource pack; the
+  controller schema, engine build ID, and pack revision are decoupled from each
+  other and jointly enter the toolchain identity.
 
-> [!CAUTION] 法务是发布 gate
-> 上游项目的根许可证不能代表最终 sysroot 中每个 header、runtime 和 stub。发布判定必须基于实际嵌入文件清单。
+> [!CAUTION] Legal is a release gate
+> An upstream project's root license cannot represent every header, runtime, and
+> stub in the final sysroot. The release decision must be based on the actual
+> embedded file inventory.
 
-## 13. 失败与诊断策略
+## 13. Failure and diagnostics strategy
 
-RCC 默认 fail closed：
+RCC defaults to fail closed:
 
-- profile 不存在或不受当前 host 支持：失败；
-- pack/view digest 不匹配：失败并隔离损坏缓存；
-- required SDK/Toolset provider 缺失：失败；
-- host toolchain 路径或污染环境被发现：失败；
-- runtime ownership 不完整或重复：失败；
-- overlay target/ABI 不匹配：失败；
-- linker、sysroot、resource-dir 被覆盖：失败；
-- verifier 发现格式、ABI 或动态依赖错误：失败；
-- 不存在任何系统 toolchain fallback。
+- The profile does not exist or is not supported on the current host: fail;
+- A pack/view digest does not match: fail and quarantine the corrupted cache;
+- A required SDK/Toolset provider is missing: fail;
+- A host toolchain path or a polluted environment is discovered: fail;
+- Runtime ownership is incomplete or duplicated: fail;
+- The overlay target/ABI does not match: fail;
+- The linker, sysroot, or resource-dir is overridden: fail;
+- The verifier finds a format, ABI, or dynamic dependency error: fail;
+- No system toolchain fallback exists.
 
-诊断应包含：
+Diagnostics should include:
 
-- 稳定错误码和失败阶段；
-- host/profile/toolchain identity；
-- controller/alias executable path、digest、engine build ID 与静态 entry；
-- include/library 搜索目录；
-- runtime ownership 决议；
-- external SDK/overlay 来源；
-- 脱敏后的原始参数和规范化参数；
-- response file 保存位置；
-- 最小修复建议。
+- A stable error code and the failed stage;
+- The host/profile/toolchain identity;
+- The controller/alias executable path, digest, engine build ID, and static
+  entry;
+- The include/library search directories;
+- The runtime ownership resolution;
+- The external SDK/overlay provenance;
+- The redacted raw arguments and normalized arguments;
+- The save location of response files;
+- A minimal fix suggestion.
 
-rcc doctor 应执行：
+rcc doctor should perform:
 
-- payload/cache 完整性；
-- 静态 engine entries、自重执行 alias 和 host runtime closure；
-- C、C++、integrated assembly、archive、link smoke test；
-- sysroot header/library 查询；
-- SDK/Toolset provider 验证；
-- 环境污染负面测试；
-- 产物 verifier；
-- trace process tree，确认 compiler/linker/binutils 阶段全部由同一 RCC controller 的 view aliases 承担。
+- Payload/cache integrity;
+- The static engine entries, the self-reexec aliases, and the host runtime
+  closure;
+- C, C++, integrated assembly, archive, and link smoke tests;
+- Sysroot header/library queries;
+- SDK/Toolset provider validation;
+- Environment pollution negative tests;
+- The artifact verifier;
+- A process-tree trace, confirming that all compiler/linker/binutils stages are
+  handled by the view aliases of the same RCC controller.
 
-## 14. 性能与运维
+## 14. Performance and operations
 
-- LLVM static engine 与 sysroot/runtime 在 release pipeline 预构建，不在用户项目构建中重建。
-- 分块压缩和 lazy materialization，只展开请求 profile。
-- view path 对相同 identity 稳定，避免消费者无意义重建。
-- controller blob 按 SHA-256 只保存一次；每个 view 用 hardlink alias，不重复复制大 binary。
-- cache 版本并存，GC 只删除无活动锁且满足保留策略的 view。
-- SDK 注册时建立完整文件 manifest/Merkle identity，或验证供应商签名 receipt 后为所有可消费文件建立可信映射。
-- 每次 invocation 记录实际读取的 SDK header、TBD 和 library digest；抽样只用于快速健康检查，不能作为最终 identity 或可复现性证据。
-- Windows 评估自解包、hardlink alias、Authenticode 与杀毒误报。
-- macOS 评估 controller 签名、hardlink identity、quarantine、首次运行和 cache execute policy。
-- full edition 的压缩体积、首次展开时间、磁盘峰值是 Phase 0 发布门槛。
+- The LLVM static engine and the sysroot/runtime are pre-built in the release
+  pipeline, not rebuilt during a user's project build.
+- Chunk compression and lazy materialization expand only the requested profile.
+- The view path is stable for the same identity, avoiding meaningless rebuilds by
+  consumers.
+- The controller blob is stored once by SHA-256; each view uses a hardlink alias
+  and does not duplicate the large binary.
+- Cache versions coexist, and GC only deletes views that have no active lock and
+  satisfy the retention policy.
+- At SDK registration, build a full file manifest/Merkle identity, or, after
+  validating a vendor-signed receipt, establish a trusted mapping for all
+  consumable files.
+- Each invocation records the digest of the SDK headers, TBD, and libraries
+  actually read; sampling is only for a quick health check and cannot serve as
+  the final identity or as reproducibility evidence.
+- Windows evaluates self-extraction, hardlink aliases, Authenticode, and
+  antivirus false positives.
+- macOS evaluates controller signing, hardlink identity, quarantine, first run,
+  and cache execute policy.
+- The compressed size, first-expansion time, and disk peak of the full edition
+  are Phase 0 release gates.
 
-## 15. 路线图
+## 15. Roadmap
 
-### Phase 0：风险验证与规格冻结
+### Phase 0: Risk validation and spec freeze
 
-- [ ] 冻结 RCC core 与 Cargo adapter 的边界，core 不启动 Cargo/rustc。
-- [ ] 证明裁剪、静态集成的 Clang/LLD/LLVM entries 在 Linux、Windows、macOS host 可重定位。
-- [ ] 证明最终 RCC 不依赖共享 LLVM dylib、系统 libstdc++ 或开发 toolchain，且没有独立 compiler/linker executable payload。
-- [ ] 制作 musl、glibc 2.17、MinGW 三个可再分发 sysroot 原型。
-- [ ] 定义 ToolchainProfile、HostNativeProfile、RuntimeOwnership 和 ViewManifest schema。
-- [ ] 冻结 HostNativeProfile 支持矩阵和 Windows host ABI 显式选择规则。
-- [ ] 验证 profile-bound controller hardlink aliases 在 Unix/Windows 的 executable-path、签名和 argv[0] 契约。
-- [ ] 验证 Hermetic driver 能阻断 GCC 探测、PATH linker 和环境路径污染。
-- [ ] 在 macOS 用 RCC Clang/ld64.lld + external SDK 完成双架构 fixture。
-- [ ] 完成 LLVM、glibc、libstdc++、MinGW、Apple、Microsoft 的许可证 gate。
-- [ ] 测量每个 full host binary 的体积、展开耗时、磁盘和签名影响。
+- [ ] Freeze the boundary between the RCC core and the Cargo adapter; the core
+  does not launch Cargo/rustc.
+- [ ] Prove that the trimmed, statically integrated Clang/LLD/LLVM entries are
+  relocatable on Linux, Windows, and macOS hosts.
+- [ ] Prove that the final RCC does not depend on a shared LLVM dylib, the system
+  libstdc++, or a developer toolchain, and has no separate
+  compiler/linker executable payload.
+- [ ] Produce three redistributable sysroot prototypes: musl, glibc 2.17, and
+  MinGW.
+- [ ] Define the ToolchainProfile, HostNativeProfile, RuntimeOwnership, and
+  ViewManifest schemas.
+- [ ] Freeze the HostNativeProfile support matrix and the explicit-selection
+  rules for the Windows host ABI.
+- [ ] Validate the executable-path, signing, and argv[0] contracts of
+  profile-bound controller hardlink aliases on Unix/Windows.
+- [ ] Validate that the Hermetic driver can block GCC probing, the PATH linker,
+  and environment path pollution.
+- [ ] Complete a dual-architecture fixture on macOS using RCC Clang/ld64.lld +
+  external SDK.
+- [ ] Complete the license gate for LLVM, glibc, libstdc++, MinGW, Apple, and
+  Microsoft.
+- [ ] Measure the size, expansion time, disk, and signing impact of each full
+  host binary.
 
-### Phase 1：MVP Native Provider
+### Phase 1: MVP Native Provider
 
-- [x] Rust controller、profile registry、pack materializer、immutable view。
-- [x] rcc print/env/cc/cxx/ar/ranlib/link/sysroot/doctor/verify/cache/licenses。
-- [x] macOS AArch64 / Linux x86_64 / Windows x86_64-msvc static engine 已交付。macOS x86_64 / Linux AArch64 / Windows AArch64 的 build.rs 与发布脚本已接线（后两者须在匹配 arch 的 host 上编）。
-- [x] 首批 Rust target 的最小 versioned consumer contract、host+target Cargo/cc-rs 配置输出；只输出，不启动 Cargo。
-- [x] Linux x86_64/AArch64 musl 与固定 glibc profile。
-- [x] Windows x86_64 GNU/MinGW 与 gnullvm x86_64/AArch64。
-- [x] macOS host 的 x86_64/AArch64 Apple SDK provider。
-- [x] C/C++ STL、exception、RTTI、integrated assembly、static/shared/executable fixture。
-- [x] ELF、PE/COFF、Mach-O verifier。
-- [x] 负面测试证明正式路径零系统 compiler/linker/binutils。
+- [x] Rust controller, profile registry, pack materializer, immutable view.
+- [x] rcc print/env/cc/cxx/ar/ranlib/link/sysroot/doctor/verify/cache/licenses.
+- [x] macOS AArch64 / Linux x86_64 / Windows x86_64-msvc static engines are
+  delivered. The build.rs and release scripts for macOS x86_64 / Linux AArch64 /
+  Windows AArch64 are wired up (the latter two must be built on a host of the
+  matching arch).
+- [x] Minimal versioned consumer contracts for the initial Rust targets, and
+  host+target Cargo/cc-rs configuration output; output only, does not launch
+  Cargo.
+- [x] Linux x86_64/AArch64 musl and fixed glibc profiles.
+- [x] Windows x86_64 GNU/MinGW and gnullvm x86_64/AArch64.
+- [x] Apple SDK provider for x86_64/AArch64 on macOS hosts.
+- [x] C/C++ STL, exception, RTTI, integrated assembly, and
+  static/shared/executable fixtures.
+- [x] ELF, PE/COFF, and Mach-O verifiers.
+- [x] Negative tests proving zero system compiler/linker/binutils on the official
+  path.
 
-### Phase 2：消费者契约扩展与第二批 Profile
+### Phase 2: Consumer contract extension and the second batch of profiles
 
-- [x] 扩展 Rust consumer contract 的 rustc 版本范围、gnullvm profile 与负面兼容矩阵。
-- [x] 扩展 Cargo/cc-rs 配置格式和 diagnostics；仍不启动 Cargo。
-- [x] CMake toolchain 和 pkg-config metadata 输出；不携带 build tool binary。
-- [x] Windows gnullvm x86_64/AArch64。
-- [x] Linux AArch64、macOS x86_64、Windows AArch64 host 发行脚本（在对应机器上 `mise release`）。
-- [ ] sysroot overlay manifest 和派生 profile。
+- [x] Extend the Rust consumer contract's rustc version range, the gnullvm
+  profile, and the negative compatibility matrix.
+- [x] Extend the Cargo/cc-rs configuration formats and diagnostics; still does
+  not launch Cargo.
+- [x] CMake toolchain and pkg-config metadata output; does not carry build-tool
+  binaries.
+- [x] Windows gnullvm x86_64/AArch64.
+- [x] Release scripts for the Linux AArch64, macOS x86_64, and Windows AArch64
+  hosts (`mise release` on the corresponding machine).
+- [ ] Sysroot overlay manifest and derived profiles.
 
-### Phase 3：专有 SDK 与生态扩展
+### Phase 3: Proprietary SDK and ecosystem extension
 
-- [x] Windows SDK Provider 与 MSVC Toolset Provider。
-- [x] clang-cl/lld-link/MSVC ABI fixture（`windows-x86_64-msvc`；`windows-aarch64-msvc` 已注册）。
-- [ ] macOS universal2 工具与 ad-hoc signature 复验。
-- [ ] 评估独立 libclang pack；不自动并入 RCC core。
-- [ ] 评估签名 remote pack 和 slim edition，不改变 full edition 离线承诺。
+- [x] Windows SDK Provider and MSVC Toolset Provider.
+- [x] clang-cl/lld-link/MSVC ABI fixture (`windows-x86_64-msvc`;
+  `windows-aarch64-msvc` is registered).
+- [ ] macOS universal2 tooling and ad-hoc signature re-validation.
+- [ ] Evaluate a standalone libclang pack; not automatically merged into the RCC
+  core.
+- [ ] Evaluate signed remote packs and a slim edition, without changing the full
+  edition's offline promise.
 
-### Phase 4：成熟度
+### Phase 4: Maturity
 
-- [ ] 更多 host arch 和有限、固定的新 ABI baseline。
-- [ ] 长期 CVE、SBOM、source offer 与可复现 pack 自动化。
-- [ ] 基于真实消费者失败数据扩展查询兼容和 diagnostics。
-- [ ] 保持 native provider 边界，不演变为通用构建系统或包管理器。
+- [ ] More host arches and limited, fixed new ABI baselines.
+- [ ] Long-term automation for CVEs, SBOM, source offer, and reproducible packs.
+- [ ] Extend query compatibility and diagnostics based on real consumer-failure
+  data.
+- [ ] Keep the native-provider boundary and do not evolve into a general build
+  system or package manager.
 
-## 16. 测试与验收门槛
+## 16. Testing and acceptance gates
 
-CI 按 host × profile × capability 建矩阵：
+CI builds a matrix of host × profile × capability:
 
-| 维度 | 最低覆盖 |
+| Dimension | Minimum coverage |
 |---|---|
-| Host startup | bare host 启动，无系统 Clang/GCC/VS Build Tools |
-| C/C++ | C、C++ STL、exception、RTTI、templates |
-| Assembly | Clang integrated assembler 的 .s/.S |
-| Archive/link | static archive、shared library、executable、response files |
-| Profile | Linux glibc/musl x86_64+AArch64、Windows GNU/gnullvm/MSVC、macOS 双架构 |
-| Runtime | static/dynamic closure、loader、libgcc/libstdc++/unwind/winpthreads 策略 |
-| Artifact | ELF、PE、Mach-O metadata 和最低 ABI/OS |
-| Runtime test | 真实目标机；编译宿主一般不执行交叉产物（Windows 不跑 ELF/Mach-O，Linux 不跑 Mach-O）。补充：Linux qemu/Lima、x64 PE wine64、Mach-O Darwin（含 Rosetta）。`RCC_REQUIRE_RUNTIME=1` 无执行器则失败 |
-| Negative | host GCC 探测、PATH linker、污染环境、错误 SDK、ABI 混用、overlay 提升 baseline |
-| Operations | 并发展开、中断恢复、cache 损坏、版本并存、离线、只读安装目录 |
-| Integration | hardlink alias path、query flags、host+target env、Rust split-runtime fixture |
+| Host startup | bare host startup, no system Clang/GCC/VS Build Tools |
+| C/C++ | C, C++ STL, exception, RTTI, templates |
+| Assembly | .s/.S for the Clang integrated assembler |
+| Archive/link | static archive, shared library, executable, response files |
+| Profile | Linux glibc/musl x86_64+AArch64, Windows GNU/gnullvm/MSVC, macOS dual-architecture |
+| Runtime | static/dynamic closure, loader, libgcc/libstdc++/unwind/winpthreads policy |
+| Artifact | ELF, PE, Mach-O metadata and minimum ABI/OS |
+| Runtime test | Real target machines; the build host generally does not execute cross artifacts (Windows does not run ELF/Mach-O, Linux does not run Mach-O). Supplements: Linux qemu/Lima, x64 PE wine64, Mach-O Darwin (including Rosetta). `RCC_REQUIRE_RUNTIME=1` fails when there is no executor |
+| Negative | host GCC probing, PATH linker, polluted environment, wrong SDK, ABI mixing, overlay raising the baseline |
+| Operations | concurrent expansion, interruption recovery, cache corruption, version coexistence, offline, read-only install directory |
+| Integration | hardlink alias path, query flags, host+target env, Rust split-runtime fixture |
 
-MVP 达标条件：
+MVP acceptance conditions:
 
-1. 受支持 host 未安装 Zig、Clang、GCC、binutils 或交叉 C/C++ toolchain。
-2. 只安装对应 RCC executable；Managed SDK profile 允许存在合法 SDK 数据。
-3. 首次运行可离线物化内嵌 profile。
-4. 直接 C/C++ fixture 可完成编译、归档、链接和验证。
-5. process trace 中所有 compiler/linker/binutils 阶段均由同一 controller digest 的 RCC view aliases 执行，不出现 payload child tool 或系统工具。
-6. Linux/Windows Hermetic profile 产物在真实 baseline 环境运行。
-7. macOS profile 只使用 external SDK 数据与 RCC 工具，不调用 Xcode clang/ld/codesign。
-8. 外部 Rust integration fixture 能分别使用 host 与 target aliases，且 runtime ownership 无重复。
+1. The supported host has no Zig, Clang, GCC, binutils, or cross C/C++ toolchain
+   installed.
+2. Only the corresponding RCC executable is installed; Managed SDK profiles are
+   allowed to have legal SDK data present.
+3. First run can materialize the embedded profiles offline.
+4. A direct C/C++ fixture can complete compile, archive, link, and validation.
+5. All compiler/linker/binutils stages in the process trace are executed by the
+   RCC view aliases of the same controller digest, with no payload child tool or
+   system tool appearing.
+6. Linux/Windows Hermetic profile artifacts run in a real baseline environment.
+7. The macOS profile uses only external SDK data and RCC tools, and does not
+   invoke Xcode clang/ld/codesign.
+8. The external Rust integration fixture can use the host and target aliases
+   separately, with no duplication of runtime ownership.
 
-## 17. 主要风险
+## 17. Major risks
 
-| 风险 | 严重度 | 缓解 |
+| Risk | Severity | Mitigation |
 |---|:---:|---|
-| Apple SDK 许可阻断任意 host 到 macOS 自包含 | 阻断级 | 正式支持限 macOS host，SDK provider，不再分发 |
-| LLVM + 多 sysroot 使单文件达到数百 MB 以上 | 高 | backend 裁剪、分块压缩、实测 gate；full/slim 明确分 SKU |
-| 静态 LLVM entry 与上游 CLI source/API 变动 | 高 | 固定 source SHA/commit；薄 C ABI bridge；升级时编译、行为与 fixture 全量 gate |
-| hardlink alias 权限或平台签名语义不一致 | 中高 | controller 单独内容寻址；禁止修改共享 inode 权限；逐 host 验证，必要时显式 clone/copy fallback |
-| Clang 隐式 GCC/环境搜索破坏 hermeticity | 高 | driver policy、环境清理、绝对路径、进程 trace |
-| Host 原生依赖回落系统工具 | 高 | HostNativeProfile、双上下文配置、负面测试 |
-| rustc self-contained CRT 与 RCC runtime 重复 | 高 | RuntimeOwnership + versioned Rust consumer contract |
-| C++ ABI/CRT/exception runtime 混用 | 高 | 完整 profile、禁止跨 profile、runtime closure verifier |
-| Windows GNU/gnullvm/MSVC 生态分裂 | 高 | 独立 profile 和 fixture，不承诺 ABI 互换 |
-| ld64.lld/framework/signature 边缘兼容 | 中高 | SDK/profile fixture；失败即 unsupported，无系统 ld fallback |
-| arbitrary build script 硬编码系统工具 | 高 | 明确保证边界；由外部 adapter/沙箱处理 |
-| 最低 OS 仅靠静态分析无法完全证明 | 中高 | metadata verifier + 真实 baseline runner |
-| 许可证、source offer、CVE 长期维护 | 持续 | SBOM、逐文件审查、pack 独立升级 |
+| Apple SDK licensing blocks self-contained any-host to macOS | Blocker | Official support limited to macOS hosts, SDK provider, no redistribution |
+| LLVM + multiple sysroots push the single file to hundreds of MB or more | High | Backend trimming, chunk compression, measured gate; full/slim as distinct SKUs |
+| Static LLVM entry vs. upstream CLI source/API changes | High | Pin source SHA/commit; thin C ABI bridge; full compile/behavior/fixture gate on upgrade |
+| Inconsistent hardlink alias permission or platform signing semantics | Medium-high | Content-address the controller separately; forbid modifying shared inode permissions; validate per host, with explicit clone/copy fallback when necessary |
+| Clang's implicit GCC/environment search breaks hermeticity | High | Driver policy, environment cleaning, absolute paths, process trace |
+| Host-native dependencies fall back to system tools | High | HostNativeProfile, dual-context configuration, negative tests |
+| rustc self-contained CRT duplicates the RCC runtime | High | RuntimeOwnership + versioned Rust consumer contract |
+| C++ ABI/CRT/exception runtime mixing | High | Full profiles, forbid cross-profile, runtime closure verifier |
+| Windows GNU/gnullvm/MSVC ecosystem fragmentation | High | Independent profiles and fixtures; no ABI interchange promised |
+| ld64.lld/framework/signature edge compatibility | Medium-high | SDK/profile fixtures; unsupported on failure, no system ld fallback |
+| Arbitrary build scripts hard-code system tools | High | Explicit guarantee boundary; handled by external adapter/sandbox |
+| Minimum OS cannot be fully proven by static analysis alone | Medium-high | metadata verifier + real baseline runner |
+| Long-term maintenance of licenses, source offer, and CVEs | Ongoing | SBOM, file-by-file review, independent pack upgrades |
 
-## 18. 已采纳的架构决策
+## 18. Adopted architecture decisions
 
-| ID | 决策 | 原因 |
+| ID | Decision | Rationale |
 |---|---|---|
-| D1 | RCC 是 native provider，不是 Cargo wrapper | 符合最终范围，避免承担 Rust 构建系统职责 |
-| D2 | 控制层用 Rust，经过裁剪的 Clang/LLD/llvm-ar 作为静态组件经 C ABI bridge 接入 | 不重写成熟 compiler/linker，同时允许 source-level 定制与 dead stripping |
-| D3 | 不包含、调用或 fork Zig | 产品边界清晰，避免 Zig frontend/runtime 耦合 |
-| D4 | 不分发 Cargo、rustc、rust-std | Rust toolchain 由外部消费者负责 |
-| D5 | 正式路径不使用系统 C/C++ toolchain fallback | 保证 host 无关、可审计和可复现 |
-| D6 | 每个 host 一个静态 multicall 单文件，运行时只物化资源与 controller hardlink aliases | 兼顾一个 physical tool binary、安装体验与真实 tool path |
-| D7 | 只支持 registry 中完整、有限的 profile | triple 无法表达 libc、CRT、C++ ABI、SDK 与 baseline |
-| D8 | HostNativeProfile 与 target profile 分离 | 防止 host 原生依赖误用 target 或系统工具 |
-| D9 | runtime ownership 是显式 contract | 避免 rustc/self-contained/runtime 重复和 ABI 混用 |
-| D10 | Apple developer data、Windows SDK、MSVC Toolset 使用 external provider | 避免专有 SDK 再分发风险 |
-| D11 | public API 以 executable path + versioned manifest 为核心 | 兼容 Cargo、cc-rs、CMake 等消费者 |
-| D12 | 基础发行物不内嵌 CMake/libclang 等 build tools | 保持 C/C++ compile/link/sysroot/runtime 边界 |
-| D13 | 不提供系统 linker 调试 override | 保证 RCC 成功即代表受支持路径 |
-| D14 | 官方 LLVM binary archive 只作 bootstrap/resource 来源，engine 从固定 source archive 构建 | 可审计地裁剪 target、flavor 与可选依赖，不把三份完整工具塞进 payload |
+| D1 | RCC is a native provider, not a Cargo wrapper | Matches the final scope and avoids taking on Rust build-system responsibilities |
+| D2 | The control layer uses Rust; trimmed Clang/LLD/llvm-ar are brought in as static components via a C ABI bridge | Does not rewrite a mature compiler/linker while allowing source-level customization and dead stripping |
+| D3 | Does not include, invoke, or fork Zig | Clear product boundary, avoids coupling to the Zig frontend/runtime |
+| D4 | Does not distribute Cargo, rustc, or rust-std | The Rust toolchain is the external consumer's responsibility |
+| D5 | The official path does not use a system C/C++ toolchain fallback | Guarantees host-independence, auditability, and reproducibility |
+| D6 | One static multicall single file per host; at runtime only resources and controller hardlink aliases are materialized | Balances a single physical tool binary, the install experience, and real tool paths |
+| D7 | Supports only the complete, finite profiles in the registry | A triple cannot express libc, CRT, C++ ABI, SDK, and baseline |
+| D8 | HostNativeProfile is separated from the target profile | Prevents host-native dependencies from misusing the target or system tools |
+| D9 | Runtime ownership is an explicit contract | Avoids rustc/self-contained/runtime duplication and ABI mixing |
+| D10 | Apple developer data, the Windows SDK, and the MSVC Toolset use an external provider | Avoids the risk of redistributing proprietary SDKs |
+| D11 | The public API centers on executable paths + versioned manifests | Compatible with consumers such as Cargo, cc-rs, and CMake |
+| D12 | The base distribution does not embed build tools such as CMake/libclang | Keeps the C/C++ compile/link/sysroot/runtime boundary |
+| D13 | Does not provide a system linker debug override | Guarantees that RCC success means a supported path |
+| D14 | The official LLVM binary archive is only a bootstrap/resource source; the engine is built from a fixed source archive | Auditably trims target, flavor, and optional dependencies, and does not stuff three complete tools into the payload |
 
-### 18.1 未选择的方案
+### 18.1 Options not chosen
 
-- **继续使用或裁剪 Zig**：仍需维护 Zig frontend/lib tree/runtime 耦合，不符合边界。
-- **直接使用 host clang/gcc/ld**：结果随 host 漂移，无法保证 ABI baseline。
-- **把官方 clang/lld/llvm-ar executable 压进 payload**：难以 target-aware 裁剪，跨 executable 不能统一 dead-strip，增加独立 digest/签名/进程供应链；已由静态 multicall 取代。
-- **把未经裁剪的 all-target LLVM 全部静态链接进 controller**：能消除 child executable，但不能消除 resource/sysroot/tool-path；体积和升级面过大。RCC 只链接已交付 profile 所需组件并采用 one-shot entry contract。
-- **RCC 主动驱动 Cargo**：超出 native provider 范围；应由单独 adapter 消费 RCC API。
-- **把 path + flags 塞进 CC/linker 字符串**：不同构建系统解析不一致；必须提供真实 multicall alias executable。
-- **只提供容器镜像**：不满足原生 Windows/macOS 和单文件安装体验。
-- **缺资源时 fallback 系统 linker**：破坏可审计性，正式路径直接失败。
+- **Continue using or trimming Zig**: still requires maintaining coupling to the
+  Zig frontend/lib tree/runtime, which does not fit the boundary.
+- **Use the host clang/gcc/ld directly**: results drift with the host and cannot
+  guarantee an ABI baseline.
+- **Compress the official clang/lld/llvm-ar executables into the payload**: hard
+  to trim target-aware, cannot dead-strip uniformly across executables, and adds
+  separate digest/signing/process supply chains; already replaced by the static
+  multicall.
+- **Statically link an untrimmed all-target LLVM into the controller**: can
+  eliminate child executables but cannot eliminate the resource/sysroot/tool-path;
+  the size and upgrade surface are too large. RCC links only the components
+  needed by the delivered profiles and uses the one-shot entry contract.
+- **RCC proactively driving Cargo**: beyond the native-provider scope; a separate
+  adapter should consume the RCC API.
+- **Stuff path + flags into the CC/linker string**: different build systems parse
+  it inconsistently; a real multicall alias executable must be provided.
+- **Provide only a container image**: does not satisfy native Windows/macOS and
+  the single-file install experience.
+- **Fall back to the system linker when a resource is missing**: breaks
+  auditability; the official path fails directly.
 
-## 19. 实现前必须冻结的问题
+## 19. Questions that must be frozen before implementation
 
-1. 首批 host 列表、full binary 体积上限和首次物化预算。
-2. musl、glibc、MinGW-w64、GCC runtime、LLVM 的精确版本与补丁。
-3. Linux 每个 profile 的 compiler runtime、unwind 和 C++ runtime 静态/动态闭包。
-4. windows-gnu 的 UCRT/MSVCRT、exception model、winpthreads 和最低 Windows 策略。
-5. Rust consumer contract 首批支持的 target 与 link-self-contained 所有权矩阵。
-6. Windows bare-host 对 MSVC Rust host 的明确非承诺或 provider 要求。
-7. AppleDeveloperProvider 中 SDK、TBD schema、RCC libc++ headers 与可选 Xcode header source 的版本配对规则。
-8. ld64.lld 支持边界、ad-hoc signature 路径和 unsupported 判定。
-9. Hermetic driver 的参数 allow/deny 规则与 response-file 方言。
-10. overlay manifest schema 与 ABI baseline 提升策略。
-11. verifier 的静态保证与真实运行保证如何对用户表述。
-12. full edition 与未来 slim/remote-pack edition 的产品命名和兼容策略。
+1. The initial host list, the full-binary size cap, and the first-materialization
+   budget.
+2. The exact versions and patches of musl, glibc, MinGW-w64, the GCC runtime, and
+   LLVM.
+3. The static/dynamic closure of the compiler runtime, unwind, and C++ runtime
+   for each Linux profile.
+4. The UCRT/MSVCRT, exception model, winpthreads, and minimum Windows policy for
+   windows-gnu.
+5. The initially supported targets of the Rust consumer contract and the
+   link-self-contained ownership matrix.
+6. The explicit non-promise or provider requirements of a Windows bare host for an
+   MSVC Rust host.
+7. The version-pairing rules in the AppleDeveloperProvider for the SDK, the TBD
+   schema, the RCC libc++ headers, and the optional Xcode header source.
+8. The ld64.lld support boundary, the ad-hoc signature path, and the unsupported
+   determination.
+9. The Hermetic driver's argument allow/deny rules and the response-file dialect.
+10. The overlay manifest schema and the ABI baseline raising policy.
+11. How the verifier's static guarantees and real-run guarantees are phrased to
+    the user.
+12. The product naming and compatibility policy for the full edition and future
+    slim/remote-pack editions.
 
-## 20. 参考资料
+## 20. References
 
-- [cargo-zigbuild README](https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.3/README.md)：Cargo adapter、target std、环境变量、glibc 与 macOS SDK 边界。
-- [cargo-zigbuild Cargo 环境注入](https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.3/src/zig/cargo_env.rs) 与 [wrapper](https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.3/src/zig/wrapper.rs)：native tool path 与 Cargo/build script 的接入方式。
-- [Rustup Cross-compilation](https://rust-lang.github.io/rustup/cross-compilation.html)：Rust target std 与外部 linker 的职责边界。
-- [Rust Platform Support](https://doc.rust-lang.org/rustc/platform-support.html)：Rust consumer target tier 与最低平台信息。
-- [Rust linker self-contained 文档](https://doc.rust-lang.org/rustc/codegen-options/index.html#link-self-contained)：rustc 可能拥有的 CRT、libc、unwind、linker、MinGW 组件。
-- [Cargo Configuration](https://doc.rust-lang.org/cargo/reference/config.html)：外部 adapter 如何设置 target linker。
-- [cc-rs 文档](https://docs.rs/cc/latest/cc/)：target-scoped CC/CXX/AR 环境接口。
-- [Clang Toolchain](https://clang.llvm.org/docs/Toolchain.html) 与 [Cross Compilation](https://clang.llvm.org/docs/CrossCompilation.html)：完整 C/C++ toolchain 的 compiler、linker、runtime、libc、C++ library 与 sysroot 分层。
-- [Clang Driver Design](https://clang.llvm.org/docs/DriverInternals.html)：driver、toolchain selection 与子工具执行模型。
-- [LLD 文档](https://lld.llvm.org/)：ELF、PE/COFF、Mach-O linker flavors。
-- [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)：LLVM-based Windows cross toolchain 的资源组成和限制。
-- [Zig Overview](https://ziglang.org/learn/overview/#zig-is-also-a-c-compiler)：Zig 为 C 跨编译提供的 libc headers、runtime 与缓存能力，用于界定 RCC 替代范围。
-- [Xcode and Apple SDKs Agreement](https://www.apple.com/legal/sla/docs/xcode.pdf)：Apple Software 和 SDK 的使用与再分发边界。
-- [Visual Studio License Directory](https://visualstudio.microsoft.com/license-terms/) 与 [Windows SDK/EWDK terms](https://learn.microsoft.com/en-us/legal/windows-sdk/license-terms-ewdk)：Microsoft SDK/Toolset 的逐版本许可审查入口。
-- [LLVM Developer Policy](https://llvm.org/docs/DeveloperPolicy.html#copyright-license-and-patents)：LLVM 许可证信息。
-- [LLVM 22.1.8 release assets](https://github.com/llvm/llvm-project/releases/tag/llvmorg-22.1.8)：固定 source/bootstrap archive 的上游发布入口。
-- [LLVM CMake build reference](https://llvm.org/docs/CMake.html)：target backend、project、LTO 与可选依赖裁剪参数。
-- [Zig source tree](https://github.com/ziglang/zig)：单一 executable 的 Clang/LLD 集成与 multicall/self-reexec 模型参考；RCC 不包含 Zig frontend 或标准库。
+- [cargo-zigbuild README](https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.3/README.md): the Cargo adapter, target std, environment variables, and the glibc and macOS SDK boundaries.
+- [cargo-zigbuild Cargo environment injection](https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.3/src/zig/cargo_env.rs) and [wrapper](https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.3/src/zig/wrapper.rs): how native tool paths are wired into Cargo/build scripts.
+- [Rustup Cross-compilation](https://rust-lang.github.io/rustup/cross-compilation.html): the responsibility boundary between the Rust target std and the external linker.
+- [Rust Platform Support](https://doc.rust-lang.org/rustc/platform-support.html): the Rust consumer target tiers and minimum platform information.
+- [Rust linker self-contained docs](https://doc.rust-lang.org/rustc/codegen-options/index.html#link-self-contained): the CRT, libc, unwind, linker, and MinGW components that rustc may own.
+- [Cargo Configuration](https://doc.rust-lang.org/cargo/reference/config.html): how an external adapter sets the target linker.
+- [cc-rs docs](https://docs.rs/cc/latest/cc/): the target-scoped CC/CXX/AR environment interface.
+- [Clang Toolchain](https://clang.llvm.org/docs/Toolchain.html) and [Cross Compilation](https://clang.llvm.org/docs/CrossCompilation.html): the compiler, linker, runtime, libc, C++ library, and sysroot layering of a complete C/C++ toolchain.
+- [Clang Driver Design](https://clang.llvm.org/docs/DriverInternals.html): the driver, toolchain selection, and sub-tool execution model.
+- [LLD docs](https://lld.llvm.org/): the ELF, PE/COFF, and Mach-O linker flavors.
+- [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw): the resource composition and limitations of the LLVM-based Windows cross toolchain.
+- [Zig Overview](https://ziglang.org/learn/overview/#zig-is-also-a-c-compiler): the libc headers, runtime, and caching capability Zig provides for C cross-compilation, used to delineate RCC's replacement scope.
+- [Xcode and Apple SDKs Agreement](https://www.apple.com/legal/sla/docs/xcode.pdf): the use and redistribution boundary of Apple Software and SDKs.
+- [Visual Studio License Directory](https://visualstudio.microsoft.com/license-terms/) and [Windows SDK/EWDK terms](https://learn.microsoft.com/en-us/legal/windows-sdk/license-terms-ewdk): the entry points for per-version license review of the Microsoft SDK/Toolset.
+- [LLVM Developer Policy](https://llvm.org/docs/DeveloperPolicy.html#copyright-license-and-patents): LLVM license information.
+- [LLVM 22.1.8 release assets](https://github.com/llvm/llvm-project/releases/tag/llvmorg-22.1.8): the upstream release entry point for the fixed source/bootstrap archives.
+- [LLVM CMake build reference](https://llvm.org/docs/CMake.html): the target backend, project, LTO, and optional-dependency trimming parameters.
+- [Zig source tree](https://github.com/ziglang/zig): a reference for single-executable Clang/LLD integration and the multicall/self-reexec model; RCC does not include the Zig frontend or standard library.
