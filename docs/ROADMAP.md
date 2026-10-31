@@ -30,12 +30,11 @@ RCC 已越过 MVP：三份 host controller 已落地，核心控制层、profile
 
 ## 2. 剩余工作与优先级
 
-### P0 — sysroot overlay manifest 与派生 profile（进行中 / 下一步）
+### P0 — sysroot overlay manifest 与派生 profile（验收中）
 
-ARCH §9.4、§7.1、Phase 2 最后一项。当前代码中 `overlay` 仅作为被拒绝的
-`-ivfsoverlay` clang flag 出现，**overlay provider 尚未实现**。这是唯一一个
-纯控制层、可在无 LLVM engine 的 dev build 中实现并单测的剩余 MVP 级能力，
-因此定为立即启动项。目标行为：
+ARCH §9.4、§7.1、Phase 2 最后一项。overlay provider **已实现并单测**，
+增量 1–5 全部落地，增量 6（真实 compile/link 验收）已在 Linux 通过，
+Windows / macOS 交叉验收进行中（在本机交叉编译，在 MCP 远端机器运行）。目标行为：
 
 ```
 rcc sysroot register-overlay \
@@ -54,15 +53,23 @@ rcc sysroot list --profile <p>
 2. **Store / 解析**（已完成）：`crates/rcc-core/src/overlay.rs` 在
    `$RCC_HOME_DIR/overlays/<profile>/<id>.json` 持久化注册；`tree_digest` 内容
    寻址校验（拒绝符号链接），`register`/`load`/`list`。附 tempfile 单测。
-3. **View 集成**（下一步）：overlay 搜索根按查找顺序并入 view；overlay digest
-   进入 ToolchainIdentity（§5.4）、view path 与 ViewManifest。需 LLVM engine
-   做真实 compile/link 验收。
-4. **Policy**：允许并记录显式 overlay 路径（§8.1 第 8 条），仍拒绝 host system roots。
-5. **输出 / CLI**：`sysroot register-overlay` / `sysroot list`；`print`、`env`
-   输出反映 overlay roots 与 identity。与增量 3–4 一同暴露，避免暴露尚未影响
-   编译的半成品命令。
-6. **验收**：overlay fixture 的 compile/link/verify；负面测试（overlay 提升
-   baseline、路径逃逸、未注册 overlay）。
+3. **View 集成**（已完成）：`build_view_manifest_with_overlays`
+   （`crates/rcc-core/src/layout.rs`）按查找顺序将 overlay 的
+   include/library/framework roots 注入 gcc 风格 cc/cxx 参数（`-isystem` /
+   `-L` / `-iframework`+`-F`，置于 base sysroot 之前）；每个 overlay 的
+   `id@revision:tree_digest` 折叠进 ToolchainIdentity（§5.4）、view path 与
+   ViewManifest.overlay_identities。`toolchain::materialize` 加载已注册 overlay。附单测。
+4. **Policy**（已完成，无需放宽）：overlay roots 作为受信任的 injected args 注入，
+   dispatch 仅对用户显式参数做 forbidden_roots 校验，故 overlay 路径天然允许；
+   host system roots 仍被拒绝。§8.1 第 8 条由此满足，无需改动 policy。
+5. **输出 / CLI**（已完成）：`rcc sysroot register-overlay` / `sysroot list` /
+   `sysroot digest`（`crates/rcc/src/cli.rs`）。与增量 3–4 一同暴露。
+6. **验收**（Linux 已通过 / Windows·macOS 进行中）：overlay fixture 的
+   compile/run/verify。Linux `linux-x86_64-musl-static` 已通过——未注册 overlay 时
+   编译按预期失败（缺 `vendor.h`），注册后编译成功、`rcc verify` 通过、运行输出
+   `vendor_answer=42`（退出码 0）。Windows `windows-x86_64-gnu`（mingw-w64，
+   gcc 风格）在本机交叉编译并在 MCP Windows 机器运行；macOS 待办。负面测试
+   （overlay 提升 baseline、路径逃逸、未注册 overlay）由 schema/overlay 单测覆盖。
 
 冻结项 ARCH §19 #10（overlay manifest schema 与 ABI baseline 提升策略）随增量 1 落定。
 
