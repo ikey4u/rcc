@@ -12,7 +12,8 @@ as `cargo zigbuild`).
 
 Design: [docs/design/ARCH.md](docs/design/ARCH.md). Per-OS matrices:
 [macOS](docs/design/RCC_MACOS.md), [Linux](docs/design/RCC_LINUX.md),
-[Windows](docs/design/RCC_WINDOWS.md).
+[Windows](docs/design/RCC_WINDOWS.md). Delivered status and remaining work:
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Controllers and targets
 
