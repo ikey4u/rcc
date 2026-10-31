@@ -21,6 +21,6 @@ pub use environment::{
     CMAKE_TOOLCHAIN_FILE_NAME, ENVIRONMENT_SCHEMA_VERSION,
 };
 pub use schema::{
-    launcher_name, DriverKind, PackManifest, Profile, RuntimeContract,
-    RuntimeOwnership, ToolKind, ViewManifest,
+    launcher_name, DriverKind, OverlayManifest, PackManifest, Profile,
+    RuntimeContract, RuntimeOwnership, ToolKind, ViewManifest,
 };

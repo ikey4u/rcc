@@ -295,6 +295,141 @@ pub fn launcher_name(profile: &Profile, kind: ToolKind) -> String {
     }
 }
 
+/// An explicit, immutable sysroot overlay layered on top of a base target
+/// profile (ARCH §3.1 Overlay, §9.4). An overlay only *adds* target headers,
+/// libraries, and frameworks; it must never raise the profile's ABI baseline.
+/// Its identity enters the ToolchainIdentity so a view built with an overlay is
+/// distinct from one without.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverlayManifest {
+    pub schema_version: u32,
+    pub overlay_id: String,
+    /// The base target profile this overlay extends.
+    pub profile_id: String,
+    /// Monotonic revision of the overlay definition.
+    pub revision: u32,
+    pub description: Option<String>,
+    /// Target triple the overlay content is built for; must equal the base
+    /// profile's `target_triple`.
+    pub target_triple: String,
+    /// Optional ABI baseline declarations. When present they must not exceed
+    /// the base profile's baseline (checked in [`OverlayManifest::verify_compatible`]).
+    pub libc_family: Option<String>,
+    pub libc_version: Option<String>,
+    pub minimum_os: Option<String>,
+    /// Search roots the overlay contributes, relative to the overlay root
+    /// directory, highest precedence first.
+    pub include_roots: Vec<String>,
+    pub library_roots: Vec<String>,
+    pub framework_roots: Vec<String>,
+    /// SHA-256 over the overlay's materialized file manifest; binds the
+    /// registered content to this definition.
+    pub tree_digest: String,
+}
+
+impl OverlayManifest {
+    /// Validate the overlay definition in isolation: well-formed identity,
+    /// baseline declarations, portable relative search roots, and a canonical
+    /// content digest. Compatibility with a specific base profile is a separate
+    /// cross-object check, [`OverlayManifest::verify_compatible`].
+    pub fn validate(&self) -> ValidationResult {
+        validate_schema_version(self.schema_version)?;
+        validate_id("overlay_id", &self.overlay_id)?;
+        validate_id("profile_id", &self.profile_id)?;
+        validate_triple(&self.target_triple)?;
+        if let Some(description) = &self.description {
+            validate_nonempty("description", description)?;
+        }
+        if let Some(family) = &self.libc_family {
+            validate_nonempty("libc_family", family)?;
+        }
+        validate_optional_version(
+            "libc_version",
+            self.libc_version.as_deref(),
+        )?;
+        validate_optional_version("minimum_os", self.minimum_os.as_deref())?;
+        if self.libc_version.is_some() && self.libc_family.is_none() {
+            return invalid("overlay libc_version requires libc_family");
+        }
+        validate_unique_strings("include_roots", &self.include_roots)?;
+        validate_unique_strings("library_roots", &self.library_roots)?;
+        validate_unique_strings("framework_roots", &self.framework_roots)?;
+        for root in self
+            .include_roots
+            .iter()
+            .chain(self.library_roots.iter())
+            .chain(self.framework_roots.iter())
+        {
+            validate_pack_path(root)?;
+        }
+        if self.include_roots.is_empty()
+            && self.library_roots.is_empty()
+            && self.framework_roots.is_empty()
+        {
+            return invalid(
+                "an overlay must contribute at least one search root",
+            );
+        }
+        validate_sha256("tree_digest", &self.tree_digest)?;
+        Ok(())
+    }
+
+    /// Check this overlay against the base profile it extends. The overlay must
+    /// bind to that profile's triple and must not raise its ABI baseline: a
+    /// newer `minimum_os` or `libc_version` would promote the baseline and is
+    /// rejected (ARCH §16 negative test "overlay 提升 baseline").
+    pub fn verify_compatible(&self, base: &Profile) -> ValidationResult {
+        if self.profile_id != base.profile_id {
+            return invalid(format!(
+                "overlay targets profile {} but was checked against {}",
+                self.profile_id, base.profile_id
+            ));
+        }
+        if self.target_triple != base.target_triple {
+            return invalid(
+                "overlay target_triple does not match the base profile",
+            );
+        }
+        if let Some(family) = &self.libc_family {
+            if family != &base.libc_family {
+                return invalid(
+                    "overlay libc_family does not match the base profile",
+                );
+            }
+        }
+        if let Some(version) = &self.libc_version {
+            match base.libc_version.as_deref() {
+                Some(base_version) if version_le(version, base_version) => {}
+                Some(_) => {
+                    return invalid(
+                        "overlay libc_version exceeds the base profile baseline",
+                    )
+                }
+                None => {
+                    return invalid(
+                        "overlay declares libc_version but the base profile has none",
+                    )
+                }
+            }
+        }
+        if let Some(min_os) = &self.minimum_os {
+            match base.minimum_os.as_deref() {
+                Some(base_min) if version_le(min_os, base_min) => {}
+                Some(_) => {
+                    return invalid(
+                        "overlay minimum_os exceeds the base profile baseline",
+                    )
+                }
+                None => return invalid(
+                    "overlay declares minimum_os but the base profile has none",
+                ),
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeContract {
@@ -788,6 +923,30 @@ fn is_absolute_like(value: &str) -> bool {
             && matches!(value.as_bytes()[2], b'/' | b'\\'))
 }
 
+/// Compare two dotted numeric versions (as accepted by
+/// [`validate_optional_version`]) component-wise, treating a missing trailing
+/// component as zero. Returns whether `lhs <= rhs`.
+fn version_le(lhs: &str, rhs: &str) -> bool {
+    let mut left = lhs.split('.');
+    let mut right = rhs.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (left_component, right_component) => {
+                let left_value: u64 = left_component
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                let right_value: u64 = right_component
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                if left_value != right_value {
+                    return left_value < right_value;
+                }
+            }
+        }
+    }
+}
+
 fn path_is_within(root: &str, child: &str) -> bool {
     let normalize =
         |value: &str| value.replace('\\', "/").trim_end_matches('/').to_owned();
@@ -850,6 +1009,99 @@ mod tests {
             framework_roots: Vec::new(),
             forbidden_roots: vec!["/usr/include".into(), "/usr/lib".into()],
         }
+    }
+
+    fn overlay() -> OverlayManifest {
+        OverlayManifest {
+            schema_version: SCHEMA_VERSION,
+            overlay_id: "vendor-openssl".into(),
+            profile_id: "linux-aarch64-gnu-glibc217".into(),
+            revision: 1,
+            description: Some("vendor OpenSSL headers and libraries".into()),
+            target_triple: "aarch64-unknown-linux-gnu".into(),
+            libc_family: Some("glibc".into()),
+            libc_version: Some("2.17".into()),
+            minimum_os: Some("2.6.32".into()),
+            include_roots: vec!["include".into()],
+            library_roots: vec!["lib".into()],
+            framework_roots: Vec::new(),
+            tree_digest: HASH.into(),
+        }
+    }
+
+    #[test]
+    fn overlay_accepts_a_valid_definition() {
+        let overlay = overlay();
+        assert!(overlay.validate().is_ok());
+        assert!(overlay.verify_compatible(&profile()).is_ok());
+    }
+
+    #[test]
+    fn overlay_requires_at_least_one_search_root() {
+        let mut overlay = overlay();
+        overlay.include_roots.clear();
+        overlay.library_roots.clear();
+        overlay.framework_roots.clear();
+        assert!(overlay.validate().is_err());
+    }
+
+    #[test]
+    fn overlay_rejects_unsafe_search_roots() {
+        let mut escaping = overlay();
+        escaping.include_roots = vec!["../escape".into()];
+        assert!(escaping.validate().is_err());
+
+        let mut absolute = overlay();
+        absolute.library_roots = vec!["/usr/lib".into()];
+        assert!(absolute.validate().is_err());
+    }
+
+    #[test]
+    fn overlay_libc_version_requires_a_family() {
+        let mut overlay = overlay();
+        overlay.libc_family = None;
+        assert!(overlay.validate().is_err());
+    }
+
+    #[test]
+    fn overlay_rejects_profile_or_triple_mismatch() {
+        let mut wrong_profile = overlay();
+        wrong_profile.profile_id = "linux-x86_64-gnu-glibc217".into();
+        assert!(wrong_profile.verify_compatible(&profile()).is_err());
+
+        let mut wrong_triple = overlay();
+        wrong_triple.target_triple = "x86_64-unknown-linux-gnu".into();
+        assert!(wrong_triple.verify_compatible(&profile()).is_err());
+    }
+
+    #[test]
+    fn overlay_rejects_baseline_promotion() {
+        // A newer glibc than the base profile promises raises the baseline.
+        let mut newer_libc = overlay();
+        newer_libc.libc_version = Some("2.28".into());
+        assert!(newer_libc.validate().is_ok());
+        assert!(newer_libc.verify_compatible(&profile()).is_err());
+
+        // A newer minimum OS likewise promotes the baseline.
+        let mut newer_os = overlay();
+        newer_os.minimum_os = Some("3.10.0".into());
+        assert!(newer_os.verify_compatible(&profile()).is_err());
+
+        // An equal-or-older baseline is accepted.
+        let mut older = overlay();
+        older.libc_version = Some("2.12".into());
+        older.minimum_os = Some("2.6.18".into());
+        assert!(older.verify_compatible(&profile()).is_ok());
+    }
+
+    #[test]
+    fn version_le_compares_components_numerically() {
+        assert!(version_le("2.17", "2.17"));
+        assert!(version_le("2.9", "2.17"));
+        assert!(!version_le("2.17", "2.9"));
+        assert!(version_le("2.6.18", "2.6.32"));
+        assert!(!version_le("3.10.0", "2.6.32"));
+        assert!(version_le("2.17", "2.17.0"));
     }
 
     fn contract() -> RuntimeContract {
