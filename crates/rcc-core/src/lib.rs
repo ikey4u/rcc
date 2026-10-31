@@ -4,6 +4,7 @@ pub mod cross_bin;
 pub mod digest;
 pub mod environment;
 pub mod layout;
+pub mod overlay;
 pub mod pack;
 pub mod policy;
 pub mod registry;
@@ -20,6 +21,7 @@ pub use environment::{
     EnvironmentManifest, EnvironmentRole, EnvironmentTool,
     CMAKE_TOOLCHAIN_FILE_NAME, ENVIRONMENT_SCHEMA_VERSION,
 };
+pub use overlay::OverlayRegistration;
 pub use schema::{
     launcher_name, DriverKind, OverlayManifest, PackManifest, Profile,
     RuntimeContract, RuntimeOwnership, ToolKind, ViewManifest,
