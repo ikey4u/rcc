@@ -44,32 +44,16 @@ Design: [docs/design/ARCH.md](docs/design/ARCH.md). Per-OS matrices:
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    invoke["cc · cxx · ld.lld / ld64.lld / lld-link · ar · ranlib<br/>(hardlink aliases of rcc)"]
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="RCC architecture: tool aliases dispatch into the single static rcc controller, which drives a statically linked Clang/LLD/llvm-ar engine against an immutable content-addressed view materialized from the embedded pack, fed by the profile registry and sysroot overlays, discovering external SDKs at runtime, and emitting a verified ELF/PE/Mach-O artifact without any system toolchain." width="820">
+</p>
 
-    subgraph controller["rcc — single static multicall binary"]
-        dispatch["dispatch + hermetic driver policy"]
-        engine["statically linked engine<br/>Clang · LLD · llvm-ar (LLVM 22.1.8)"]
-        dispatch --- engine
-    end
-
-    profiles["profile registry<br/>target + host profiles<br/>(triple · sysroot · contract)"]
-    overlays["sysroot overlays<br/>(optional vendor roots)"]
-    pack[("embedded .rccpack<br/>headers · sysroots · compiler-rt")]
-    cache[("content-addressed cache<br/>immutable read-only view")]
-    sdk["external SDKs<br/>Apple · Windows / MSVC<br/>(discovered, never packed)"]
-    out["verified artifact<br/>ELF · PE/COFF · Mach-O"]
-
-    invoke --> dispatch
-    profiles --> dispatch
-    pack -->|SHA-256 verify| cache
-    overlays --> cache
-    dispatch -->|first-use materialization| cache
-    cache --> dispatch
-    sdk -.->|runtime discovery| dispatch
-    dispatch ==>|no system clang / gcc / ld| out
-```
+A single `rcc` controller dispatches every tool alias through a hermetic driver
+policy into the statically linked Clang/LLD/llvm-ar engine. The embedded
+`.rccpack` is SHA-256 verified and materialized once into an immutable,
+content-addressed view; the profile registry and any registered sysroot
+overlays bind the target, and external SDKs are discovered at runtime. The
+sanctioned path never touches a system `clang`, `gcc`, or `ld`.
 
 ## Controllers and targets
 
