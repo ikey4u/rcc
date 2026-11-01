@@ -383,7 +383,8 @@ fn discover_installed_msvc_toolset(arch: &str) -> Result<Option<PathBuf>> {
     Ok(newest_msvc_toolset(
         windows_vs_msvc_roots()
             .into_iter()
-            .flat_map(|root| msvc_toolset_versions(&root, arch)),
+            .flat_map(|root| msvc_toolset_versions(&root, arch))
+            .collect(),
     ))
 }
 

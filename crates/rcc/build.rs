@@ -23,6 +23,16 @@ fn main() {
         "RCC_ENGINE_BUILD_ID",
         "RCC_MACOS_DEPLOYMENT_TARGET",
         "SDKROOT",
+        // Cross-build overrides (Linux host -> macOS/Windows target). When a
+        // target llvm-config cannot run on the build host, RCC_LLVM_CONFIG
+        // names a host-runnable one built from the same pinned LLVM; the
+        // library files are still taken from RCC_LLVM_BUILD_DIR/lib.
+        // RCC_LLVM_SYSTEM_LIBS supplies the target's --system-libs tokens
+        // (which differ from the host's), and RCC_ENGINE_EXTRA_CXXFLAGS adds
+        // flags to the native-entry compile (e.g. the Apple SDK libc++ path).
+        "RCC_LLVM_CONFIG",
+        "RCC_LLVM_SYSTEM_LIBS",
+        "RCC_ENGINE_EXTRA_CXXFLAGS",
     ] {
         println!("cargo:rerun-if-env-changed={name}");
     }
@@ -315,6 +325,14 @@ fn compile_native_entries(
         for directory in &include_directories {
             command.arg("-I").arg(directory);
         }
+        // Cross builds add target-specific flags here, e.g. a Linux-hosted
+        // Apple-target clang needs the SDK's self-contained libc++ instead of
+        // its own bundled headers (-nostdinc++ -isystem <SDK>/usr/include/c++/v1).
+        if let Some(extra) = env::var_os("RCC_ENGINE_EXTRA_CXXFLAGS") {
+            for token in extra.to_string_lossy().split_whitespace() {
+                command.arg(token);
+            }
+        }
         run_command(command, "compile static LLVM entry source");
         objects.push(object);
     }
@@ -338,7 +356,13 @@ fn emit_static_links(
     host: EngineHost,
 ) {
     require_file(native_archive, "native entry archive");
-    let llvm_config = llvm_tool(build, "llvm-config");
+    // A cross build's own llvm-config is a target binary that cannot run on the
+    // build host; RCC_LLVM_CONFIG names a host-runnable one from the same
+    // pinned LLVM. Library files are still read from RCC_LLVM_BUILD_DIR/lib.
+    let llvm_config = match env::var_os("RCC_LLVM_CONFIG") {
+        Some(path) => PathBuf::from(path),
+        None => llvm_tool(build, "llvm-config"),
+    };
     require_file(&llvm_config, "custom llvm-config");
     let library_directory = build.join("lib");
     let version = command_output(
@@ -447,12 +471,19 @@ fn emit_static_links(
     if matches!(host, EngineHost::Linux) {
         println!("cargo:rustc-link-arg=-Wl,--end-group");
     }
-    let mut command = Command::new(&llvm_config);
-    command
-        .args(["--link-static", "--system-libs"])
-        .args(&components);
-    let system_libraries =
-        command_output(&mut command, "query custom LLVM system libraries");
+    // The target's --system-libs differ from the host's (e.g. macOS needs only
+    // -lm where Linux adds -lrt/-ldl/-lpthread), and a host llvm-config would
+    // report the host set. RCC_LLVM_SYSTEM_LIBS supplies the target tokens.
+    let system_libraries = match env::var("RCC_LLVM_SYSTEM_LIBS") {
+        Ok(tokens) => tokens,
+        Err(_) => {
+            let mut command = Command::new(&llvm_config);
+            command
+                .args(["--link-static", "--system-libs"])
+                .args(&components);
+            command_output(&mut command, "query custom LLVM system libraries")
+        }
+    };
     emit_link_tokens(&system_libraries, &library_directory, false);
     match host {
         EngineHost::Macos => {

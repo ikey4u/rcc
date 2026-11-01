@@ -498,15 +498,26 @@ impl ViewMaterializer {
         view_manifest: &ViewManifest,
         target: &Path,
     ) -> Result<MaterializedView> {
+        // A view only needs the requested profile's sysroot plus the shared
+        // payload, so extract and verify just those files. This keeps a view
+        // from unpacking a foreign profile's sysroot, whose case-only filename
+        // variants collide on case-insensitive filesystems (APFS, NTFS).
+        let profile_id = view_manifest.profile.profile_id.clone();
+        let keep = move |path: &str| {
+            crate::pack::file_belongs_to_profile(path, &profile_id)
+        };
+        let keep_ref: crate::pack::FileFilter<'_> = &keep;
+
         if path_exists(target) {
             match validate_materialized_view(
                 target,
                 &pack.manifest,
                 controller,
                 view_manifest,
+                Some(keep_ref),
             ) {
                 Ok(()) => {
-                    seal_view(target, &pack.manifest)?;
+                    seal_view(target, &pack.manifest, Some(keep_ref))?;
                     return Ok(materialized_result(target, pack, true));
                 }
                 Err(error) => self.quarantine(target).with_context(|| {
@@ -518,7 +529,7 @@ impl ViewMaterializer {
         let temporary =
             create_unique_dir(&self.cache_root.join("tmp"), ".view")?;
         let mut cleanup = DirectoryCleanup::new(temporary.clone());
-        let extracted = extract_pack_into(pack_path, &temporary)?;
+        let extracted = extract_pack_into(pack_path, &temporary, Some(keep_ref))?;
         ensure!(
             extracted.sha256 == pack.sha256
                 && extracted.manifest == pack.manifest,
@@ -533,12 +544,13 @@ impl ViewMaterializer {
             &pack.manifest,
             controller,
             view_manifest,
+            Some(keep_ref),
         )?;
         // Seal every member before publication. macOS refuses to rename a
         // directory whose root itself is mode 0555, so the root stays writable
         // only until the atomic rename below. Its final read-only mode is the
         // readiness marker checked by every multicall alias before dispatch.
-        seal_view_contents(&temporary, &pack.manifest)?;
+        seal_view_contents(&temporary, &pack.manifest, Some(keep_ref))?;
 
         let parent = target.parent().context("view target has no parent")?;
         fs::create_dir_all(parent).with_context(|| {
@@ -566,6 +578,7 @@ impl ViewMaterializer {
             &pack.manifest,
             controller,
             view_manifest,
+            Some(keep_ref),
         )?;
         Ok(materialized_result(target, pack, false))
     }
@@ -894,6 +907,7 @@ fn validate_materialized_view(
     pack_manifest: &crate::schema::PackManifest,
     controller: &ControllerExecutable,
     expected_view: &ViewManifest,
+    keep: Option<crate::pack::FileFilter<'_>>,
 ) -> Result<()> {
     let mut extra_files = vec![
         VIEW_MANIFEST_FILE.to_owned(),
@@ -907,6 +921,7 @@ fn validate_materialized_view(
         pack_manifest,
         actual_root,
         &extra_file_refs,
+        keep,
     )?;
     let manifest_path = actual_root.join(VIEW_MANIFEST_FILE);
     let bytes = fs::read(&manifest_path).with_context(|| {
@@ -934,7 +949,9 @@ fn validate_materialized_view(
         "materialized CMake toolchain does not match the view"
     );
 
-    for file in pack_manifest.files.iter().filter(|file| file.executable) {
+    for file in pack_manifest.files.iter().filter(|file| {
+        file.executable && keep.map_or(true, |k| k(&file.path))
+    }) {
         let path = actual_root.join(&file.path);
         let digest = file_sha256(&path)?;
         ensure!(
@@ -1013,16 +1030,21 @@ fn map_declared_path(
 fn seal_view(
     root: &Path,
     pack_manifest: &crate::schema::PackManifest,
+    keep: Option<crate::pack::FileFilter<'_>>,
 ) -> Result<()> {
-    seal_view_contents(root, pack_manifest)?;
+    seal_view_contents(root, pack_manifest, keep)?;
     set_directory_read_only(root)
 }
 
 fn seal_view_contents(
     root: &Path,
     pack_manifest: &crate::schema::PackManifest,
+    keep: Option<crate::pack::FileFilter<'_>>,
 ) -> Result<()> {
     for file in &pack_manifest.files {
+        if !keep.map_or(true, |k| k(&file.path)) {
+            continue;
+        }
         set_file_read_only(&root.join(&file.path), file.executable)?;
     }
     set_file_read_only(&root.join(VIEW_MANIFEST_FILE), false)?;

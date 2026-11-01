@@ -718,10 +718,15 @@ fn doctor_inner(
     let view = materialize_profile(options, profile, runtime_contract)?;
     let extras = generated_view_files(&view.manifest);
     let extra_refs = extras.iter().map(String::as_str).collect::<Vec<_>>();
+    let doctor_profile_id = view.manifest.profile.profile_id.clone();
+    let doctor_keep = |path: &str| {
+        rcc_core::pack::file_belongs_to_profile(path, &doctor_profile_id)
+    };
     pack::verify_directory_with_extras(
         &view.pack.manifest,
         &view.materialized.root,
         &extra_refs,
+        Some(&doctor_keep),
     )
     .context("doctor found invalid toolchain view contents")?;
     let mut launchers = BTreeMap::new();
@@ -894,10 +899,15 @@ fn verify_cached_view(cache_root: &Path, manifest_path: &Path) -> Result<()> {
     }
     let extras = generated_view_files(&manifest);
     let extra_refs = extras.iter().map(String::as_str).collect::<Vec<_>>();
+    let cached_profile_id = manifest.profile.profile_id.clone();
+    let cached_keep = |path: &str| {
+        rcc_core::pack::file_belongs_to_profile(path, &cached_profile_id)
+    };
     pack::verify_directory_with_extras(
         &pack.manifest,
         &actual_root,
         &extra_refs,
+        Some(&cached_keep),
     )
     .context("cached view contents do not match their pack")?;
     let controller = cache_root

@@ -381,7 +381,7 @@ pub fn read_pack_file_bytes(bytes: &[u8], path: &str) -> Result<Vec<u8>> {
 /// Decompresses every file and verifies every uncompressed digest.
 pub fn verify_pack(path: &Path) -> Result<PackInspection> {
     let opened = open_pack(path)?;
-    process_files(opened, None)
+    process_files(opened, None, None)
         .with_context(|| format!("failed to verify pack {}", path.display()))?;
     inspect_pack(path)
 }
@@ -402,7 +402,7 @@ pub fn extract_pack(path: &Path, destination: &Path) -> Result<PackInspection> {
     })?;
     let temporary = create_unique_dir(parent, ".rccpack-extract")?;
     let mut guard = DirectoryCleanup::new(temporary.clone());
-    let inspection = extract_pack_into(path, &temporary)?;
+    let inspection = extract_pack_into(path, &temporary, None)?;
     ensure!(
         !destination.exists(),
         "extract destination appeared during extraction: {}",
@@ -419,10 +419,13 @@ pub fn extract_pack(path: &Path, destination: &Path) -> Result<PackInspection> {
     Ok(inspection)
 }
 
-/// Extracts into an existing, empty directory owned by the caller.
+/// Extracts into an existing, empty directory owned by the caller. `keep`
+/// restricts extraction to the files a per-profile view needs (`None` extracts
+/// the whole pack).
 pub(crate) fn extract_pack_into(
     path: &Path,
     destination: &Path,
+    keep: Option<FileFilter<'_>>,
 ) -> Result<PackInspection> {
     ensure!(
         destination.is_dir(),
@@ -445,10 +448,10 @@ pub(crate) fn extract_pack_into(
     let manifest = opened.manifest.clone();
     let pack_size = opened.pack_size;
     let data_offset = opened.data_offset;
-    process_files(opened, Some(destination)).with_context(|| {
+    process_files(opened, Some(destination), keep).with_context(|| {
         format!("failed to extract pack {}", path.display())
     })?;
-    verify_directory_metadata_with_extras(&manifest, destination, &[])?;
+    verify_directory_metadata_with_extras(&manifest, destination, &[], keep)?;
     Ok(PackInspection {
         manifest,
         pack_size,
@@ -457,18 +460,38 @@ pub(crate) fn extract_pack_into(
     })
 }
 
+/// A payload-path filter: returns whether a pack file path participates in the
+/// view being extracted or verified. `None` means every file participates.
+pub type FileFilter<'a> = &'a (dyn Fn(&str) -> bool + 'a);
+
+/// Whether a pack file path belongs to the per-profile view for `profile_id`.
+///
+/// Shared payload (anything not under `sysroots/`) always participates; a
+/// `sysroots/<id>/...` path participates only when `<id>` equals `profile_id`.
+/// A pack can carry several profiles' sysroots, so materializing a view for one
+/// profile must not extract a foreign profile's sysroot — notably because the
+/// Linux kernel headers carry case-only filename variants (`xt_CONNMARK.h` vs
+/// `xt_connmark.h`) that collide on case-insensitive filesystems (APFS, NTFS).
+pub fn file_belongs_to_profile(path: &str, profile_id: &str) -> bool {
+    match path.strip_prefix("sysroots/") {
+        Some(rest) => rest.split('/').next() == Some(profile_id),
+        None => true,
+    }
+}
+
 /// Verifies an extracted tree against a pack manifest and rejects unexpected
 /// files, directories, symlinks, and special files.
 pub fn verify_directory(manifest: &PackManifest, root: &Path) -> Result<()> {
-    verify_directory_with_extras(manifest, root, &[])
+    verify_directory_with_extras(manifest, root, &[], None)
 }
 
 pub fn verify_directory_with_extras(
     manifest: &PackManifest,
     root: &Path,
     extra_files: &[&str],
+    keep: Option<FileFilter<'_>>,
 ) -> Result<()> {
-    verify_directory_contents(manifest, root, extra_files, true)
+    verify_directory_contents(manifest, root, extra_files, true, keep)
 }
 
 /// Verify the exact tree, file types, sizes, executable modes, and manifest
@@ -479,8 +502,9 @@ pub fn verify_directory_metadata_with_extras(
     manifest: &PackManifest,
     root: &Path,
     extra_files: &[&str],
+    keep: Option<FileFilter<'_>>,
 ) -> Result<()> {
-    verify_directory_contents(manifest, root, extra_files, false)
+    verify_directory_contents(manifest, root, extra_files, false, keep)
 }
 
 fn verify_directory_contents(
@@ -488,6 +512,7 @@ fn verify_directory_contents(
     root: &Path,
     extra_files: &[&str],
     verify_digests: bool,
+    keep: Option<FileFilter<'_>>,
 ) -> Result<()> {
     ensure!(
         root.is_dir(),
@@ -499,6 +524,7 @@ fn verify_directory_contents(
     let mut expected_files: BTreeSet<String> = manifest
         .files
         .iter()
+        .filter(|file| keep.map_or(true, |k| k(&file.path)))
         .map(|file| file.path.clone())
         .collect();
     for path in extra_files {
@@ -561,6 +587,9 @@ fn verify_directory_contents(
             MAX_PACK_FILE_SIZE,
             file.path
         );
+        if !keep.map_or(true, |k| k(&file.path)) {
+            continue;
+        }
         let path = root.join(path_from_archive(&file.path));
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("view is missing {}", file.path))?;
@@ -699,6 +728,7 @@ fn open_pack(path: &Path) -> Result<OpenedPack> {
 fn process_files(
     mut opened: OpenedPack,
     destination: Option<&Path>,
+    keep: Option<FileFilter<'_>>,
 ) -> Result<()> {
     opened
         .file
@@ -707,7 +737,12 @@ fn process_files(
     let mut reader = BufReader::new(opened.file);
 
     for entry in &opened.manifest.files {
-        let mut output = if let Some(root) = destination {
+        // Non-kept files are still read and digest-verified below (the payload
+        // blocks are concatenated, so the reader must advance past them), but
+        // they are not written into a per-profile view.
+        let want_write =
+            destination.is_some() && keep.map_or(true, |k| k(&entry.path));
+        let mut output = if let (Some(root), true) = (destination, want_write) {
             let path = root.join(path_from_archive(&entry.path));
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).with_context(|| {
@@ -772,7 +807,7 @@ fn process_files(
                 .with_context(|| format!("failed to sync {}", entry.path))?;
         }
         drop(output);
-        if let Some(root) = destination {
+        if let (Some(root), true) = (destination, want_write) {
             set_executable(
                 &root.join(path_from_archive(&entry.path)),
                 entry.executable,
@@ -1265,6 +1300,44 @@ mod tests {
         let extracted = temporary.path().join("extracted");
         extract_pack(&pack, &extracted).unwrap();
         fs::write(extracted.join("unexpected"), b"no").unwrap();
+        assert!(verify_directory(&inspection.manifest, &extracted).is_err());
+    }
+
+    #[test]
+    fn per_profile_extraction_skips_foreign_sysroots() {
+        // A pack carrying two profiles' sysroots plus shared payload must
+        // extract only the requested profile's sysroot (the mechanism that
+        // keeps case-only filename variants in a foreign sysroot from
+        // colliding on case-insensitive filesystems).
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("source");
+        fs::create_dir_all(source.join("sysroots/profile-a/include")).unwrap();
+        fs::create_dir_all(source.join("sysroots/profile-b/include")).unwrap();
+        fs::create_dir_all(source.join("lib")).unwrap();
+        fs::write(source.join("sysroots/profile-a/include/a.h"), b"a").unwrap();
+        fs::write(source.join("sysroots/profile-b/include/b.h"), b"b").unwrap();
+        fs::write(source.join("lib/shared.h"), b"shared").unwrap();
+
+        let pack = temporary.path().join("multi.rccpack");
+        let inspection = create_pack(&source, &pack, &options()).unwrap();
+
+        let extracted = temporary.path().join("view-a");
+        fs::create_dir(&extracted).unwrap();
+        let keep = |path: &str| file_belongs_to_profile(path, "profile-a");
+        extract_pack_into(&pack, &extracted, Some(&keep)).unwrap();
+
+        assert!(extracted.join("sysroots/profile-a/include/a.h").is_file());
+        assert!(extracted.join("lib/shared.h").is_file());
+        assert!(!extracted.join("sysroots/profile-b").exists());
+        // The subset view verifies against the full manifest with the filter.
+        verify_directory_with_extras(
+            &inspection.manifest,
+            &extracted,
+            &[],
+            Some(&keep),
+        )
+        .unwrap();
+        // Without the filter, the subset view looks incomplete.
         assert!(verify_directory(&inspection.manifest, &extracted).is_err());
     }
 }
