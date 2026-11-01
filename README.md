@@ -241,5 +241,6 @@ Linux guest VMs (Homebrew `qemu-system` + Lima) are set up on macOS only.
   `--allow-external-pack`.
 - No release code signing, notarization, or generated SBOM yet.
 
+Release history: [CHANGELOG.md](CHANGELOG.md).
 Third-party notices: [docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).
 License: Apache-2.0.
