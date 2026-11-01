@@ -38,7 +38,7 @@ items in ARCH §15 are already checked off.
 
 ARCH §9.4, §7.1, the last Phase 2 item. The overlay provider is **implemented
 and unit-tested**: increments 1–5 are all landed, and increment 6 (real
-compile/link acceptance) has passed on Linux. Windows / macOS cross-acceptance
+compile/link acceptance) has passed on Linux and Windows. macOS cross-acceptance
 is in progress (cross-compiled on this machine, run on the remote MCP
 machines). Target behavior:
 
@@ -77,15 +77,17 @@ SDK → no host fallback. The implementation is split into reviewable increments
 5. **Output / CLI** (done): `rcc sysroot register-overlay` / `sysroot list` /
    `sysroot digest` (`crates/rcc/src/cli.rs`). Exposed together with
    increments 3–4.
-6. **Acceptance** (Linux passed / Windows·macOS in progress): compile/run/verify
-   of an overlay fixture. Linux `linux-x86_64-musl-static` has passed — without
-   a registered overlay the compile fails as expected (missing `vendor.h`);
-   after registration the compile succeeds, `rcc verify` passes, and running
-   the artifact prints `vendor_answer=42` (exit code 0). Windows
-   `windows-x86_64-gnu` (mingw-w64, gcc-style) is cross-compiled here and run on
-   the MCP Windows machine; macOS is pending. Negative tests (overlay raising
-   the baseline, path escape, unregistered overlay) are covered by the
-   schema/overlay unit tests.
+6. **Acceptance** (Linux and Windows passed / macOS in progress):
+   compile/run/verify of an overlay fixture. Linux `linux-x86_64-musl-static`
+   has passed — without a registered overlay the compile fails as expected
+   (missing `vendor.h`); after registration the compile succeeds, `rcc verify`
+   passes, and running the artifact prints `vendor_answer=42` (exit code 0).
+   Windows `windows-x86_64-gnu` (mingw-w64, gcc-style) has passed the same way:
+   cross-compiled on this Linux machine to a PE32+ x86-64 binary (`rcc verify`
+   valid), transferred to the MCP Windows 10 machine, and run there —
+   `vendor_answer=42`, exit code 0. macOS `macos-aarch64` is pending Apple SDK
+   staging. Negative tests (overlay raising the baseline, path escape,
+   unregistered overlay) are covered by the schema/overlay unit tests.
 
 Frozen item ARCH §19 #10 (overlay manifest schema and ABI-baseline promotion
 policy) was settled with increment 1.
