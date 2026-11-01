@@ -19,6 +19,23 @@ All notable changes to RCC are documented in this file. The format is based on
   sysroot → external managed SDK, with no host fallback.
 - Overlay manifest schema (`OverlayManifest`) with validation that rejects
   raising the ABI baseline and rejects unsafe paths.
+- **Per-profile view materialization.** A view now extracts only the requested
+  profile's sysroot plus the shared payload, instead of the whole pack. This
+  lets the macOS and Windows controllers materialize views on their default
+  case-insensitive filesystems (APFS, NTFS): whole-pack extraction previously
+  failed because the packed Linux kernel headers carry case-only filename
+  variants (`xt_CONNMARK.h` vs `xt_connmark.h`) that cannot coexist there.
+- **Linux-hosted cross builds of the macOS and Windows controllers.** The
+  macOS (`aarch64-apple-darwin`) and Windows (`x86_64-pc-windows-msvc`)
+  controllers can now be built on a Linux host — the patched LLVM engine is
+  cross-compiled with clang/clang-cl + ld64.lld/lld-link against a staged Apple
+  SDK and a Windows SDK/MSVC toolset. `build.rs` gained opt-in cross hooks
+  (`RCC_LLVM_CONFIG`, `RCC_LLVM_SYSTEM_LIBS`, `RCC_ENGINE_EXTRA_CXXFLAGS`).
+
+### Fixed
+
+- Windows MSVC-toolset discovery (`provider.rs`) had a latent type error that
+  only compiled when targeting Windows; it now builds.
 
 ### Verified
 
@@ -29,6 +46,8 @@ All notable changes to RCC are documented in this file. The format is based on
   compile fails without the overlay (missing header) and succeeds after
   registration, the artifact passes `rcc verify`, and running it prints
   `vendor_answer=42` (exit 0).
+- The Linux-cross-built macOS and Windows controllers run on their native hosts
+  and pass the full overlay acceptance on default (case-insensitive) APFS/NTFS.
 
 ### Documentation
 
