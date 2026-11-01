@@ -34,13 +34,13 @@ items in ARCH §15 are already checked off.
 
 ## 2. Remaining work and priorities
 
-### P0 — sysroot overlay manifest and derived profiles (in acceptance)
+### P0 — sysroot overlay manifest and derived profiles (complete)
 
-ARCH §9.4, §7.1, the last Phase 2 item. The overlay provider is **implemented
-and unit-tested**: increments 1–5 are all landed, and increment 6 (real
-compile/link acceptance) has passed on Linux and Windows. macOS cross-acceptance
-is in progress (cross-compiled on this machine, run on the remote MCP
-machines). Target behavior:
+ARCH §9.4, §7.1, the last Phase 2 item. The overlay provider is **implemented,
+unit-tested, and cross-accepted on all three platforms**: increments 1–6 are
+all landed. Increment 6 (real compile/link acceptance) has passed on Linux,
+Windows, and macOS — each artifact cross-compiled on this Linux machine and run
+on the matching native host. Target behavior:
 
 ```
 rcc sysroot register-overlay \
@@ -77,17 +77,21 @@ SDK → no host fallback. The implementation is split into reviewable increments
 5. **Output / CLI** (done): `rcc sysroot register-overlay` / `sysroot list` /
    `sysroot digest` (`crates/rcc/src/cli.rs`). Exposed together with
    increments 3–4.
-6. **Acceptance** (Linux and Windows passed / macOS in progress):
-   compile/run/verify of an overlay fixture. Linux `linux-x86_64-musl-static`
-   has passed — without a registered overlay the compile fails as expected
-   (missing `vendor.h`); after registration the compile succeeds, `rcc verify`
-   passes, and running the artifact prints `vendor_answer=42` (exit code 0).
-   Windows `windows-x86_64-gnu` (mingw-w64, gcc-style) has passed the same way:
-   cross-compiled on this Linux machine to a PE32+ x86-64 binary (`rcc verify`
-   valid), transferred to the MCP Windows 10 machine, and run there —
-   `vendor_answer=42`, exit code 0. macOS `macos-aarch64` is pending Apple SDK
-   staging. Negative tests (overlay raising the baseline, path escape,
-   unregistered overlay) are covered by the schema/overlay unit tests.
+6. **Acceptance** (passed on Linux, Windows, and macOS): compile/run/verify of
+   an overlay fixture. On every platform, without a registered overlay the
+   compile fails as expected (missing `vendor.h`); after registration the
+   compile succeeds, `rcc verify` passes, and running the artifact prints
+   `vendor_answer=42` (exit code 0).
+   - Linux `linux-x86_64-musl-static`: compiled and run natively here.
+   - Windows `windows-x86_64-gnu` (mingw-w64, gcc-style): cross-compiled on this
+     Linux machine to a PE32+ x86-64 binary (`rcc verify` valid), transferred to
+     the MCP Windows 10 machine, and run there.
+   - macOS `macos-aarch64` (clang, gcc-style): cross-compiled on this Linux
+     machine against a staged Apple SDK to a Mach-O arm64 binary (`rcc verify`
+     valid), transferred to the MCP macOS machine, and run there.
+
+   Negative tests (overlay raising the baseline, path escape, unregistered
+   overlay) are covered by the schema/overlay unit tests.
 
 Frozen item ARCH §19 #10 (overlay manifest schema and ABI-baseline promotion
 policy) was settled with increment 1.
